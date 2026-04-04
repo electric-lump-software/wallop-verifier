@@ -1,0 +1,27 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build and Release WASM
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install wasm-pack
+      - run: wasm-pack build --target web
+      - run: tar czf wallop-rs-wasm-${{ github.ref_name }}.tar.gz -C pkg .
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: wallop-rs-wasm-${{ github.ref_name }}.tar.gz
