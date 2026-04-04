@@ -60,3 +60,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install wasm-pack
       - run: wasm-pack build --target web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm-pkg
+          path: pkg/
