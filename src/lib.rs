@@ -1,10 +1,120 @@
 pub mod protocol;
 mod wasm;
 
+pub use protocol::crypto::{key_id, verify_receipt};
+pub use protocol::merkle::{anchor_root, merkle_root};
+pub use protocol::receipts::{
+    ExecutionReceiptV1, LockReceiptV2, build_execution_receipt_payload, build_receipt_payload,
+    lock_receipt_hash, receipt_schema_version,
+};
 pub use protocol::{compute_seed, compute_seed_drand_only, entry_hash};
 
 // Re-export fair_pick_rs types for convenience
 pub use fair_pick_rs::{Entry, Winner, draw};
+
+/// Full v2 verification pipeline.
+///
+/// Chains: sig checks → linkage → entry_hash → seed → draw → compare.
+/// Returns Ok(true) if all checks pass, Ok(false) if any check fails,
+/// Err with reason if inputs are structurally invalid (unparseable JSON).
+#[allow(clippy::too_many_arguments)]
+pub fn verify_full(
+    lock_receipt_jcs: &str,
+    lock_signature: &[u8; 64],
+    operator_public_key: &[u8; 32],
+    execution_receipt_jcs: &str,
+    execution_signature: &[u8; 64],
+    infrastructure_public_key: &[u8; 32],
+    entries: &[Entry],
+    count: u32,
+) -> Result<bool, String> {
+    // Step 1: Verify lock receipt signature
+    if !protocol::crypto::verify_receipt(
+        lock_receipt_jcs.as_bytes(),
+        lock_signature,
+        operator_public_key,
+    ) {
+        return Ok(false);
+    }
+
+    // Step 2: Verify execution receipt signature
+    if !protocol::crypto::verify_receipt(
+        execution_receipt_jcs.as_bytes(),
+        execution_signature,
+        infrastructure_public_key,
+    ) {
+        return Ok(false);
+    }
+
+    // Step 3: Check lock_receipt_hash linkage
+    let exec_parsed: serde_json::Value = serde_json::from_str(execution_receipt_jcs)
+        .map_err(|e| format!("invalid execution receipt JSON: {}", e))?;
+
+    let expected_lock_hash = protocol::receipts::lock_receipt_hash(lock_receipt_jcs);
+    let actual_lock_hash = exec_parsed
+        .get("lock_receipt_hash")
+        .and_then(|v| v.as_str())
+        .ok_or("missing lock_receipt_hash in execution receipt")?;
+
+    if actual_lock_hash != expected_lock_hash {
+        return Ok(false);
+    }
+
+    // Step 4: Extract fields from execution receipt
+    let exec_entry_hash = exec_parsed
+        .get("entry_hash")
+        .and_then(|v| v.as_str())
+        .ok_or("missing entry_hash in execution receipt")?;
+
+    let drand_randomness = exec_parsed
+        .get("drand_randomness")
+        .and_then(|v| v.as_str())
+        .ok_or("missing drand_randomness in execution receipt")?;
+
+    let weather_value = exec_parsed.get("weather_value").and_then(|v| v.as_str());
+
+    let exec_seed = exec_parsed
+        .get("seed")
+        .and_then(|v| v.as_str())
+        .ok_or("missing seed in execution receipt")?;
+
+    let exec_results = exec_parsed
+        .get("results")
+        .and_then(|v| v.as_array())
+        .ok_or("missing results in execution receipt")?;
+
+    // Step 5: Verify entry_hash
+    let (computed_entry_hash, _) = entry_hash(entries);
+    if computed_entry_hash != exec_entry_hash {
+        return Ok(false);
+    }
+
+    // Step 6: Recompute seed
+    let (computed_seed, _) = match weather_value {
+        Some(w) => compute_seed(&computed_entry_hash, drand_randomness, w),
+        None => compute_seed_drand_only(&computed_entry_hash, drand_randomness),
+    };
+
+    if hex::encode(computed_seed) != exec_seed {
+        return Ok(false);
+    }
+
+    // Step 7: Recompute draw
+    let computed_results =
+        draw(entries, &computed_seed, count).map_err(|e| format!("draw failed: {}", e))?;
+
+    let computed_ids: Vec<&str> = computed_results
+        .iter()
+        .map(|w| w.entry_id.as_str())
+        .collect();
+    let expected_ids: Vec<&str> = exec_results.iter().filter_map(|v| v.as_str()).collect();
+
+    if computed_ids != expected_ids {
+        return Ok(false);
+    }
+
+    Ok(true)
+}
 
 /// Verify a draw result by recomputing the full pipeline.
 ///
