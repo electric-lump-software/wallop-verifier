@@ -83,6 +83,12 @@ pub fn verify_full(
         .and_then(|v| v.as_array())
         .ok_or("missing results in execution receipt")?;
 
+    let expected_ids: Vec<&str> = exec_results
+        .iter()
+        .enumerate()
+        .map(|(i, v)| v.as_str().ok_or(format!("results[{}] is not a string", i)))
+        .collect::<Result<Vec<&str>, String>>()?;
+
     // Step 5: Verify entry_hash
     let (computed_entry_hash, _) = entry_hash(entries);
     if computed_entry_hash != exec_entry_hash {
@@ -107,7 +113,6 @@ pub fn verify_full(
         .iter()
         .map(|w| w.entry_id.as_str())
         .collect();
-    let expected_ids: Vec<&str> = exec_results.iter().filter_map(|v| v.as_str()).collect();
 
     if computed_ids != expected_ids {
         return Ok(false);
@@ -143,6 +148,7 @@ pub fn verify(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
 
     #[test]
     fn verify_returns_true_for_matching_results() {
@@ -228,5 +234,58 @@ mod tests {
         let expected = fair_pick_rs::draw(&entries, &seed, 2).unwrap();
 
         assert!(verify(&entries, drand, None, 2, &expected));
+    }
+
+    fn test_signing_key() -> SigningKey {
+        let secret_bytes: [u8; 32] =
+            hex::decode("9D61B19DEFFD5A60BA844AF492EC2CC44449C5697B326919703BAC031CAE7F60")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        SigningKey::from_bytes(&secret_bytes)
+    }
+
+    #[test]
+    fn verify_full_rejects_non_string_results() {
+        let sk = test_signing_key();
+        let pk: [u8; 32] = sk.verifying_key().to_bytes();
+
+        // Build a lock receipt and sign it
+        let lock_jcs = r#"{"schema_version":"2","sequence":1}"#;
+        let lock_sig: [u8; 64] = sk.sign(lock_jcs.as_bytes()).to_bytes();
+
+        // Compute lock_receipt_hash
+        let lock_hash = protocol::receipts::lock_receipt_hash(lock_jcs);
+
+        // Build execution receipt with a null in results
+        let exec_jcs = serde_json::json!({
+            "drand_randomness": "aa",
+            "entry_hash": "bb",
+            "lock_receipt_hash": lock_hash,
+            "results": ["ticket-47", null, "ticket-49"],
+            "seed": "cc",
+            "weather_value": "1013"
+        })
+        .to_string();
+        let exec_sig: [u8; 64] = sk.sign(exec_jcs.as_bytes()).to_bytes();
+
+        let entries = vec![Entry {
+            id: "x".into(),
+            weight: 1,
+        }];
+
+        let result = verify_full(
+            lock_jcs, &lock_sig, &pk, &exec_jcs, &exec_sig, &pk, &entries, 1,
+        );
+
+        assert!(
+            result.is_err(),
+            "expected Err for non-string results element, got {:?}",
+            result
+        );
+        assert!(
+            result.unwrap_err().contains("not a string"),
+            "error should mention non-string element"
+        );
     }
 }
