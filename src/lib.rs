@@ -14,7 +14,8 @@ pub use fair_pick_rs::{Entry, Winner, draw};
 
 /// Full v2 verification pipeline.
 ///
-/// Chains: sig checks → linkage → entry_hash → seed → draw → compare.
+/// Chains: sig checks → lock receipt parse → linkage → entry_hash → seed → draw → compare.
+/// `winner_count` is extracted from the signed lock receipt, not passed externally.
 /// Returns Ok(true) if all checks pass, Ok(false) if any check fails,
 /// Err with reason if inputs are structurally invalid (unparseable JSON).
 #[allow(clippy::too_many_arguments)]
@@ -26,7 +27,6 @@ pub fn verify_full(
     execution_signature: &[u8; 64],
     infrastructure_public_key: &[u8; 32],
     entries: &[Entry],
-    count: u32,
 ) -> Result<bool, String> {
     // Step 1: Verify lock receipt signature
     if !protocol::crypto::verify_receipt(
@@ -46,7 +46,18 @@ pub fn verify_full(
         return Ok(false);
     }
 
-    // Step 3: Check lock_receipt_hash linkage
+    // Step 3: Extract winner_count from the signed lock receipt
+    let lock_parsed: serde_json::Value = serde_json::from_str(lock_receipt_jcs)
+        .map_err(|e| format!("invalid lock receipt JSON: {}", e))?;
+
+    let count = lock_parsed
+        .get("winner_count")
+        .and_then(|v| v.as_u64())
+        .ok_or("missing or invalid winner_count in lock receipt")?;
+    let count =
+        u32::try_from(count).map_err(|_| format!("winner_count {} exceeds u32::MAX", count))?;
+
+    // Step 4: Check lock_receipt_hash linkage
     let exec_parsed: serde_json::Value = serde_json::from_str(execution_receipt_jcs)
         .map_err(|e| format!("invalid execution receipt JSON: {}", e))?;
 
@@ -60,7 +71,7 @@ pub fn verify_full(
         return Ok(false);
     }
 
-    // Step 4: Extract fields from execution receipt
+    // Step 5: Extract fields from execution receipt
     let exec_entry_hash = exec_parsed
         .get("entry_hash")
         .and_then(|v| v.as_str())
@@ -89,13 +100,13 @@ pub fn verify_full(
         .map(|(i, v)| v.as_str().ok_or(format!("results[{}] is not a string", i)))
         .collect::<Result<Vec<&str>, String>>()?;
 
-    // Step 5: Verify entry_hash
+    // Step 6: Verify entry_hash
     let (computed_entry_hash, _) = entry_hash(entries);
     if computed_entry_hash != exec_entry_hash {
         return Ok(false);
     }
 
-    // Step 6: Recompute seed
+    // Step 7: Recompute seed
     let (computed_seed, _) = match weather_value {
         Some(w) => compute_seed(&computed_entry_hash, drand_randomness, w),
         None => compute_seed_drand_only(&computed_entry_hash, drand_randomness),
@@ -105,7 +116,7 @@ pub fn verify_full(
         return Ok(false);
     }
 
-    // Step 7: Recompute draw
+    // Step 8: Recompute draw
     let computed_results =
         draw(entries, &computed_seed, count).map_err(|e| format!("draw failed: {}", e))?;
 
@@ -251,16 +262,99 @@ mod tests {
     }
 
     #[test]
+    fn verify_full_extracts_winner_count_from_lock_receipt() {
+        let sk = test_signing_key();
+        let pk: [u8; 32] = sk.verifying_key().to_bytes();
+
+        // Build a lock receipt with winner_count embedded
+        let lock_jcs = serde_json::json!({
+            "schema_version": "2",
+            "winner_count": 2,
+            "sequence": 1
+        })
+        .to_string();
+        let lock_sig: [u8; 64] = sk.sign(lock_jcs.as_bytes()).to_bytes();
+
+        let lock_hash = protocol::receipts::lock_receipt_hash(&lock_jcs);
+
+        // Build execution receipt — winner_count is NOT here, it comes from lock receipt
+        let exec_jcs = serde_json::json!({
+            "drand_randomness": "aa",
+            "entry_hash": "bb",
+            "lock_receipt_hash": lock_hash,
+            "results": ["ticket-47", "ticket-49"],
+            "seed": "cc",
+            "weather_value": "1013"
+        })
+        .to_string();
+        let exec_sig: [u8; 64] = sk.sign(exec_jcs.as_bytes()).to_bytes();
+
+        let entries = vec![Entry {
+            id: "x".into(),
+            weight: 1,
+        }];
+
+        // No count parameter — verify_full should extract it from lock receipt
+        let result = verify_full(
+            &lock_jcs, &lock_sig, &pk, &exec_jcs, &exec_sig, &pk, &entries,
+        );
+
+        // Will return Ok(false) because entry_hash won't match, but the point is
+        // it didn't need a count parameter and didn't error on winner_count extraction
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn verify_full_errors_on_missing_winner_count() {
+        let sk = test_signing_key();
+        let pk: [u8; 32] = sk.verifying_key().to_bytes();
+
+        // Lock receipt WITHOUT winner_count
+        let lock_jcs = r#"{"schema_version":"2","sequence":1}"#;
+        let lock_sig: [u8; 64] = sk.sign(lock_jcs.as_bytes()).to_bytes();
+
+        let lock_hash = protocol::receipts::lock_receipt_hash(lock_jcs);
+
+        let exec_jcs = serde_json::json!({
+            "drand_randomness": "aa",
+            "entry_hash": "bb",
+            "lock_receipt_hash": lock_hash,
+            "results": ["ticket-47"],
+            "seed": "cc",
+            "weather_value": "1013"
+        })
+        .to_string();
+        let exec_sig: [u8; 64] = sk.sign(exec_jcs.as_bytes()).to_bytes();
+
+        let entries = vec![Entry {
+            id: "x".into(),
+            weight: 1,
+        }];
+
+        let result = verify_full(
+            lock_jcs, &lock_sig, &pk, &exec_jcs, &exec_sig, &pk, &entries,
+        );
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("winner_count"));
+    }
+
+    #[test]
     fn verify_full_rejects_non_string_results() {
         let sk = test_signing_key();
         let pk: [u8; 32] = sk.verifying_key().to_bytes();
 
-        // Build a lock receipt and sign it
-        let lock_jcs = r#"{"schema_version":"2","sequence":1}"#;
+        // Build a lock receipt with winner_count and sign it
+        let lock_jcs = serde_json::json!({
+            "schema_version": "2",
+            "sequence": 1,
+            "winner_count": 1
+        })
+        .to_string();
         let lock_sig: [u8; 64] = sk.sign(lock_jcs.as_bytes()).to_bytes();
 
         // Compute lock_receipt_hash
-        let lock_hash = protocol::receipts::lock_receipt_hash(lock_jcs);
+        let lock_hash = protocol::receipts::lock_receipt_hash(&lock_jcs);
 
         // Build execution receipt with a null in results
         let exec_jcs = serde_json::json!({
@@ -280,7 +374,7 @@ mod tests {
         }];
 
         let result = verify_full(
-            lock_jcs, &lock_sig, &pk, &exec_jcs, &exec_sig, &pk, &entries, 1,
+            &lock_jcs, &lock_sig, &pk, &exec_jcs, &exec_sig, &pk, &entries,
         );
 
         assert!(

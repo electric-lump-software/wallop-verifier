@@ -184,6 +184,8 @@ pub fn anchor_root_wasm(op_root_hex: &str, exec_root_hex: &str) -> Result<String
 }
 
 /// WASM entry point for verify_full.
+///
+/// `winner_count` is extracted from the signed lock receipt, not passed externally.
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub fn verify_full_wasm(
@@ -194,7 +196,6 @@ pub fn verify_full_wasm(
     execution_signature_hex: &str,
     infrastructure_public_key_hex: &str,
     entries_js: JsValue,
-    count: u32,
 ) -> Result<bool, JsError> {
     let lock_sig_bytes = hex::decode(lock_signature_hex)
         .map_err(|e| JsError::new(&format!("invalid lock signature hex: {}", e)))?;
@@ -231,7 +232,6 @@ pub fn verify_full_wasm(
         &exec_sig,
         &infra_key,
         &entries,
-        count,
     )
     .map_err(|e| JsError::new(&e))
 }
