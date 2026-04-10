@@ -3,6 +3,9 @@ pub mod verify_steps;
 pub mod protocol;
 mod wasm;
 
+#[cfg(feature = "cli")]
+pub mod drand;
+
 pub use protocol::crypto::{key_id, verify_receipt};
 pub use protocol::merkle::{anchor_root, merkle_root};
 pub use protocol::receipts::{
