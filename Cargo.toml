@@ -28,6 +28,11 @@ clap = { version = "4", features = ["derive"], optional = true }
 default = []
 cli = ["clap", "drand-verify"]
 
+[[bin]]
+name = "wallop-verify"
+path = "src/bin/wallop_verify.rs"
+required-features = ["cli"]
+
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
 
