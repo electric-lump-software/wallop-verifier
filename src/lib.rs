@@ -102,8 +102,17 @@ pub fn verify_full(
         .map(|(i, v)| v.as_str().ok_or(format!("results[{}] is not a string", i)))
         .collect::<Result<Vec<&str>, String>>()?;
 
-    // Step 6: Verify entry_hash
+    // Step 6: Verify entry_hash (both receipts)
     let (computed_entry_hash, _) = entry_hash(entries);
+
+    let lock_entry_hash = lock_parsed
+        .get("entry_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if computed_entry_hash != lock_entry_hash {
+        return Ok(false);
+    }
+
     if computed_entry_hash != exec_entry_hash {
         return Ok(false);
     }
@@ -339,6 +348,47 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("winner_count"));
+    }
+
+    #[test]
+    fn verify_full_checks_lock_receipt_entry_hash() {
+        let sk = test_signing_key();
+        let pk: [u8; 32] = sk.verifying_key().to_bytes();
+
+        let entries = vec![
+            Entry { id: "ticket-47".into(), weight: 1 },
+            Entry { id: "ticket-48".into(), weight: 1 },
+            Entry { id: "ticket-49".into(), weight: 1 },
+        ];
+        let (real_entry_hash, _) = entry_hash(&entries);
+
+        // Lock receipt with WRONG entry_hash (but exec receipt has correct one)
+        let lock_jcs = serde_json::json!({
+            "schema_version": "2",
+            "winner_count": 2,
+            "sequence": 1,
+            "entry_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }).to_string();
+        let lock_sig: [u8; 64] = sk.sign(lock_jcs.as_bytes()).to_bytes();
+        let lock_hash = protocol::receipts::lock_receipt_hash(&lock_jcs);
+
+        let exec_jcs = serde_json::json!({
+            "drand_randomness": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            "entry_hash": &real_entry_hash,
+            "lock_receipt_hash": lock_hash,
+            "results": ["ticket-48", "ticket-47"],
+            "seed": "cc",
+            "weather_value": "1013"
+        }).to_string();
+        let exec_sig: [u8; 64] = sk.sign(exec_jcs.as_bytes()).to_bytes();
+
+        let result = verify_full(
+            &lock_jcs, &lock_sig, &pk, &exec_jcs, &exec_sig, &pk, &entries,
+        );
+
+        // Should fail because lock receipt entry_hash doesn't match
+        assert_eq!(result, Ok(false),
+            "verify_full should reject when lock receipt entry_hash differs from computed");
     }
 
     #[test]
