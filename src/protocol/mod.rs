@@ -2,6 +2,8 @@ pub mod crypto;
 pub mod merkle;
 pub mod receipts;
 
+use std::collections::BTreeMap;
+
 use fair_pick_rs::Entry;
 use sha2::{Digest, Sha256};
 
@@ -38,10 +40,17 @@ pub fn compute_seed(
     drand_randomness: &str,
     weather_value: &str,
 ) -> ([u8; 32], String) {
-    let jcs = format!(
-        r#"{{"drand_randomness":"{}","entry_hash":"{}","weather_value":"{}"}}"#,
-        drand_randomness, entry_hash, weather_value
+    let mut map = BTreeMap::new();
+    map.insert(
+        "drand_randomness",
+        serde_json::Value::String(drand_randomness.into()),
     );
+    map.insert("entry_hash", serde_json::Value::String(entry_hash.into()));
+    map.insert(
+        "weather_value",
+        serde_json::Value::String(weather_value.into()),
+    );
+    let jcs = serde_json::to_string(&map).unwrap();
 
     let seed_bytes: [u8; 32] = Sha256::digest(jcs.as_bytes()).into();
     (seed_bytes, jcs)
@@ -53,10 +62,13 @@ pub fn compute_seed(
 /// implicit domain separation — this function can never produce the same
 /// seed as `compute_seed` with the same inputs.
 pub fn compute_seed_drand_only(entry_hash: &str, drand_randomness: &str) -> ([u8; 32], String) {
-    let jcs = format!(
-        r#"{{"drand_randomness":"{}","entry_hash":"{}"}}"#,
-        drand_randomness, entry_hash
+    let mut map = BTreeMap::new();
+    map.insert(
+        "drand_randomness",
+        serde_json::Value::String(drand_randomness.into()),
     );
+    map.insert("entry_hash", serde_json::Value::String(entry_hash.into()));
+    let jcs = serde_json::to_string(&map).unwrap();
 
     let seed_bytes: [u8; 32] = Sha256::digest(jcs.as_bytes()).into();
     (seed_bytes, jcs)
