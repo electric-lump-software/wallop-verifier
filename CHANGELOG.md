@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-04-11
+
+### Changed
+
+- **Renamed crate from `wallop_rs` to `wallop_verifier`.** The old name implied
+  a full Rust port of the Wallop! server; this crate only mirrors the protocol
+  primitives (entry_hash, compute_seed, draw, receipt verification) plus WASM
+  bindings. The new name matches the `wallop-verify` CLI and makes the crate's
+  role as an independent second-language verifier obvious.
+- GitHub repository renamed from `wallop_rs` to `wallop-verifier`. The old URL
+  still redirects.
+
+### Migration
+
+Rename your dependency from `wallop_rs = "0.3"` to `wallop_verifier = "0.4"`.
+Rust source identifiers (struct/function/module names) are unchanged, so a
+blanket find-and-replace of `wallop_rs` → `wallop_verifier` in `use` statements
+and WASM import paths is sufficient. Old `wallop_rs` versions on crates.io
+have been yanked; existing `Cargo.lock` files still resolve.
+
 ## [0.3.0] - 2026-04-10
 
 ### Changed

@@ -1,12 +1,13 @@
 [package]
-name = "wallop_rs"
-version = "0.3.0"
+name = "wallop_verifier"
+version = "0.4.0"
 edition = "2024"
-description = "Protocol functions and WASM verifier for the Wallop provably fair draw system."
+description = "Independent verifier for the Wallop! provably fair draw protocol."
 license = "MIT"
-repository = "https://github.com/electric-lump-software/wallop_rs"
-documentation = "https://docs.rs/wallop_rs"
+repository = "https://github.com/electric-lump-software/wallop-verifier"
+documentation = "https://docs.rs/wallop_verifier"
 homepage = "https://wallop.run"
+exclude = ["vendor/"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
