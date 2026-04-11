@@ -1,6 +1,6 @@
-# wallop_rs
+# wallop_verifier
 
-Protocol functions and WASM verifier for the Wallop provably fair draw system.
+Protocol functions and WASM verifier for the Wallop! provably fair draw system.
 
 Implements the cryptographic pipeline used to conduct and verify draws:
 - canonical entry serialisation (JCS + SHA-256)
@@ -16,8 +16,8 @@ The draw algorithm itself lives in [`fair_pick_rs`](https://github.com/electric-
 ## Getting started
 
 ```bash
-git clone --recursive https://github.com/electric-lump-software/wallop_rs.git
-cd wallop_rs
+git clone --recursive https://github.com/electric-lump-software/wallop-verifier.git
+cd wallop-verifier
 cargo test
 ```
 
@@ -78,7 +78,7 @@ Runs the full pipeline — `entry_hash → compute_seed → draw → compare` �
 ### Rust
 
 ```rust
-use wallop_rs::{Entry, entry_hash, compute_seed, verify};
+use wallop_verifier::{Entry, entry_hash, compute_seed, verify};
 
 let entries = vec![
     Entry { id: "ticket-47".into(), weight: 1 },
@@ -105,7 +105,7 @@ import init, {
   compute_seed_wasm,
   compute_seed_drand_only_wasm,
   verify_wasm,
-} from "./pkg/wallop_rs.js";
+} from "./pkg/wallop_verifier.js";
 
 await init();
 
