@@ -2,8 +2,8 @@ use clap::Parser;
 use std::io::Read;
 use std::process::ExitCode;
 
-use wallop_rs::bundle::ProofBundle;
-use wallop_rs::verify_steps::{StepStatus, verify_bundle};
+use wallop_verifier::bundle::ProofBundle;
+use wallop_verifier::verify_steps::{StepStatus, verify_bundle};
 
 #[derive(Parser)]
 #[command(
@@ -91,10 +91,10 @@ fn main() -> ExitCode {
 }
 
 fn run_verify_full_check(bundle: &ProofBundle) -> bool {
-    let entries: Vec<wallop_rs::Entry> = bundle
+    let entries: Vec<wallop_verifier::Entry> = bundle
         .entries
         .iter()
-        .map(|e| wallop_rs::Entry {
+        .map(|e| wallop_verifier::Entry {
             id: e.id.clone(),
             weight: e.weight,
         })
@@ -129,7 +129,7 @@ fn run_verify_full_check(bundle: &ProofBundle) -> bool {
         None => return false,
     };
 
-    wallop_rs::verify_full(
+    wallop_verifier::verify_full(
         &bundle.lock_receipt.payload_jcs,
         &lock_sig,
         &op_pk,

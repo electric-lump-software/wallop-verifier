@@ -4,10 +4,10 @@
 //! agree on all inputs.
 
 use ed25519_dalek::{Signer, SigningKey};
-use wallop_rs::bundle::ProofBundle;
-use wallop_rs::protocol::receipts::lock_receipt_hash;
-use wallop_rs::verify_steps::{StepStatus, verify_bundle};
-use wallop_rs::{Entry, compute_seed, compute_seed_drand_only, draw, entry_hash};
+use wallop_verifier::bundle::ProofBundle;
+use wallop_verifier::protocol::receipts::lock_receipt_hash;
+use wallop_verifier::verify_steps::{StepStatus, verify_bundle};
+use wallop_verifier::{Entry, compute_seed, compute_seed_drand_only, draw, entry_hash};
 
 fn test_signing_key() -> SigningKey {
     let secret_bytes: [u8; 32] =
@@ -141,7 +141,7 @@ fn run_verify_full(bundle: &ProofBundle) -> bool {
         .try_into()
         .unwrap();
 
-    wallop_rs::verify_full(
+    wallop_verifier::verify_full(
         &bundle.lock_receipt.payload_jcs,
         &lock_sig,
         &op_pk,
