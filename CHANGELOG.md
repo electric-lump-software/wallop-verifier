@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-04-12
+
+### Added
+
+- `wallop-verify` CLI binary behind the `cli` feature flag for verifying
+  Wallop! proof bundles end-to-end. Reads from a file path or `-` for stdin.
+- `wallop-verify selftest` subcommand — runs a built-in tamper scenario
+  catalog against a freshly-generated known-good bundle and confirms every
+  scenario is caught by the expected verification step. Designed for CI and
+  auditor pre-flight. Exit codes: 0=clean, 1=P0 failure, 2=wrong-step or
+  incomplete coverage, 3=catalog load error.
+- `--pin-operator-key`, `--pin-infra-key`, `--pin-operator-key-file`, and
+  `--pin-from-bundle` flags for explicit out-of-band trust anchors. Warns
+  when no pin is supplied.
+- `StepName` enum — stable, always-public identifier for each of the 9
+  verification steps. Serde snake_case serialization for catalog references,
+  Display for human-friendly CLI output.
+- Step-by-step verification pipeline (`verify_steps::verify_bundle`) with
+  per-step PASS/FAIL/SKIP reporting and a belt-and-suspenders `verify_full()`
+  drift guard.
+- Drand BLS signature verification with pinned quicknet chain keys (behind
+  `cli` feature).
+- Tamper scenario catalog infrastructure: versioned JSON schema, field-level
+  and semantic-level mutation dispatch, deterministic test-keypair derivation
+  (SHA-256 seed → Ed25519), per-step runtime coverage tracking.
+- CLI reference documentation at `docs/cli.md`.
+
+### Changed
+
+- `verify_full` now also checks that the `entry_hash` recorded inside the
+  signed lock receipt matches the recomputed hash from the entries. Bundles
+  with a tampered lock-receipt `entry_hash` that passed in 0.4.x will now
+  fail — this closes a soundness gap.
+- `StepResult.name` changed from `&'static str` to `StepName` enum. Library
+  consumers pattern-matching on `step.name` should use enum variants instead
+  of string comparisons.
+
 ## [0.4.0] - 2026-04-11
 
 ### Changed
