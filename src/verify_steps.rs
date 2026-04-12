@@ -82,6 +82,7 @@ pub struct StepResult {
     pub detail: Option<StepDetail>,
 }
 
+#[derive(Clone)]
 pub struct VerificationReport {
     pub steps: Vec<StepResult>,
     pub operator_key_id: Option<String>,

@@ -65,14 +65,15 @@ pub(crate) fn run_verify_tui(path: &str, pins: &super::PinConfig) -> ExitCode {
 // ── Selftest TUI ──────────────────────────────────────────────────────────
 
 pub(crate) fn run_selftest_tui(demo: bool) -> ExitCode {
-    // 1. Run the shipping catalog
-    let catalog_report = match wallop_verifier::catalog::run_shipping_catalog() {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("catalog load error: {e}");
-            return ExitCode::from(3);
-        }
-    };
+    // 1. Run the shipping catalog with per-scenario reports
+    let (catalog_report, scenario_reports) =
+        match wallop_verifier::catalog::run_shipping_catalog_with_reports() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("catalog load error: {e}");
+                return ExitCode::from(3);
+            }
+        };
 
     // 2. Build scenario entries from catalog results
     let scenarios: Vec<ScenarioEntry> = catalog_report
@@ -87,17 +88,36 @@ pub(crate) fn run_selftest_tui(demo: bool) -> ExitCode {
             };
             ScenarioEntry {
                 name: r.name.clone(),
-                description: String::new(),
-                tamper_summary: String::new(),
+                description: r.description.clone(),
+                tamper_summary: r.description.clone(),
                 passed: if demo { None } else { passed },
             }
         })
         .collect();
 
-    // 3. Build initial verification report for the first scenario
-    let initial_report = build_first_scenario_report();
+    // 3. Override DrandBlsSignature to SKIP on all per-scenario reports (test fixtures)
+    let scenario_reports: Vec<Option<wallop_verifier::verify_steps::VerificationReport>> =
+        scenario_reports
+            .into_iter()
+            .map(|opt_report| {
+                opt_report.map(|mut report| {
+                    for step in &mut report.steps {
+                        if step.name == StepName::DrandBlsSignature {
+                            step.status = StepStatus::Skip("test fixture".into());
+                        }
+                    }
+                    report
+                })
+            })
+            .collect();
 
-    // 4. Create session
+    // 4. Build initial verification report from the first scenario
+    let initial_report = scenario_reports
+        .first()
+        .and_then(|r| r.clone())
+        .unwrap_or_else(build_first_scenario_report);
+
+    // 5. Create session
     let mut session = VerificationSession::new_selftest(initial_report, scenarios);
     if demo {
         session.mode = Mode::Demo;
@@ -108,13 +128,13 @@ pub(crate) fn run_selftest_tui(demo: bool) -> ExitCode {
         session.scenarios_passed = catalog_report.passed;
     }
 
-    // 5. Run the TUI
-    if let Err(e) = app::run(session) {
+    // 6. Run the TUI with pre-computed reports
+    if let Err(e) = app::run_with_reports(session, scenario_reports) {
         eprintln!("TUI error: {e}");
         return ExitCode::from(2);
     }
 
-    // 6. Exit code based on catalog results
+    // 7. Exit code based on catalog results
     if catalog_report.failed_p0 > 0 {
         ExitCode::from(1)
     } else {

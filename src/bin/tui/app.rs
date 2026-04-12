@@ -9,11 +9,28 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
+use wallop_verifier::verify_steps::VerificationReport;
+
 use super::input::{Action, map_key};
 use super::render;
 use super::state::{Mode, VerificationSession};
 
-pub fn run(mut session: VerificationSession) -> io::Result<()> {
+/// Run the TUI with pre-computed per-scenario reports for selftest mode.
+pub fn run_with_reports(
+    session: VerificationSession,
+    scenario_reports: Vec<Option<VerificationReport>>,
+) -> io::Result<()> {
+    run_inner(session, Some(scenario_reports))
+}
+
+pub fn run(session: VerificationSession) -> io::Result<()> {
+    run_inner(session, None)
+}
+
+fn run_inner(
+    mut session: VerificationSession,
+    scenario_reports: Option<Vec<Option<VerificationReport>>>,
+) -> io::Result<()> {
     // Set up terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -22,7 +39,7 @@ pub fn run(mut session: VerificationSession) -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let result = run_loop(&mut terminal, &mut session);
+    let result = run_loop(&mut terminal, &mut session, scenario_reports);
 
     // Restore terminal
     disable_raw_mode()?;
@@ -35,17 +52,19 @@ pub fn run(mut session: VerificationSession) -> io::Result<()> {
 fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     session: &mut VerificationSession,
+    scenario_reports: Option<Vec<Option<VerificationReport>>>,
 ) -> io::Result<()> {
     if session.mode == Mode::Demo {
-        run_demo_loop(terminal, session)
+        run_demo_loop(terminal, session, scenario_reports.as_deref())
     } else {
-        run_interactive_loop(terminal, session)
+        run_interactive_loop(terminal, session, scenario_reports.as_deref())
     }
 }
 
 fn run_interactive_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     session: &mut VerificationSession,
+    scenario_reports: Option<&[Option<VerificationReport>]>,
 ) -> io::Result<()> {
     loop {
         terminal.draw(|frame| render::render(session, frame))?;
@@ -67,10 +86,14 @@ fn run_interactive_loop(
                 Action::StepUp => session.move_step_up(),
                 Action::StepDown => session.move_step_down(),
                 Action::NextScenario => {
+                    let old = session.selected_scenario;
                     session.next_scenario();
+                    apply_scenario_report(session, old, scenario_reports);
                 }
                 Action::PrevScenario => {
+                    let old = session.selected_scenario;
                     session.prev_scenario();
+                    apply_scenario_report(session, old, scenario_reports);
                 }
             }
         }
@@ -78,9 +101,28 @@ fn run_interactive_loop(
     Ok(())
 }
 
+/// Replace the session's verification report with the pre-computed one for the
+/// newly selected scenario, if available and the scenario actually changed.
+fn apply_scenario_report(
+    session: &mut VerificationSession,
+    old_index: usize,
+    scenario_reports: Option<&[Option<VerificationReport>]>,
+) {
+    let new_index = session.selected_scenario;
+    if new_index == old_index {
+        return;
+    }
+    if let Some(reports) = scenario_reports
+        && let Some(Some(report)) = reports.get(new_index)
+    {
+        session.replace_report(report.clone());
+    }
+}
+
 fn run_demo_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     session: &mut VerificationSession,
+    scenario_reports: Option<&[Option<VerificationReport>]>,
 ) -> io::Result<()> {
     let step_delay_pass = Duration::from_millis(800);
     let step_delay_fail = Duration::from_millis(1500);
@@ -154,7 +196,9 @@ fn run_demo_loop(
         }
 
         // Advance to next scenario
+        let old = session.selected_scenario;
         session.next_scenario();
+        apply_scenario_report(session, old, scenario_reports);
     }
 }
 

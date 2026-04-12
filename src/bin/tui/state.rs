@@ -175,7 +175,6 @@ impl VerificationSession {
     }
 
     /// Swap in a new verification report, resetting step presentation state.
-    #[allow(dead_code)]
     pub fn replace_report(&mut self, report: VerificationReport) {
         self.steps = report.steps;
         self.reset_step_state();
