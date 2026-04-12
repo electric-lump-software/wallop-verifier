@@ -7,6 +7,9 @@ use wallop_verifier::bundle::ProofBundle;
 use wallop_verifier::catalog::runner::ScenarioOutcome;
 use wallop_verifier::verify_steps::{StepStatus, verify_bundle};
 
+#[cfg(feature = "tui")]
+mod tui;
+
 #[derive(Parser)]
 #[command(
     name = "wallop-verify",
@@ -19,6 +22,11 @@ struct Cli {
 
     /// Path to proof bundle JSON file, or "-" for stdin
     path: Option<String>,
+
+    /// Run in interactive TUI mode
+    #[arg(long)]
+    #[cfg(feature = "tui")]
+    tui: bool,
 
     /// Pin the operator public key (64-char hex). If the bundle's embedded
     /// operator key doesn't match, verification fails before any step runs.
@@ -45,14 +53,37 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Run the tamper scenario catalog against a generated known-good bundle
-    Selftest,
+    Selftest {
+        /// Run selftest in interactive TUI mode
+        #[arg(long)]
+        #[cfg(feature = "tui")]
+        tui: bool,
+        /// Run selftest with demo data (implies --tui)
+        #[arg(long, conflicts_with = "tui")]
+        #[cfg(feature = "tui")]
+        demo: bool,
+    },
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match (cli.command, cli.path.as_deref()) {
-        (Some(Commands::Selftest), _) => run_selftest(),
+        (
+            Some(Commands::Selftest {
+                #[cfg(feature = "tui")]
+                    tui: use_tui,
+                #[cfg(feature = "tui")]
+                demo,
+            }),
+            _,
+        ) => {
+            #[cfg(feature = "tui")]
+            if use_tui || demo {
+                return tui::run_selftest_tui(demo);
+            }
+            run_selftest()
+        }
         (None, Some(path)) => {
             let pins = PinConfig {
                 operator_key: resolve_operator_pin(
@@ -62,6 +93,10 @@ fn main() -> ExitCode {
                 ),
                 infra_key: cli.pin_infra_key.clone(),
             };
+            #[cfg(feature = "tui")]
+            if cli.tui {
+                return tui::run_verify_tui(path, &pins);
+            }
             run_verify(path, &pins)
         }
         (None, None) => {

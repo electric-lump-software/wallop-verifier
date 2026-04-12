@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-04-12
+
+### Added
+
+- Interactive TUI mode (`--tui` flag) for step-by-step verification inspection
+  of proof bundles and the selftest tamper catalog. Requires the new `tui`
+  feature flag (`ratatui` + `crossterm`). Plain CLI and WASM builds unaffected.
+- Selftest scenario browser: selectable list with per-scenario verification
+  results, j/k navigation, pass/fail counter.
+- Demo sub-mode (`selftest --demo`): scripted animated playback of the tamper
+  catalog with timed step reveals. Holds on summary screen until q is pressed.
+- Byte-level hex diff on verification failures via `StepDetail::HexMismatch`
+  on `StepResult`. Shows expected vs computed values inline for entry hash,
+  receipt linkage, and seed recomputation mismatches.
+- Key-pinning visualization in TUI footer: shows pin match/mismatch/unpinned
+  status per key. Selftest mode shows dim "test" indicators to avoid false
+  alarm fatigue.
+- `tui` feature flag: `tui = ["cli", "dep:ratatui", "dep:crossterm"]`.
+  Install with `cargo install wallop_verifier --features tui`.
+
+### Changed
+
+- `StepResult` gains a `pub detail: Option<StepDetail>` field. Existing code
+  that constructs `StepResult` directly will need to add `detail: None`.
+- `StepResult`, `StepStatus`, and `StepDetail` now implement `Clone`.
+- `CatalogReport` results now include scenario descriptions.
+
 ## [0.5.0] - 2026-04-12
 
 ### Added

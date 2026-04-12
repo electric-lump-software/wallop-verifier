@@ -18,6 +18,19 @@ pub fn run_shipping_catalog() -> Result<runner::CatalogReport, runner::RunError>
     runner::run_catalog_from_str(SHIPPING_CATALOG_JSON)
 }
 
+/// Load and run the shipping catalog, returning per-scenario `VerificationReport`s
+/// alongside the overall `CatalogReport`. Used by the TUI to display step-by-step
+/// results when the user switches between scenarios.
+pub fn run_shipping_catalog_with_reports() -> Result<
+    (
+        runner::CatalogReport,
+        Vec<Option<crate::verify_steps::VerificationReport>>,
+    ),
+    runner::RunError,
+> {
+    runner::run_catalog_from_str_with_reports(SHIPPING_CATALOG_JSON)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -63,19 +63,26 @@ impl fmt::Display for StepName {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum StepStatus {
     Pass,
     Fail(String),
     Skip(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum StepDetail {
+    HexMismatch { expected: String, computed: String },
+}
+
+#[derive(Debug, Clone)]
 pub struct StepResult {
     pub name: StepName,
     pub status: StepStatus,
+    pub detail: Option<StepDetail>,
 }
 
+#[derive(Clone)]
 pub struct VerificationReport {
     pub steps: Vec<StepResult>,
     pub operator_key_id: Option<String>,
@@ -130,6 +137,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
     steps.push(StepResult {
         name: StepName::EntryHash,
         status: StepStatus::Pass,
+        detail: None,
     });
 
     // === Step 2: Lock receipt signature ===
@@ -149,6 +157,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
         } else {
             StepStatus::Fail("Ed25519 signature invalid".into())
         },
+        detail: None,
     });
 
     // === Step 3: Exec receipt signature ===
@@ -168,6 +177,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
         } else {
             StepStatus::Fail("Ed25519 signature invalid".into())
         },
+        detail: None,
     });
 
     // === Step 4: Receipt linkage ===
@@ -175,6 +185,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
         steps.push(StepResult {
             name: StepName::ReceiptLinkage,
             status: StepStatus::Skip("signature check failed".into()),
+            detail: None,
         });
     } else {
         let computed_lrh = lock_receipt_hash(&bundle.lock_receipt.payload_jcs);
@@ -185,6 +196,14 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let step4_pass = computed_lrh == exec_lrh;
+        let step4_detail = if step4_pass {
+            None
+        } else {
+            Some(StepDetail::HexMismatch {
+                expected: computed_lrh.clone(),
+                computed: exec_lrh.to_string(),
+            })
+        };
         steps.push(StepResult {
             name: StepName::ReceiptLinkage,
             status: if step4_pass {
@@ -192,6 +211,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
             } else {
                 StepStatus::Fail(format!("expected {}, got {}", computed_lrh, exec_lrh))
             },
+            detail: step4_detail,
         });
     }
 
@@ -200,6 +220,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
         steps.push(StepResult {
             name: StepName::LockReceiptEntryHash,
             status: StepStatus::Skip("lock signature failed".into()),
+            detail: None,
         });
     } else {
         let lock_parsed: serde_json::Value =
@@ -209,6 +230,14 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let step5a_pass = computed_entry_hash == lock_eh;
+        let step5a_detail = if step5a_pass {
+            None
+        } else {
+            Some(StepDetail::HexMismatch {
+                expected: computed_entry_hash.clone(),
+                computed: lock_eh.to_string(),
+            })
+        };
         steps.push(StepResult {
             name: StepName::LockReceiptEntryHash,
             status: if step5a_pass {
@@ -216,6 +245,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
             } else {
                 StepStatus::Fail(format!("expected {}, got {}", computed_entry_hash, lock_eh))
             },
+            detail: step5a_detail,
         });
     }
 
@@ -224,6 +254,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
         steps.push(StepResult {
             name: StepName::ExecReceiptEntryHash,
             status: StepStatus::Skip("exec signature failed".into()),
+            detail: None,
         });
     } else {
         let exec_parsed: serde_json::Value =
@@ -233,6 +264,14 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let step5b_pass = computed_entry_hash == exec_eh;
+        let step5b_detail = if step5b_pass {
+            None
+        } else {
+            Some(StepDetail::HexMismatch {
+                expected: computed_entry_hash.clone(),
+                computed: exec_eh.to_string(),
+            })
+        };
         steps.push(StepResult {
             name: StepName::ExecReceiptEntryHash,
             status: if step5b_pass {
@@ -240,6 +279,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
             } else {
                 StepStatus::Fail(format!("expected {}, got {}", computed_entry_hash, exec_eh))
             },
+            detail: step5b_detail,
         });
     }
 
@@ -262,6 +302,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
         steps.push(StepResult {
             name: StepName::SeedRecomputation,
             status: StepStatus::Skip("exec signature failed".into()),
+            detail: None,
         });
         step6_pass = false;
     } else {
@@ -276,6 +317,14 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
         } else {
             "drand only"
         };
+        let step6_detail = if step6_pass {
+            None
+        } else {
+            Some(StepDetail::HexMismatch {
+                expected: exec_seed.to_string(),
+                computed: computed_seed_hex.clone(),
+            })
+        };
         steps.push(StepResult {
             name: StepName::SeedRecomputation,
             status: if step6_pass {
@@ -285,6 +334,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
                     "({mode}) expected {exec_seed}, got {computed_seed_hex}"
                 ))
             },
+            detail: step6_detail,
         });
     }
 
@@ -293,6 +343,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
         steps.push(StepResult {
             name: StepName::WinnerSelection,
             status: StepStatus::Skip("seed or exec signature failed".into()),
+            detail: None,
         });
     } else {
         // Extract winner_count from lock receipt
@@ -324,6 +375,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
                     steps.push(StepResult {
                         name: StepName::WinnerSelection,
                         status: StepStatus::Pass,
+                        detail: None,
                     });
                 } else {
                     steps.push(StepResult {
@@ -332,6 +384,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
                             "computed {:?}, receipt has {:?}",
                             computed_ids, receipt_ids
                         )),
+                        detail: None,
                     });
                 }
             }
@@ -339,6 +392,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
                 steps.push(StepResult {
                     name: StepName::WinnerSelection,
                     status: StepStatus::Fail(format!("draw error: {e}")),
+                    detail: None,
                 });
             }
         }
@@ -356,10 +410,12 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
             Ok(()) => steps.push(StepResult {
                 name: StepName::DrandBlsSignature,
                 status: StepStatus::Pass,
+                detail: None,
             }),
             Err(e) => steps.push(StepResult {
                 name: StepName::DrandBlsSignature,
                 status: StepStatus::Fail(e.to_string()),
+                detail: None,
             }),
         }
     }
@@ -368,6 +424,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
         steps.push(StepResult {
             name: StepName::DrandBlsSignature,
             status: StepStatus::Skip("BLS verification requires cli feature".into()),
+            detail: None,
         });
     }
 
@@ -630,18 +687,21 @@ mod tests {
         let r = StepResult {
             name: StepName::EntryHash,
             status: StepStatus::Pass,
+            detail: None,
         };
         assert_eq!(r.status, StepStatus::Pass);
 
         let r2 = StepResult {
             name: StepName::LockSignature,
             status: StepStatus::Fail("bad".into()),
+            detail: None,
         };
         assert!(matches!(r2.status, StepStatus::Fail(_)));
 
         let r3 = StepResult {
             name: StepName::ReceiptLinkage,
             status: StepStatus::Skip("upstream failed".into()),
+            detail: None,
         };
         assert!(matches!(r3.status, StepStatus::Skip(_)));
     }
@@ -653,10 +713,12 @@ mod tests {
                 StepResult {
                     name: StepName::EntryHash,
                     status: StepStatus::Pass,
+                    detail: None,
                 },
                 StepResult {
                     name: StepName::LockSignature,
                     status: StepStatus::Pass,
+                    detail: None,
                 },
             ],
             operator_key_id: None,
@@ -673,14 +735,17 @@ mod tests {
                 StepResult {
                     name: StepName::EntryHash,
                     status: StepStatus::Pass,
+                    detail: None,
                 },
                 StepResult {
                     name: StepName::LockSignature,
                     status: StepStatus::Fail("mismatch".into()),
+                    detail: None,
                 },
                 StepResult {
                     name: StepName::ReceiptLinkage,
                     status: StepStatus::Skip("b failed".into()),
+                    detail: None,
                 },
             ],
             operator_key_id: None,
@@ -696,6 +761,7 @@ mod tests {
             steps: vec![StepResult {
                 name: StepName::EntryHash,
                 status: StepStatus::Skip("no input".into()),
+                detail: None,
             }],
             operator_key_id: None,
             infra_key_id: None,
@@ -785,6 +851,22 @@ mod tests {
         assert!(
             result.is_err(),
             "unknown step name should fail to deserialize"
+        );
+    }
+
+    #[test]
+    fn verify_bundle_fail_includes_hex_mismatch_detail() {
+        let (json, _) = valid_signed_bundle();
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        val["entries"][0]["weight"] = serde_json::json!(99);
+        let bundle = ProofBundle::from_json(&val.to_string()).unwrap();
+        let report = verify_bundle(&bundle);
+        let step_5a = &report.steps[4];
+        assert!(matches!(step_5a.status, StepStatus::Fail(_)));
+        assert!(
+            matches!(step_5a.detail, Some(StepDetail::HexMismatch { .. })),
+            "expected HexMismatch detail, got {:?}",
+            step_5a.detail
         );
     }
 }

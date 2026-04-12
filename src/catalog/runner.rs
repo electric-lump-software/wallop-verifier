@@ -35,6 +35,7 @@ pub struct CatalogReport {
 #[derive(Debug)]
 pub struct ScenarioResult {
     pub name: String,
+    pub description: String,
     pub outcome: ScenarioOutcome,
 }
 
@@ -78,6 +79,20 @@ impl std::fmt::Display for RunError {
 pub(crate) fn run_catalog_from_str(json: &str) -> Result<CatalogReport, RunError> {
     let catalog = load_catalog_from_str(json)?;
     Ok(run_catalog(&catalog))
+}
+
+/// Load a catalog from JSON and run every scenario, returning per-scenario reports.
+pub(crate) fn run_catalog_from_str_with_reports(
+    json: &str,
+) -> Result<
+    (
+        CatalogReport,
+        Vec<Option<crate::verify_steps::VerificationReport>>,
+    ),
+    RunError,
+> {
+    let catalog = load_catalog_from_str(json)?;
+    Ok(run_catalog_with_reports(&catalog))
 }
 
 /// Run every scenario in a pre-loaded catalog.
@@ -126,6 +141,57 @@ pub(crate) fn run_catalog(catalog: &Catalog) -> CatalogReport {
     }
 }
 
+/// Run every scenario in a pre-loaded catalog, returning the catalog report
+/// and a per-scenario `VerificationReport` (for scenarios that produced one).
+pub(crate) fn run_catalog_with_reports(
+    catalog: &Catalog,
+) -> (
+    CatalogReport,
+    Vec<Option<crate::verify_steps::VerificationReport>>,
+) {
+    let ctx = build_context(catalog);
+    let mut covered: HashSet<StepName> = HashSet::new();
+    let mut results = Vec::with_capacity(catalog.scenarios.len());
+    let mut reports = Vec::with_capacity(catalog.scenarios.len());
+    let mut passed = 0;
+    let mut failed_p0 = 0;
+    let mut caught_by_wrong_step = 0;
+    let mut skipped = 0;
+
+    for scenario in &catalog.scenarios {
+        let (result, report) = run_single_with_report(scenario, catalog, &ctx);
+        match &result.outcome {
+            ScenarioOutcome::Passed { caught_at } => {
+                covered.insert(*caught_at);
+                passed += 1;
+            }
+            ScenarioOutcome::FailedP0 => failed_p0 += 1,
+            ScenarioOutcome::CaughtByWrongStep { .. } => caught_by_wrong_step += 1,
+            ScenarioOutcome::MutationError(_) => skipped += 1,
+        }
+        results.push(result);
+        reports.push(report);
+    }
+
+    let coverage_complete = StepName::all()
+        .iter()
+        .filter(|s| **s != StepName::EntryHash)
+        .all(|s| covered.contains(s));
+
+    let catalog_report = CatalogReport {
+        total_scenarios: catalog.scenarios.len(),
+        passed,
+        failed_p0,
+        caught_by_wrong_step,
+        skipped,
+        coverage_complete,
+        covered_steps: covered,
+        results,
+    };
+
+    (catalog_report, reports)
+}
+
 fn build_context(catalog: &Catalog) -> CatalogContext {
     let mut ctx = CatalogContext::new();
     for (name, kp) in &catalog.test_keypairs {
@@ -143,6 +209,18 @@ fn build_context(catalog: &Catalog) -> CatalogContext {
 }
 
 fn run_single(scenario: &Scenario, catalog: &Catalog, ctx: &CatalogContext) -> ScenarioResult {
+    let (result, _report) = run_single_with_report(scenario, catalog, ctx);
+    result
+}
+
+fn run_single_with_report(
+    scenario: &Scenario,
+    catalog: &Catalog,
+    ctx: &CatalogContext,
+) -> (
+    ScenarioResult,
+    Option<crate::verify_steps::VerificationReport>,
+) {
     // 1. Resolve effective bundle parameters
     let (entries, weather, winner_count) = resolve_params(scenario, &catalog.defaults);
 
@@ -153,10 +231,16 @@ fn run_single(scenario: &Scenario, catalog: &Catalog, ctx: &CatalogContext) -> S
     let mut bundle_value: serde_json::Value = match serde_json::from_str(&bundle_json_str) {
         Ok(v) => v,
         Err(e) => {
-            return ScenarioResult {
-                name: scenario.name.clone(),
-                outcome: ScenarioOutcome::MutationError(format!("base bundle parse error: {e}")),
-            };
+            return (
+                ScenarioResult {
+                    name: scenario.name.clone(),
+                    description: scenario.description.clone(),
+                    outcome: ScenarioOutcome::MutationError(format!(
+                        "base bundle parse error: {e}"
+                    )),
+                },
+                None,
+            );
         }
     };
 
@@ -168,10 +252,14 @@ fn run_single(scenario: &Scenario, catalog: &Catalog, ctx: &CatalogContext) -> S
         }
     };
     if let Err(e) = tamper_result {
-        return ScenarioResult {
-            name: scenario.name.clone(),
-            outcome: ScenarioOutcome::MutationError(e),
-        };
+        return (
+            ScenarioResult {
+                name: scenario.name.clone(),
+                description: scenario.description.clone(),
+                outcome: ScenarioOutcome::MutationError(e),
+            },
+            None,
+        );
     }
 
     // 5. Re-serialize and parse as ProofBundle, then verify
@@ -183,12 +271,16 @@ fn run_single(scenario: &Scenario, catalog: &Catalog, ctx: &CatalogContext) -> S
             // scenario error rather than a pass — the catalog should use
             // mutations that produce parseable output so verify_bundle
             // can run and a specific step can be identified.
-            return ScenarioResult {
-                name: scenario.name.clone(),
-                outcome: ScenarioOutcome::MutationError(format!(
-                    "mutated bundle failed to parse: {e}"
-                )),
-            };
+            return (
+                ScenarioResult {
+                    name: scenario.name.clone(),
+                    description: scenario.description.clone(),
+                    outcome: ScenarioOutcome::MutationError(format!(
+                        "mutated bundle failed to parse: {e}"
+                    )),
+                },
+                None,
+            );
         }
     };
 
@@ -217,10 +309,14 @@ fn run_single(scenario: &Scenario, catalog: &Catalog, ctx: &CatalogContext) -> S
         None => ScenarioOutcome::FailedP0,
     };
 
-    ScenarioResult {
-        name: scenario.name.clone(),
-        outcome,
-    }
+    (
+        ScenarioResult {
+            name: scenario.name.clone(),
+            description: scenario.description.clone(),
+            outcome,
+        },
+        Some(report),
+    )
 }
 
 fn resolve_params(scenario: &Scenario, defaults: &Defaults) -> (Vec<Entry>, Option<String>, u32) {
