@@ -6,6 +6,9 @@ mod wasm;
 #[cfg(feature = "cli")]
 pub mod drand;
 
+#[doc(hidden)]
+pub mod _test_support;
+
 // Re-export StepName at the crate root so library consumers can pattern-match
 // on StepResult::name without drilling through the verify_steps module.
 pub use verify_steps::StepName;
