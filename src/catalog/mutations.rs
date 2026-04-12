@@ -139,7 +139,12 @@ fn remove(bundle: &mut Value, path: &str) -> Result<(), MutationError> {
 
 fn add(bundle: &mut Value, path: &str, new_value: Value) -> Result<(), MutationError> {
     let Some((parent_path, last)) = path.rsplit_once('.') else {
+        // No dot in path — top-level key. If it already exists as an array, append.
         if let Value::Object(map) = bundle {
+            if let Some(Value::Array(arr)) = map.get_mut(path) {
+                arr.push(new_value);
+                return Ok(());
+            }
             map.insert(path.to_string(), new_value);
             return Ok(());
         }

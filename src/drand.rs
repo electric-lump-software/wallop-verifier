@@ -94,4 +94,20 @@ mod tests {
         let result = verify_drand_round(QUICKNET_CHAIN_HASH, 1, &"ff".repeat(48), &"00".repeat(32));
         assert!(matches!(result, Err(DrandError::InvalidSignature)));
     }
+
+    #[test]
+    fn verifies_real_quicknet_beacon() {
+        // Real quicknet round 1000 fetched from https://api.drand.sh/<chain>/public/1000
+        let result = verify_drand_round(
+            QUICKNET_CHAIN_HASH,
+            1000,
+            "b44679b9a59af2ec876b1a6b1ad52ea9b1615fc3982b19576350f93447cb1125e342b73a8dd2bacbe47e4b6b63ed5e39",
+            "fe290beca10872ef2fb164d2aa4442de4566183ec51c56ff3cd603d930e54fdd",
+        );
+        assert!(
+            result.is_ok(),
+            "real quicknet beacon should verify: {:?}",
+            result
+        );
+    }
 }
