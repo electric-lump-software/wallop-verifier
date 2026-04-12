@@ -3,11 +3,10 @@
 //! These tests verify that the step-by-step pipeline and verify_full()
 //! agree on all inputs.
 
-use wallop_verifier::_test_support::{build_valid_bundle, test_signing_key};
+use wallop_verifier::_test_support::build_valid_bundle;
 use wallop_verifier::bundle::ProofBundle;
-use wallop_verifier::protocol::receipts::lock_receipt_hash;
 use wallop_verifier::verify_steps::{StepStatus, verify_bundle};
-use wallop_verifier::{Entry, compute_seed, compute_seed_drand_only, draw, entry_hash};
+use wallop_verifier::Entry;
 
 fn run_verify_full(bundle: &ProofBundle) -> bool {
     let entries: Vec<Entry> = bundle
