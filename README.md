@@ -134,6 +134,18 @@ const ok = verify_wasm(
 
 ---
 
+## CLI verifier
+
+A `wallop-verify` command-line binary is available behind the `cli` feature flag for verifying proof bundles, pinning trusted keys, and running the built-in tamper scenario self-test. See the [CLI reference](docs/cli.md) for full usage.
+
+```bash
+cargo install wallop_verifier --features cli
+wallop-verify proof.json
+wallop-verify selftest
+```
+
+---
+
 ## Building the WASM package
 
 ```bash
