@@ -63,19 +63,19 @@ impl fmt::Display for StepName {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum StepStatus {
     Pass,
     Fail(String),
     Skip(String),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum StepDetail {
     HexMismatch { expected: String, computed: String },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StepResult {
     pub name: StepName,
     pub status: StepStatus,
