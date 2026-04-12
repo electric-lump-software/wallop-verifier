@@ -4,9 +4,9 @@
 //! agree on all inputs.
 
 use wallop_verifier::_test_support::build_valid_bundle;
+use wallop_verifier::Entry;
 use wallop_verifier::bundle::ProofBundle;
 use wallop_verifier::verify_steps::{StepStatus, verify_bundle};
-use wallop_verifier::Entry;
 
 fn run_verify_full(bundle: &ProofBundle) -> bool {
     let entries: Vec<Entry> = bundle

@@ -1,4 +1,9 @@
 //! Integration tests for the --pin-operator-key flag.
+//!
+//! Requires the `cli` feature — the wallop-verify binary is only compiled
+//! when that feature is active.
+
+#![cfg(feature = "cli")]
 
 use std::io::Write;
 use std::process::{Command, Stdio};

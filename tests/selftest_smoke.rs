@@ -2,6 +2,11 @@
 //!
 //! Runs the compiled binary as a subprocess and checks the output format
 //! and exit code against the shipping catalog.
+//!
+//! Requires the `cli` feature — the wallop-verify binary is only compiled
+//! when that feature is active.
+
+#![cfg(feature = "cli")]
 
 use std::process::Command;
 
