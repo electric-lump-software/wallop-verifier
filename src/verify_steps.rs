@@ -2,6 +2,66 @@ use crate::bundle::ProofBundle;
 use crate::protocol::crypto;
 use crate::protocol::receipts::lock_receipt_hash;
 use crate::{Entry, compute_seed, compute_seed_drand_only, draw, entry_hash};
+use serde::{Deserialize, Serialize};
+use std::fmt;
+
+/// Stable identifier for each verification step. Used by the tamper scenario
+/// catalog to declare which step must reject a given scenario.
+///
+/// Always public, never feature-gated — library consumers may pattern-match
+/// on `StepResult::name` from outside the crate.
+///
+/// Serde `rename_all = "snake_case"` means the JSON wire form is
+/// `entry_hash`, `lock_signature`, etc. `Display` produces the human-friendly
+/// form (`"Entry hash"`, `"Lock receipt signature"`) used in CLI output.
+#[derive(Serialize, Deserialize, PartialEq, Eq, Hash, Clone, Copy, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum StepName {
+    EntryHash,
+    LockSignature,
+    ExecSignature,
+    ReceiptLinkage,
+    LockReceiptEntryHash,
+    ExecReceiptEntryHash,
+    SeedRecomputation,
+    WinnerSelection,
+    DrandBlsSignature,
+}
+
+impl StepName {
+    /// Returns all variants in a stable order. Used by the catalog's runtime
+    /// coverage check to iterate across every step without manual enumeration.
+    pub const fn all() -> &'static [StepName] {
+        &[
+            StepName::EntryHash,
+            StepName::LockSignature,
+            StepName::ExecSignature,
+            StepName::ReceiptLinkage,
+            StepName::LockReceiptEntryHash,
+            StepName::ExecReceiptEntryHash,
+            StepName::SeedRecomputation,
+            StepName::WinnerSelection,
+            StepName::DrandBlsSignature,
+        ]
+    }
+}
+
+impl fmt::Display for StepName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            StepName::EntryHash => "Entry hash",
+            StepName::LockSignature => "Lock receipt signature",
+            StepName::ExecSignature => "Exec receipt signature",
+            StepName::ReceiptLinkage => "Receipt linkage",
+            StepName::LockReceiptEntryHash => "Entry hash (lock receipt)",
+            StepName::ExecReceiptEntryHash => "Entry hash (exec receipt)",
+            StepName::SeedRecomputation => "Seed recomputation",
+            StepName::WinnerSelection => "Winner selection",
+            StepName::DrandBlsSignature => "Drand BLS signature",
+        };
+        f.write_str(s)
+    }
+}
 
 #[derive(Debug, PartialEq)]
 pub enum StepStatus {
@@ -12,7 +72,7 @@ pub enum StepStatus {
 
 #[derive(Debug)]
 pub struct StepResult {
-    pub name: &'static str,
+    pub name: StepName,
     pub status: StepStatus,
 }
 
@@ -68,7 +128,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
     // === Step 1: Entry hash ===
     let (computed_entry_hash, _) = entry_hash(&entries);
     steps.push(StepResult {
-        name: "Entry hash",
+        name: StepName::EntryHash,
         status: StepStatus::Pass,
     });
 
@@ -83,7 +143,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
         _ => false,
     };
     steps.push(StepResult {
-        name: "Lock receipt signature",
+        name: StepName::LockSignature,
         status: if step2_pass {
             StepStatus::Pass
         } else {
@@ -102,7 +162,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
         _ => false,
     };
     steps.push(StepResult {
-        name: "Exec receipt signature",
+        name: StepName::ExecSignature,
         status: if step3_pass {
             StepStatus::Pass
         } else {
@@ -113,7 +173,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
     // === Step 4: Receipt linkage ===
     if !step2_pass || !step3_pass {
         steps.push(StepResult {
-            name: "Receipt linkage",
+            name: StepName::ReceiptLinkage,
             status: StepStatus::Skip("signature check failed".into()),
         });
     } else {
@@ -126,7 +186,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
             .unwrap_or("");
         let step4_pass = computed_lrh == exec_lrh;
         steps.push(StepResult {
-            name: "Receipt linkage",
+            name: StepName::ReceiptLinkage,
             status: if step4_pass {
                 StepStatus::Pass
             } else {
@@ -138,7 +198,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
     // === Step 5a: Lock receipt entry_hash ===
     if !step2_pass {
         steps.push(StepResult {
-            name: "Entry hash (lock receipt)",
+            name: StepName::LockReceiptEntryHash,
             status: StepStatus::Skip("lock signature failed".into()),
         });
     } else {
@@ -150,7 +210,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
             .unwrap_or("");
         let step5a_pass = computed_entry_hash == lock_eh;
         steps.push(StepResult {
-            name: "Entry hash (lock receipt)",
+            name: StepName::LockReceiptEntryHash,
             status: if step5a_pass {
                 StepStatus::Pass
             } else {
@@ -162,7 +222,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
     // === Step 5b: Exec receipt entry_hash ===
     if !step3_pass {
         steps.push(StepResult {
-            name: "Entry hash (exec receipt)",
+            name: StepName::ExecReceiptEntryHash,
             status: StepStatus::Skip("exec signature failed".into()),
         });
     } else {
@@ -174,7 +234,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
             .unwrap_or("");
         let step5b_pass = computed_entry_hash == exec_eh;
         steps.push(StepResult {
-            name: "Entry hash (exec receipt)",
+            name: StepName::ExecReceiptEntryHash,
             status: if step5b_pass {
                 StepStatus::Pass
             } else {
@@ -200,7 +260,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
     let step6_pass;
     if !step3_pass {
         steps.push(StepResult {
-            name: "Seed recomputation",
+            name: StepName::SeedRecomputation,
             status: StepStatus::Skip("exec signature failed".into()),
         });
         step6_pass = false;
@@ -217,7 +277,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
             "drand only"
         };
         steps.push(StepResult {
-            name: "Seed recomputation",
+            name: StepName::SeedRecomputation,
             status: if step6_pass {
                 StepStatus::Pass
             } else {
@@ -231,7 +291,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
     // === Step 7: Winner selection ===
     if !step6_pass || !step3_pass {
         steps.push(StepResult {
-            name: "Winner selection",
+            name: StepName::WinnerSelection,
             status: StepStatus::Skip("seed or exec signature failed".into()),
         });
     } else {
@@ -262,12 +322,12 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
 
                 if computed_ids == receipt_ids {
                     steps.push(StepResult {
-                        name: "Winner selection",
+                        name: StepName::WinnerSelection,
                         status: StepStatus::Pass,
                     });
                 } else {
                     steps.push(StepResult {
-                        name: "Winner selection",
+                        name: StepName::WinnerSelection,
                         status: StepStatus::Fail(format!(
                             "computed {:?}, receipt has {:?}",
                             computed_ids, receipt_ids
@@ -277,7 +337,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
             }
             Err(e) => {
                 steps.push(StepResult {
-                    name: "Winner selection",
+                    name: StepName::WinnerSelection,
                     status: StepStatus::Fail(format!("draw error: {e}")),
                 });
             }
@@ -294,11 +354,11 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
             &bundle.entropy.drand_randomness,
         ) {
             Ok(()) => steps.push(StepResult {
-                name: "Drand BLS signature",
+                name: StepName::DrandBlsSignature,
                 status: StepStatus::Pass,
             }),
             Err(e) => steps.push(StepResult {
-                name: "Drand BLS signature",
+                name: StepName::DrandBlsSignature,
                 status: StepStatus::Fail(e.to_string()),
             }),
         }
@@ -306,7 +366,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
     #[cfg(not(feature = "cli"))]
     {
         steps.push(StepResult {
-            name: "Drand BLS signature",
+            name: StepName::DrandBlsSignature,
             status: StepStatus::Skip("BLS verification requires cli feature".into()),
         });
     }
@@ -568,19 +628,19 @@ mod tests {
     #[test]
     fn step_result_types_exist() {
         let r = StepResult {
-            name: "test",
+            name: StepName::EntryHash,
             status: StepStatus::Pass,
         };
         assert_eq!(r.status, StepStatus::Pass);
 
         let r2 = StepResult {
-            name: "test",
+            name: StepName::LockSignature,
             status: StepStatus::Fail("bad".into()),
         };
         assert!(matches!(r2.status, StepStatus::Fail(_)));
 
         let r3 = StepResult {
-            name: "test",
+            name: StepName::ReceiptLinkage,
             status: StepStatus::Skip("upstream failed".into()),
         };
         assert!(matches!(r3.status, StepStatus::Skip(_)));
@@ -591,11 +651,11 @@ mod tests {
         let report = VerificationReport {
             steps: vec![
                 StepResult {
-                    name: "a",
+                    name: StepName::EntryHash,
                     status: StepStatus::Pass,
                 },
                 StepResult {
-                    name: "b",
+                    name: StepName::LockSignature,
                     status: StepStatus::Pass,
                 },
             ],
@@ -611,15 +671,15 @@ mod tests {
         let report = VerificationReport {
             steps: vec![
                 StepResult {
-                    name: "a",
+                    name: StepName::EntryHash,
                     status: StepStatus::Pass,
                 },
                 StepResult {
-                    name: "b",
+                    name: StepName::LockSignature,
                     status: StepStatus::Fail("mismatch".into()),
                 },
                 StepResult {
-                    name: "c",
+                    name: StepName::ReceiptLinkage,
                     status: StepStatus::Skip("b failed".into()),
                 },
             ],
@@ -634,7 +694,7 @@ mod tests {
     fn report_all_skipped_is_not_passed() {
         let report = VerificationReport {
             steps: vec![StepResult {
-                name: "a",
+                name: StepName::EntryHash,
                 status: StepStatus::Skip("no input".into()),
             }],
             operator_key_id: None,
@@ -654,12 +714,77 @@ mod tests {
         let bls_step = report
             .steps
             .iter()
-            .find(|s| s.name == "Drand BLS signature")
+            .find(|s| matches!(s.name, StepName::DrandBlsSignature))
             .unwrap();
         assert!(
             matches!(bls_step.status, StepStatus::Fail(_)),
             "BLS step should fail for unknown chain, got {:?}",
             bls_step.status
+        );
+    }
+
+    // ==================== StepName unit tests (new in 0.5.0) ====================
+
+    #[test]
+    fn step_name_serializes_to_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&StepName::EntryHash).unwrap(),
+            "\"entry_hash\""
+        );
+        assert_eq!(
+            serde_json::to_string(&StepName::DrandBlsSignature).unwrap(),
+            "\"drand_bls_signature\""
+        );
+        assert_eq!(
+            serde_json::to_string(&StepName::LockReceiptEntryHash).unwrap(),
+            "\"lock_receipt_entry_hash\""
+        );
+    }
+
+    #[test]
+    fn step_name_deserializes_from_snake_case() {
+        let name: StepName = serde_json::from_str("\"lock_signature\"").unwrap();
+        assert_eq!(name, StepName::LockSignature);
+
+        let name: StepName = serde_json::from_str("\"receipt_linkage\"").unwrap();
+        assert_eq!(name, StepName::ReceiptLinkage);
+
+        let name: StepName = serde_json::from_str("\"drand_bls_signature\"").unwrap();
+        assert_eq!(name, StepName::DrandBlsSignature);
+    }
+
+    #[test]
+    fn step_name_display_produces_human_friendly_strings() {
+        assert_eq!(StepName::EntryHash.to_string(), "Entry hash");
+        assert_eq!(
+            StepName::LockSignature.to_string(),
+            "Lock receipt signature"
+        );
+        assert_eq!(StepName::ReceiptLinkage.to_string(), "Receipt linkage");
+        assert_eq!(
+            StepName::LockReceiptEntryHash.to_string(),
+            "Entry hash (lock receipt)"
+        );
+        assert_eq!(
+            StepName::DrandBlsSignature.to_string(),
+            "Drand BLS signature"
+        );
+    }
+
+    #[test]
+    fn step_name_all_returns_every_variant() {
+        let all = StepName::all();
+        assert_eq!(all.len(), 9, "all() should return all 9 StepName variants");
+        assert!(all.contains(&StepName::EntryHash));
+        assert!(all.contains(&StepName::DrandBlsSignature));
+    }
+
+    #[test]
+    fn step_name_unknown_string_fails_to_deserialize() {
+        let result: Result<StepName, _> = serde_json::from_str("\"not_a_real_step\"");
+        assert!(
+            result.is_err(),
+            "unknown step name should fail to deserialize"
         );
     }
 }

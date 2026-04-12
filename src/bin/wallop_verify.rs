@@ -65,11 +65,12 @@ fn main() -> ExitCode {
 
     // Print steps
     for step in &report.steps {
-        let dots = ".".repeat(30_usize.saturating_sub(step.name.len()));
+        let name_str = step.name.to_string();
+        let dots = ".".repeat(30_usize.saturating_sub(name_str.len()));
         match &step.status {
-            StepStatus::Pass => println!("  {} {} PASS", step.name, dots),
-            StepStatus::Fail(reason) => println!("  {} {} FAIL ({})", step.name, dots, reason),
-            StepStatus::Skip(reason) => println!("  {} {} SKIP ({})", step.name, dots, reason),
+            StepStatus::Pass => println!("  {} {} PASS", name_str, dots),
+            StepStatus::Fail(reason) => println!("  {} {} FAIL ({})", name_str, dots, reason),
+            StepStatus::Skip(reason) => println!("  {} {} SKIP ({})", name_str, dots, reason),
         }
     }
 

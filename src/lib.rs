@@ -6,6 +6,10 @@ mod wasm;
 #[cfg(feature = "cli")]
 pub mod drand;
 
+// Re-export StepName at the crate root so library consumers can pattern-match
+// on StepResult::name without drilling through the verify_steps module.
+pub use verify_steps::StepName;
+
 pub use protocol::crypto::{key_id, verify_receipt};
 pub use protocol::merkle::{anchor_root, merkle_root};
 pub use protocol::receipts::{
