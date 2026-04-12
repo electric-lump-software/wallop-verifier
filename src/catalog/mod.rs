@@ -4,4 +4,5 @@
 //! crate. The only public surface from this work is `StepName` (always public,
 //! in verify_steps) and the `wallop-verify selftest` CLI subcommand.
 
+pub(crate) mod keypairs;
 pub(crate) mod schema;
