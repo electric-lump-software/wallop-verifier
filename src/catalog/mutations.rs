@@ -202,6 +202,11 @@ pub(crate) fn apply_semantic_op(
         SemanticOp::SubstituteKeyAndResign {
             target, keypair, ..
         } => substitute_key_and_resign(bundle, target, keypair, ctx),
+        SemanticOp::ModifyPayloadAndResign {
+            target,
+            keypair,
+            modifications,
+        } => modify_payload_and_resign(bundle, target, keypair, modifications, ctx),
         SemanticOp::SubstituteSignature { .. }
         | SemanticOp::SubstitutePayload { .. }
         | SemanticOp::ReplayFrom { .. } => Err(MutationError::NotImplemented(
@@ -269,6 +274,60 @@ fn substitute_key_and_resign(
     let new_sig_hex = hex::encode(new_sig_bytes);
 
     // Write the new signature
+    let sig_value = walk_path(bundle, &sig_path)
+        .ok_or_else(|| MutationError::PathNotFound(sig_path.clone()))?;
+    *sig_value = Value::String(new_sig_hex);
+
+    Ok(())
+}
+
+/// Modify fields inside a receipt's payload JCS string, re-serialize with
+/// canonical key ordering (sorted alphabetically), then re-sign. This lets
+/// scenarios tamper semantic content while keeping the signature valid.
+fn modify_payload_and_resign(
+    bundle: &mut Value,
+    target: &str,
+    keypair_name: &str,
+    modifications: &serde_json::Map<String, serde_json::Value>,
+    ctx: &CatalogContext,
+) -> Result<(), MutationError> {
+    let signing_key = ctx.keypairs.get(keypair_name).ok_or_else(|| {
+        MutationError::PathNotFound(format!("keypair '{keypair_name}' not in context"))
+    })?;
+
+    let jcs_path = format!("{target}.payload_jcs");
+    let sig_path = format!("{target}.signature_hex");
+
+    // 1. Read and parse the existing JCS payload
+    let jcs_str = walk_path(bundle, &jcs_path)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .ok_or_else(|| MutationError::PathNotFound(jcs_path.clone()))?;
+
+    let mut payload: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&jcs_str)
+        .map_err(|_| MutationError::PathNotFound(format!("{jcs_path} (not valid JSON object)")))?;
+
+    // 2. Apply modifications
+    for (key, value) in modifications {
+        payload.insert(key.clone(), value.clone());
+    }
+
+    // 3. Re-serialize with canonical (sorted) key ordering via serde_json
+    // serde_json::to_string on a Map<String, Value> uses insertion order,
+    // but BTreeMap-based Value::Object sorts keys. Convert to Value first.
+    let canonical = serde_json::to_string(&serde_json::Value::Object(
+        payload.into_iter().collect::<serde_json::Map<_, _>>(),
+    ))
+    .map_err(|e| MutationError::PathNotFound(format!("re-serialization failed: {e}")))?;
+
+    // 4. Write the modified JCS back
+    let jcs_value = walk_path(bundle, &jcs_path)
+        .ok_or_else(|| MutationError::PathNotFound(jcs_path.clone()))?;
+    *jcs_value = Value::String(canonical.clone());
+
+    // 5. Re-sign with the named keypair
+    let new_sig_bytes = signing_key.sign(canonical.as_bytes()).to_bytes();
+    let new_sig_hex = hex::encode(new_sig_bytes);
+
     let sig_value = walk_path(bundle, &sig_path)
         .ok_or_else(|| MutationError::PathNotFound(sig_path.clone()))?;
     *sig_value = Value::String(new_sig_hex);

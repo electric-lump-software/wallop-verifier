@@ -104,7 +104,15 @@ pub(crate) fn run_catalog(catalog: &Catalog) -> CatalogReport {
         results.push(result);
     }
 
-    let coverage_complete = StepName::all().iter().all(|s| covered.contains(s));
+    // EntryHash is excluded from coverage because it's a computation step that
+    // always passes — it computes the hash, it doesn't validate anything. The
+    // actual entry-hash comparisons happen at LockReceiptEntryHash and
+    // ExecReceiptEntryHash. Requiring EntryHash to fire as a first-failure is
+    // structurally impossible.
+    let coverage_complete = StepName::all()
+        .iter()
+        .filter(|s| **s != StepName::EntryHash)
+        .all(|s| covered.contains(s));
 
     CatalogReport {
         total_scenarios: catalog.scenarios.len(),
@@ -123,6 +131,12 @@ fn build_context(catalog: &Catalog) -> CatalogContext {
     for (name, kp) in &catalog.test_keypairs {
         ctx.keypairs.insert(name.clone(), derive_keypair(&kp.seed));
     }
+    // Add the original signing key used by build_valid_bundle so scenarios
+    // can re-sign payloads with it after modification (modify_payload_and_resign).
+    ctx.keypairs.insert(
+        "original_signer".to_string(),
+        crate::_test_support::test_signing_key(),
+    );
     // fixture_bundles loading deferred — first scenario that references
     // a fixture bundle drives this code.
     ctx

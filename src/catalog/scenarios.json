@@ -15,7 +15,7 @@
     {
       "name": "lock_signature_byte_flip",
       "category": "lock_signature",
-      "description": "Flip a byte in the lock receipt Ed25519 signature. Must be caught by the lock signature verification step.",
+      "description": "Flip a byte in the lock receipt Ed25519 signature.",
       "severity": "critical",
       "tamper": {
         "kind": "field_op",
@@ -28,7 +28,7 @@
     {
       "name": "exec_signature_byte_flip",
       "category": "exec_signature",
-      "description": "Flip a byte in the execution receipt Ed25519 signature. Must be caught by the exec signature verification step.",
+      "description": "Flip a byte in the execution receipt Ed25519 signature.",
       "severity": "critical",
       "tamper": {
         "kind": "field_op",
@@ -41,7 +41,7 @@
     {
       "name": "entry_weight_tamper",
       "category": "entry_set",
-      "description": "Change the weight of the first entry. The recomputed entry hash will not match what was committed in the lock receipt.",
+      "description": "Change the weight of the first entry. The recomputed entry hash no longer matches what was committed in the lock receipt.",
       "severity": "critical",
       "tamper": {
         "kind": "field_op",
@@ -54,7 +54,7 @@
     {
       "name": "entry_add_fake",
       "category": "entry_set",
-      "description": "Add a fake entry to the bundle. The recomputed entry hash will differ from what the signed receipts committed to.",
+      "description": "Add a fake entry to the bundle. The recomputed entry hash differs from the committed value.",
       "severity": "critical",
       "tamper": {
         "kind": "field_op",
@@ -67,7 +67,7 @@
     {
       "name": "drand_bls_signature_tamper",
       "category": "entropy",
-      "description": "Flip a byte in the bundle-level drand_signature field. This does not break any receipt signature (they sign the payload JCS, not the entropy). All upstream steps pass; only the BLS verification step catches the invalid drand signature.",
+      "description": "Flip a byte in the bundle-level drand_signature. Does not break any receipt signature. All upstream steps pass; only BLS catches it.",
       "severity": "critical",
       "tamper": {
         "kind": "field_op",
@@ -76,6 +76,70 @@
         "offset": 0
       },
       "expected_catch_steps": ["drand_bls_signature"]
+    },
+    {
+      "name": "chain_break_lock_receipt_hash",
+      "category": "chain",
+      "description": "Modify the lock_receipt_hash inside the exec receipt payload and re-sign, breaking the chain linkage between lock and exec receipts while keeping the exec signature valid.",
+      "severity": "critical",
+      "tamper": {
+        "kind": "semantic_op",
+        "op": "modify_payload_and_resign",
+        "target": "execution_receipt",
+        "keypair": "original_signer",
+        "modifications": {
+          "lock_receipt_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "expected_catch_steps": ["receipt_linkage"]
+    },
+    {
+      "name": "seed_tamper_wrong_randomness",
+      "category": "seed",
+      "description": "Modify the drand_randomness inside the exec receipt payload and re-sign. The signature passes but the recomputed seed will not match.",
+      "severity": "critical",
+      "tamper": {
+        "kind": "semantic_op",
+        "op": "modify_payload_and_resign",
+        "target": "execution_receipt",
+        "keypair": "original_signer",
+        "modifications": {
+          "drand_randomness": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        }
+      },
+      "expected_catch_steps": ["seed_recomputation"]
+    },
+    {
+      "name": "winner_rewrite",
+      "category": "results",
+      "description": "Reverse the results array inside the exec receipt payload and re-sign. Seed recomputation passes (drand_randomness unchanged) but the recomputed winners will not match the reversed order.",
+      "severity": "critical",
+      "tamper": {
+        "kind": "semantic_op",
+        "op": "modify_payload_and_resign",
+        "target": "execution_receipt",
+        "keypair": "original_signer",
+        "modifications": {
+          "results": ["ticket-47", "ticket-48"]
+        }
+      },
+      "expected_catch_steps": ["winner_selection"]
+    },
+    {
+      "name": "exec_entry_hash_tamper",
+      "category": "entry_set",
+      "description": "Modify the entry_hash inside the exec receipt payload (but not the lock receipt) and re-sign. Lock receipt entry hash passes; exec receipt entry hash fails.",
+      "severity": "critical",
+      "tamper": {
+        "kind": "semantic_op",
+        "op": "modify_payload_and_resign",
+        "target": "execution_receipt",
+        "keypair": "original_signer",
+        "modifications": {
+          "entry_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "expected_catch_steps": ["exec_receipt_entry_hash"]
     }
   ]
 }

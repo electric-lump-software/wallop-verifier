@@ -179,6 +179,17 @@ pub(crate) enum SemanticOp {
     ReplayFrom {
         replace: ReplaySpec,
     },
+    /// Modify fields inside a receipt's payload JCS string, re-serialize with
+    /// canonical key ordering, then re-sign with the named keypair. Lets
+    /// scenarios tamper semantic content while keeping the signature valid,
+    /// so downstream steps (seed, winners, linkage) catch the change instead
+    /// of the signature step.
+    ModifyPayloadAndResign {
+        target: String,
+        keypair: String,
+        /// Key-value pairs to set inside the parsed payload JSON.
+        modifications: serde_json::Map<String, serde_json::Value>,
+    },
 }
 
 /// Explicit target/source declaration for replay operations.
