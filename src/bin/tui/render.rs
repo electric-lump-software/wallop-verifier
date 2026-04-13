@@ -68,7 +68,7 @@ fn render_scenario_list(session: &VerificationSession, frame: &mut Frame, area: 
             let text = format!("{marker}{prefix}{}", sc.name);
             let name_line = Line::from(Span::from(text).style(Style::default().fg(row_color)));
             let mut item_lines = vec![name_line];
-            if !sc.step_statuses.is_empty() {
+            if is_selected && !sc.step_statuses.is_empty() {
                 let mut hm_spans: Vec<Span> = vec![
                     Span::from("      ").style(Style::default()),
                 ];
