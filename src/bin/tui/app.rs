@@ -180,6 +180,19 @@ fn apply_scenario_report(
     }
 }
 
+/// Update the current scenario's heatmap with revealed steps so far.
+/// Called after each advance() in demo mode so the heatmap builds up live.
+fn sync_scenario_heatmap(session: &mut VerificationSession, scenario_idx: usize) {
+    if scenario_idx < session.scenarios.len() {
+        session.scenarios[scenario_idx].step_statuses = session
+            .steps
+            .iter()
+            .take(session.revealed_count)
+            .map(|s| s.status.clone())
+            .collect();
+    }
+}
+
 const DEMO_SPINNER_DURATION: Duration = Duration::from_millis(400);
 const DEMO_SCRAMBLE_DURATION: Duration = Duration::from_millis(300);
 const DEMO_SETTLE_PAUSE: Duration = Duration::from_millis(100);
@@ -296,6 +309,7 @@ fn run_demo_loop(
                     if target.is_empty() {
                         // No hex for this step (winners, BLS) -- skip scramble
                         session.advance();
+                        sync_scenario_heatmap(session, scenario_idx);
                         session.animation = AnimationPhase::Settled {
                             step,
                             started_at: Instant::now(),
@@ -312,6 +326,7 @@ fn run_demo_loop(
             AnimationPhase::Scrambling { step, started_at, .. } => {
                 if started_at.elapsed() > DEMO_SCRAMBLE_DURATION {
                     session.advance();
+                    sync_scenario_heatmap(session, scenario_idx);
                     session.animation = AnimationPhase::Settled {
                         step,
                         started_at: Instant::now(),
