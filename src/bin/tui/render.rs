@@ -56,25 +56,50 @@ fn render_scenario_list(session: &VerificationSession, frame: &mut Frame, area: 
         .iter()
         .enumerate()
         .map(|(i, sc)| {
-            let marker = if i == session.selected_scenario {
-                "▶ "
+            let is_selected = i == session.selected_scenario;
+            let marker = if is_selected { "▶ " } else { "  " };
+
+            if is_selected {
+                // Build 9-char heatmap from session.steps for the selected scenario
+                let mut spans: Vec<Span> = vec![
+                    Span::from(marker.to_string())
+                        .style(Style::default().fg(Color::Yellow)),
+                ];
+                let total = session.steps.len().min(9);
+                for si in 0..total {
+                    if si < session.revealed_count {
+                        let (ch, color) = match &session.steps[si].status {
+                            StepStatus::Pass => ("▓", Color::Green),
+                            StepStatus::Fail(_) => ("▓", Color::Red),
+                            StepStatus::Skip(_) => ("░", Color::DarkGray),
+                        };
+                        spans.push(
+                            Span::from(ch).style(Style::default().fg(color)),
+                        );
+                    } else {
+                        spans.push(
+                            Span::from("·")
+                                .style(Style::default().fg(Color::Rgb(60, 60, 60))),
+                        );
+                    }
+                }
+                spans.push(
+                    Span::from(format!(" {}", sc.name))
+                        .style(Style::default().fg(Color::Yellow)),
+                );
+                ListItem::new(Line::from(spans))
             } else {
-                "  "
-            };
-            let (prefix, color) = match sc.passed {
-                Some(true) => ("✓ ", Color::Green),
-                Some(false) => ("✗ ", Color::Red),
-                None => ("  ", Color::DarkGray),
-            };
-            let row_color = if i == session.selected_scenario {
-                Color::Yellow
-            } else {
-                color
-            };
-            let text = format!("{marker}{prefix}{}", sc.name);
-            ListItem::new(Line::from(
-                Span::from(text).style(Style::default().fg(row_color)),
-            ))
+                // Non-selected: simple indicator
+                let (prefix, color) = match sc.passed {
+                    Some(true) => ("✓ ", Color::Green),
+                    Some(false) => ("✗ ", Color::Red),
+                    None => ("  ", Color::DarkGray),
+                };
+                let text = format!("{marker}{prefix}{}", sc.name);
+                ListItem::new(Line::from(
+                    Span::from(text).style(Style::default().fg(color)),
+                ))
+            }
         })
         .collect();
 
