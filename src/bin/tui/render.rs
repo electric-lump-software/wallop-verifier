@@ -200,53 +200,56 @@ fn render_step_panel(session: &VerificationSession, frame: &mut Frame, area: Rec
                     target_hex,
                     ..
                 } => {
-                    // Step name line (no status yet)
-                    let line = Line::from(vec![
-                        Span::from("   ").style(Style::default().fg(Color::White)),
-                        Span::from(name_str).style(Style::default().fg(Color::White)),
-                        Span::from(" \u{00b7}\u{00b7}\u{00b7}")
-                            .style(Style::default().fg(Color::DarkGray)),
-                    ]);
-                    lines.push(line);
-
-                    // Hex scramble line
+                    // Scrambling hex fills the dots area on the same line
                     let elapsed_ms = started_at.elapsed().as_millis() as usize;
-                    let total_chars = target_hex.len();
-                    if total_chars > 0 {
-                        let elapsed_frac = (elapsed_ms as f64) / 300.0; // DEMO_SCRAMBLE_DURATION
-                        let settled_count =
-                            ((elapsed_frac * total_chars as f64) as usize).min(total_chars);
 
-                        let target_chars: Vec<char> = target_hex.chars().collect();
-                        let mut hex_spans: Vec<Span> = Vec::new();
-                        hex_spans
-                            .push(Span::from("      ").style(Style::default().fg(Color::Reset)));
+                    // Calculate how many chars fit in the dots area
+                    let available = inner.width as usize;
+                    let gutter_len = 3;
+                    let name_len = name_str.len();
+                    let fill_len = available.saturating_sub(gutter_len + name_len + 2); // 2 = spaces
 
-                        for (ci, &tc) in target_chars.iter().enumerate() {
-                            if ci < settled_count {
-                                // Settled: show real char in green
-                                hex_spans.push(
-                                    Span::from(tc.to_string())
-                                        .style(Style::default().fg(Color::Green)),
-                                );
+                    let total_chars = fill_len.min(target_hex.len()).max(2);
+                    let elapsed_frac = (elapsed_ms as f64) / 300.0; // DEMO_SCRAMBLE_DURATION
+                    let settled_count =
+                        ((elapsed_frac * total_chars as f64) as usize).min(total_chars);
+
+                    let target_chars: Vec<char> = target_hex.chars().collect();
+                    let mut hex_spans: Vec<Span> = Vec::new();
+                    hex_spans.push(
+                        Span::from("   ").style(Style::default().fg(Color::White)),
+                    );
+                    hex_spans.push(
+                        Span::from(name_str).style(Style::default().fg(Color::White)),
+                    );
+                    hex_spans.push(
+                        Span::from(" ").style(Style::default()),
+                    );
+
+                    for ci in 0..total_chars {
+                        if ci < settled_count {
+                            // Settled: show real char in green
+                            let ch = target_chars.get(ci).copied().unwrap_or('0');
+                            hex_spans.push(
+                                Span::from(ch.to_string())
+                                    .style(Style::default().fg(Color::Green)),
+                            );
+                        } else {
+                            // Unsettled: deterministic pseudo-random hex char
+                            let pseudo = ((elapsed_ms / 30 + ci * 7) % 16) as u8;
+                            let ch = char::from(if pseudo < 10 {
+                                b'0' + pseudo
                             } else {
-                                // Unsettled: deterministic pseudo-random hex char
-                                let pseudo =
-                                    ((elapsed_ms / 30 + ci * 7) % 16) as u8;
-                                let ch = char::from(if pseudo < 10 {
-                                    b'0' + pseudo
-                                } else {
-                                    b'a' + pseudo - 10
-                                });
-                                hex_spans.push(
-                                    Span::from(ch.to_string())
-                                        .style(Style::default().fg(Color::Yellow)),
-                                );
-                            }
+                                b'a' + pseudo - 10
+                            });
+                            hex_spans.push(
+                                Span::from(ch.to_string())
+                                    .style(Style::default().fg(Color::Yellow)),
+                            );
                         }
-
-                        lines.push(Line::from(hex_spans));
                     }
+
+                    lines.push(Line::from(hex_spans));
                 }
                 _ => {}
             }
