@@ -96,15 +96,24 @@ pub(crate) fn run_selftest_tui(demo: bool, record: Option<String>) -> ExitCode {
         })
         .collect();
 
-    // 3. Override DrandBlsSignature to SKIP on all per-scenario reports (test fixtures)
+    // 3. Override DrandBlsSignature to SKIP on scenario reports where BLS is NOT the
+    //    expected catch step. For scenarios that specifically test BLS tampering,
+    //    keep the real BLS result so the step panel shows the correct failure.
     let scenario_reports: Vec<Option<wallop_verifier::verify_steps::VerificationReport>> =
         scenario_reports
             .into_iter()
-            .map(|opt_report| {
+            .enumerate()
+            .map(|(i, opt_report)| {
+                let bls_is_catch_step = catalog_report
+                    .results
+                    .get(i)
+                    .is_some_and(|r| matches!(&r.outcome, ScenarioOutcome::Passed { caught_at } if *caught_at == StepName::DrandBlsSignature));
                 opt_report.map(|mut report| {
-                    for step in &mut report.steps {
-                        if step.name == StepName::DrandBlsSignature {
-                            step.status = StepStatus::Skip("test fixture".into());
+                    if !bls_is_catch_step {
+                        for step in &mut report.steps {
+                            if step.name == StepName::DrandBlsSignature {
+                                step.status = StepStatus::Skip("test fixture".into());
+                            }
                         }
                     }
                     report
