@@ -1,5 +1,5 @@
 use std::io;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::execute;
@@ -15,27 +15,88 @@ use super::input::{Action, map_key};
 use super::render;
 use super::state::{AnimationPhase, Mode, VerificationSession};
 
+// ── Asciicast recording via TeeWriter ────────────────────────────────────
+
+struct Recording {
+    file: std::fs::File,
+    start: Instant,
+}
+
+struct TeeWriter {
+    inner: io::Stdout,
+    recording: Option<Recording>,
+}
+
+impl TeeWriter {
+    fn new(record_path: Option<&str>) -> io::Result<Self> {
+        let recording = match record_path {
+            Some(path) => {
+                let mut file = std::fs::File::create(path)?;
+                let ts = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let header = format!(
+                    r#"{{"version":2,"width":80,"height":24,"timestamp":{ts}}}"#
+                );
+                use io::Write;
+                writeln!(file, "{header}")?;
+                Some(Recording {
+                    file,
+                    start: Instant::now(),
+                })
+            }
+            None => None,
+        };
+        Ok(Self {
+            inner: io::stdout(),
+            recording,
+        })
+    }
+}
+
+impl io::Write for TeeWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Some(ref mut rec) = self.recording {
+            let elapsed = rec.start.elapsed().as_secs_f64();
+            let escaped =
+                serde_json::to_string(&String::from_utf8_lossy(buf)).unwrap_or_default();
+            writeln!(rec.file, "[{elapsed:.6}, \"o\", {escaped}]").ok();
+        }
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if let Some(ref mut rec) = self.recording {
+            rec.file.flush().ok();
+        }
+        self.inner.flush()
+    }
+}
+
 /// Run the TUI with pre-computed per-scenario reports for selftest mode.
 pub fn run_with_reports(
     session: VerificationSession,
     scenario_reports: Vec<Option<VerificationReport>>,
+    record_path: Option<String>,
 ) -> io::Result<()> {
-    run_inner(session, Some(scenario_reports))
+    run_inner(session, Some(scenario_reports), record_path)
 }
 
 pub fn run(session: VerificationSession) -> io::Result<()> {
-    run_inner(session, None)
+    run_inner(session, None, None)
 }
 
 fn run_inner(
     mut session: VerificationSession,
     scenario_reports: Option<Vec<Option<VerificationReport>>>,
+    record_path: Option<String>,
 ) -> io::Result<()> {
     // Set up terminal
     enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
+    let writer = TeeWriter::new(record_path.as_deref())?;
+    execute!(&writer.inner, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(writer);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
@@ -50,7 +111,7 @@ fn run_inner(
 }
 
 fn run_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut Terminal<CrosstermBackend<TeeWriter>>,
     session: &mut VerificationSession,
     scenario_reports: Option<Vec<Option<VerificationReport>>>,
 ) -> io::Result<()> {
@@ -62,7 +123,7 @@ fn run_loop(
 }
 
 fn run_interactive_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut Terminal<CrosstermBackend<TeeWriter>>,
     session: &mut VerificationSession,
     scenario_reports: Option<&[Option<VerificationReport>]>,
 ) -> io::Result<()> {
@@ -126,7 +187,7 @@ const DEMO_FAIL_EXTRA: Duration = Duration::from_millis(700);
 const DEMO_SCENARIO_DELAY: Duration = Duration::from_millis(2000);
 
 fn run_demo_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut Terminal<CrosstermBackend<TeeWriter>>,
     session: &mut VerificationSession,
     scenario_reports: Option<&[Option<VerificationReport>]>,
 ) -> io::Result<()> {

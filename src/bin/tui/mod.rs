@@ -64,7 +64,7 @@ pub(crate) fn run_verify_tui(path: &str, pins: &super::PinConfig) -> ExitCode {
 
 // ── Selftest TUI ──────────────────────────────────────────────────────────
 
-pub(crate) fn run_selftest_tui(demo: bool) -> ExitCode {
+pub(crate) fn run_selftest_tui(demo: bool, record: Option<String>) -> ExitCode {
     // 1. Run the shipping catalog with per-scenario reports
     let (catalog_report, scenario_reports) =
         match wallop_verifier::catalog::run_shipping_catalog_with_reports() {
@@ -129,7 +129,7 @@ pub(crate) fn run_selftest_tui(demo: bool) -> ExitCode {
     }
 
     // 6. Run the TUI with pre-computed reports
-    if let Err(e) = app::run_with_reports(session, scenario_reports) {
+    if let Err(e) = app::run_with_reports(session, scenario_reports, record) {
         eprintln!("TUI error: {e}");
         return ExitCode::from(2);
     }

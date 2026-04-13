@@ -62,6 +62,10 @@ enum Commands {
         #[arg(long, conflicts_with = "tui")]
         #[cfg(feature = "tui")]
         demo: bool,
+        /// Record the demo session to an asciicast v2 file (requires --demo)
+        #[arg(long, value_name = "PATH", requires = "demo")]
+        #[cfg(feature = "tui")]
+        record: Option<String>,
     },
 }
 
@@ -75,12 +79,14 @@ fn main() -> ExitCode {
                     tui: use_tui,
                 #[cfg(feature = "tui")]
                 demo,
+                #[cfg(feature = "tui")]
+                record,
             }),
             _,
         ) => {
             #[cfg(feature = "tui")]
             if use_tui || demo {
-                return tui::run_selftest_tui(demo);
+                return tui::run_selftest_tui(demo, record);
             }
             run_selftest()
         }
