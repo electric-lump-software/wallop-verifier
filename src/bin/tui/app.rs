@@ -217,13 +217,6 @@ fn run_demo_loop(
             AnimationPhase::Scrambling { step, started_at, .. } => {
                 if started_at.elapsed() > DEMO_SCRAMBLE_DURATION {
                     session.advance();
-                    if matches!(
-                        session.steps.get(step).map(|s| &s.status),
-                        Some(wallop_verifier::verify_steps::StepStatus::Fail(_))
-                    ) {
-                        print!("\x07");
-                        io::stdout().flush().ok();
-                    }
                     session.animation = AnimationPhase::Settled {
                         step,
                         started_at: Instant::now(),
