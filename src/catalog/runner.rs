@@ -13,10 +13,56 @@ use crate::_test_support::build_valid_bundle;
 use crate::catalog::keypairs::derive_keypair;
 use crate::catalog::loader::{LoadError, load_catalog_from_str};
 use crate::catalog::mutations::{CatalogContext, apply_field_op, apply_semantic_op};
-use crate::catalog::schema::{Catalog, Defaults, Scenario, Tamper};
+use crate::catalog::schema::{Catalog, Defaults, FieldOp, Scenario, SemanticOp, Tamper};
 use crate::verify_steps::{StepStatus, verify_bundle};
 use crate::{Entry, StepName};
 use std::collections::HashSet;
+
+/// Format a `Tamper` enum into a human-readable one-line summary for the TUI.
+fn format_tamper(tamper: &Tamper) -> String {
+    match tamper {
+        Tamper::FieldOp(op) => match op {
+            FieldOp::ByteFlip { path, offset } => format!("byte_flip {path} offset {offset}"),
+            FieldOp::SetValue { path, value } => {
+                let val_str = serde_json::to_string(value).unwrap_or_else(|_| "?".into());
+                let val_short = if val_str.len() > 30 {
+                    format!("{}...", &val_str[..27])
+                } else {
+                    val_str
+                };
+                format!("set_value {path} = {val_short}")
+            }
+            FieldOp::Remove { path } => format!("remove {path}"),
+            FieldOp::Add { path, .. } => format!("add {path}"),
+            FieldOp::Reorder { path, ordering } => format!("reorder {path} {:?}", ordering),
+        },
+        Tamper::SemanticOp(op) => match op {
+            SemanticOp::RecanonicalizeJcs { target } => {
+                format!("recanonicalize_jcs {target}")
+            }
+            SemanticOp::SubstituteSignature { target, source, .. } => {
+                format!("substitute_signature {target} from {source}")
+            }
+            SemanticOp::SubstitutePayload { target, source, .. } => {
+                format!("substitute_payload {target} from {source}")
+            }
+            SemanticOp::SubstituteKeyAndResign { target, keypair, .. } => {
+                format!("substitute_key_and_resign {target} with {keypair}")
+            }
+            SemanticOp::ReplayFrom { replace } => {
+                format!("replay {} from {}", replace.target, replace.source)
+            }
+            SemanticOp::ModifyPayloadAndResign {
+                target,
+                keypair,
+                modifications,
+            } => {
+                let keys: Vec<&str> = modifications.keys().map(|k| k.as_str()).collect();
+                format!("modify_and_resign {target} with {keypair}: {}", keys.join(", "))
+            }
+        },
+    }
+}
 
 /// Overall catalog run report.
 #[derive(Debug)]
@@ -36,6 +82,7 @@ pub struct CatalogReport {
 pub struct ScenarioResult {
     pub name: String,
     pub description: String,
+    pub tamper_summary: String,
     pub outcome: ScenarioOutcome,
 }
 
@@ -235,6 +282,7 @@ fn run_single_with_report(
                 ScenarioResult {
                     name: scenario.name.clone(),
                     description: scenario.description.clone(),
+                    tamper_summary: format_tamper(&scenario.tamper),
                     outcome: ScenarioOutcome::MutationError(format!(
                         "base bundle parse error: {e}"
                     )),
@@ -256,6 +304,7 @@ fn run_single_with_report(
             ScenarioResult {
                 name: scenario.name.clone(),
                 description: scenario.description.clone(),
+                tamper_summary: format_tamper(&scenario.tamper),
                 outcome: ScenarioOutcome::MutationError(e),
             },
             None,
@@ -275,6 +324,7 @@ fn run_single_with_report(
                 ScenarioResult {
                     name: scenario.name.clone(),
                     description: scenario.description.clone(),
+                    tamper_summary: format_tamper(&scenario.tamper),
                     outcome: ScenarioOutcome::MutationError(format!(
                         "mutated bundle failed to parse: {e}"
                     )),
@@ -313,6 +363,7 @@ fn run_single_with_report(
         ScenarioResult {
             name: scenario.name.clone(),
             description: scenario.description.clone(),
+            tamper_summary: format_tamper(&scenario.tamper),
             outcome,
         },
         Some(report),

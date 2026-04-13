@@ -89,7 +89,7 @@ pub(crate) fn run_selftest_tui(demo: bool) -> ExitCode {
             ScenarioEntry {
                 name: r.name.clone(),
                 description: r.description.clone(),
-                tamper_summary: r.description.clone(),
+                tamper_summary: r.tamper_summary.clone(),
                 passed: if demo { None } else { passed },
             }
         })
