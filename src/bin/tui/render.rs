@@ -195,16 +195,23 @@ fn render_step_panel(session: &VerificationSession, frame: &mut Frame, area: Rec
                     let fixed_width = gutter_len + name_len + 2 + status_len;
                     let wave_count = available.saturating_sub(fixed_width).max(min_dots);
 
-                    // Travelling sine wave using braille chars at different heights
-                    // ⣀ (bottom) → ⡄ → ⠤ → ⠑ → ⠊ → ⠉ (top) and back
-                    const WAVE_CHARS: &[char] = &[
+                    // Graphic EQ effect: each column bounces independently
+                    // using different frequencies so they look quasi-random.
+                    const EQ_CHARS: &[char] = &[
                         '⣀', '⢄', '⠤', '⠒', '⠑', '⠊', '⠉',
                         '⠊', '⠑', '⠒', '⠤', '⢄',
                     ];
-                    let wave_len = WAVE_CHARS.len();
-                    let speed = 60.0_f64; // ms per wave step
+                    let eq_len = EQ_CHARS.len();
 
-                    let mut wave_spans: Vec<Span> = vec![
+                    // Each column gets a unique speed derived from a hash of its
+                    // position — primes keep them out of sync with each other.
+                    const PRIMES: &[usize] = &[
+                        53, 67, 73, 89, 97, 59, 83, 71, 61, 79,
+                        101, 103, 107, 109, 113, 127, 131, 137, 139, 149,
+                        151, 157, 163, 167, 173, 179, 181, 191, 193, 197,
+                    ];
+
+                    let mut eq_spans: Vec<Span> = vec![
                         Span::from(format!(" {spinner} "))
                             .style(Style::default().fg(Color::Yellow)),
                         Span::from(name_str).style(Style::default().fg(Color::White)),
@@ -212,29 +219,31 @@ fn render_step_panel(session: &VerificationSession, frame: &mut Frame, area: Rec
                     ];
 
                     for ci in 0..wave_count {
-                        let phase = (elapsed_ms as f64 / speed) + (ci as f64 * 0.7);
-                        let idx = (phase as usize) % wave_len;
-                        let ch = WAVE_CHARS[idx];
-                        // Brightness varies with wave position
-                        let brightness = match idx {
+                        // Each column oscillates at its own rate
+                        let speed = PRIMES[ci % PRIMES.len()] as f64;
+                        let offset = (ci * 37 + ci * ci * 13) as f64; // phase offset
+                        let phase = (elapsed_ms as f64 + offset) / speed;
+                        let idx = (phase as usize) % eq_len;
+                        let ch = EQ_CHARS[idx];
+                        let brightness: u8 = match idx {
                             0 | 11 => 50,
-                            1 | 10 => 65,
-                            2 | 9 => 80,
-                            3 | 8 => 95,
-                            4 | 7 => 110,
+                            1 | 10 => 60,
+                            2 | 9 => 75,
+                            3 | 8 => 90,
+                            4 | 7 => 105,
                             5 | 6 => 120,
                             _ => 80,
                         };
-                        wave_spans.push(
+                        eq_spans.push(
                             Span::from(ch.to_string())
                                 .style(Style::default().fg(Color::Rgb(brightness, brightness, brightness))),
                         );
                     }
 
-                    wave_spans.push(Span::from(" ").style(Style::default()));
-                    wave_spans.push(Span::from("    ").style(Style::default()));
+                    eq_spans.push(Span::from(" ").style(Style::default()));
+                    eq_spans.push(Span::from("    ").style(Style::default()));
 
-                    lines.push(Line::from(wave_spans));
+                    lines.push(Line::from(eq_spans));
                 }
                 AnimationPhase::Scrambling { started_at, .. } => {
                     // Status slot (4 chars) scrambles left-to-right to the real value
