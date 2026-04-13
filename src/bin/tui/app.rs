@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
