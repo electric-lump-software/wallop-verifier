@@ -186,70 +186,84 @@ fn render_step_panel(session: &VerificationSession, frame: &mut Frame, area: Rec
                     let spinner_idx = (elapsed_ms / 80) % SPINNER_CHARS.len();
                     let spinner = SPINNER_CHARS[spinner_idx];
 
+                    // Dots pulse brightness sinusoidally: grey 40..120 at ~2Hz
+                    let phase = (elapsed_ms as f64) * 2.0 * std::f64::consts::PI / 500.0;
+                    let grey = (80.0 + 40.0 * phase.sin()) as u8;
+                    let dot_color = Color::Rgb(grey, grey, grey);
+
+                    // Calculate dot count (same formula as revealed steps)
+                    let available = inner.width as usize;
+                    let gutter_len = 3;
+                    let name_len = name_str.len();
+                    let status_len = 4; // "PASS"/"FAIL"/"SKIP"
+                    let min_dots = 2;
+                    let fixed_width = gutter_len + name_len + 2 + status_len;
+                    let dots_count = available.saturating_sub(fixed_width).max(min_dots);
+                    let dots: String = " ".to_string() + &".".repeat(dots_count) + " ";
+
                     let line = Line::from(vec![
                         Span::from(format!(" {spinner} "))
                             .style(Style::default().fg(Color::Yellow)),
                         Span::from(name_str).style(Style::default().fg(Color::White)),
-                        Span::from(" \u{00b7}\u{00b7}\u{00b7}")
-                            .style(Style::default().fg(Color::DarkGray)),
+                        Span::from(dots).style(Style::default().fg(dot_color)),
+                        // No status text yet — just empty space where PASS/FAIL will appear
+                        Span::from("    ").style(Style::default()),
                     ]);
                     lines.push(line);
                 }
-                AnimationPhase::Scrambling {
-                    started_at,
-                    target_hex,
-                    ..
-                } => {
-                    // Scrambling hex fills the dots area on the same line
+                AnimationPhase::Scrambling { started_at, .. } => {
+                    // Status slot (4 chars) scrambles left-to-right to the real value
                     let elapsed_ms = started_at.elapsed().as_millis() as usize;
+                    let step = &session.steps[i];
 
-                    // Calculate how many chars fit in the dots area
+                    let (status_label, status_color) = match &step.status {
+                        StepStatus::Pass => ("PASS", Color::Green),
+                        StepStatus::Fail(_) => ("FAIL", Color::Red),
+                        StepStatus::Skip(_) => ("SKIP", Color::DarkGray),
+                    };
+                    let status_chars: Vec<char> = status_label.chars().collect();
+                    let total = status_chars.len(); // always 4
+                    let elapsed_frac = (elapsed_ms as f64) / 300.0;
+                    let settled_count =
+                        ((elapsed_frac * total as f64) as usize).min(total);
+
+                    // Normal dots (no pulse)
                     let available = inner.width as usize;
                     let gutter_len = 3;
                     let name_len = name_str.len();
-                    let fill_len = available.saturating_sub(gutter_len + name_len + 2); // 2 = spaces
+                    let min_dots = 2;
+                    let fixed_width = gutter_len + name_len + 2 + total;
+                    let dots_count = available.saturating_sub(fixed_width).max(min_dots);
+                    let dots: String = " ".to_string() + &".".repeat(dots_count) + " ";
 
-                    let total_chars = fill_len.min(target_hex.len()).max(2);
-                    let elapsed_frac = (elapsed_ms as f64) / 300.0; // DEMO_SCRAMBLE_DURATION
-                    let settled_count =
-                        ((elapsed_frac * total_chars as f64) as usize).min(total_chars);
-
-                    let target_chars: Vec<char> = target_hex.chars().collect();
-                    let mut hex_spans: Vec<Span> = Vec::new();
-                    hex_spans.push(
+                    let mut spans: Vec<Span> = vec![
                         Span::from("   ").style(Style::default().fg(Color::White)),
-                    );
-                    hex_spans.push(
                         Span::from(name_str).style(Style::default().fg(Color::White)),
-                    );
-                    hex_spans.push(
-                        Span::from(" ").style(Style::default()),
-                    );
+                        Span::from(dots).style(Style::default().fg(Color::DarkGray)),
+                    ];
 
-                    for ci in 0..total_chars {
+                    // Build the 4-char status with settled/scrambling chars
+                    for (ci, &real_ch) in status_chars.iter().enumerate() {
                         if ci < settled_count {
-                            // Settled: show real char in green
-                            let ch = target_chars.get(ci).copied().unwrap_or('0');
-                            hex_spans.push(
-                                Span::from(ch.to_string())
-                                    .style(Style::default().fg(Color::Green)),
+                            spans.push(
+                                Span::from(real_ch.to_string())
+                                    .style(Style::default().fg(status_color)),
                             );
                         } else {
-                            // Unsettled: deterministic pseudo-random hex char
-                            let pseudo = ((elapsed_ms / 30 + ci * 7) % 16) as u8;
+                            let pseudo = ((elapsed_ms / 30 + ci * 7) % 36) as u8;
                             let ch = char::from(if pseudo < 10 {
                                 b'0' + pseudo
                             } else {
                                 b'a' + pseudo - 10
                             });
-                            hex_spans.push(
+                            spans.push(
                                 Span::from(ch.to_string())
                                     .style(Style::default().fg(Color::Yellow)),
                             );
                         }
                     }
 
-                    lines.push(Line::from(hex_spans));
+                    lines.push(Line::from(spans));
                 }
                 _ => {}
             }

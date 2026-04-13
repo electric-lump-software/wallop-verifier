@@ -30,6 +30,7 @@ pub enum PinState {
 pub enum AnimationPhase {
     Idle,
     Spinning { step: usize, started_at: Instant },
+    #[allow(dead_code)]
     Scrambling { step: usize, started_at: Instant, target_hex: String },
     Settled { step: usize, started_at: Instant },
 }
