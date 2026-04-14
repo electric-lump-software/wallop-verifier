@@ -223,13 +223,16 @@ fn run_demo_loop(
                     if scenario_idx < session.scenarios.len()
                         && session.scenarios[scenario_idx].passed.is_none()
                     {
-                        let has_fail = session.steps.iter().any(|s| {
+                        // A selftest scenario "passes" when the verifier catches
+                        // the tamper — i.e. at least one step FAILS. That means
+                        // the verifier correctly rejected the tampered bundle.
+                        let tamper_caught = session.steps.iter().any(|s| {
                             matches!(s.status, wallop_verifier::verify_steps::StepStatus::Fail(_))
                         });
-                        session.scenarios[scenario_idx].passed = Some(!has_fail);
+                        session.scenarios[scenario_idx].passed = Some(tamper_caught);
                         session.scenarios[scenario_idx].step_statuses =
                             session.steps.iter().map(|s| s.status.clone()).collect();
-                        if !has_fail {
+                        if tamper_caught {
                             session.scenarios_passed += 1;
                         }
                     }
