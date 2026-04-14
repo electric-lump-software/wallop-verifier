@@ -413,7 +413,7 @@ fn render_demo_complete(session: &VerificationSession, frame: &mut Frame, area: 
         format!("   All {total} scenarios caught — verifier integrity confirmed")
     } else {
         let missed = total - passed;
-        format!("   {missed}/{total} scenarios missed — verifier has gaps")
+        format!("   {missed}/{total} tampered bundles were not rejected")
     };
     lines.push(Line::from(
         Span::from(summary_text).style(

@@ -237,6 +237,12 @@ fn run_demo_loop(
                     // Redraw with updated scenario status
                     terminal.draw(|frame| render::render(session, frame))?;
 
+                    // Pause to let the user see the final result before moving on
+                    terminal.draw(|frame| render::render(session, frame))?;
+                    if wait_or_quit(DEMO_SETTLE_PAUSE)? {
+                        return Ok(());
+                    }
+
                     // Check if this was the last scenario
                     scenario_idx += 1;
                     if scenario_idx >= total_scenarios {
