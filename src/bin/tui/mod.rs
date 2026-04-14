@@ -64,7 +64,7 @@ pub(crate) fn run_verify_tui(path: &str, pins: &super::PinConfig) -> ExitCode {
 
 // ── Selftest TUI ──────────────────────────────────────────────────────────
 
-pub(crate) fn run_selftest_tui(demo: bool) -> ExitCode {
+pub(crate) fn run_selftest_tui(demo: bool, record: Option<String>) -> ExitCode {
     // 1. Run the shipping catalog with per-scenario reports
     let (catalog_report, scenario_reports) =
         match wallop_verifier::catalog::run_shipping_catalog_with_reports() {
@@ -76,7 +76,7 @@ pub(crate) fn run_selftest_tui(demo: bool) -> ExitCode {
         };
 
     // 2. Build scenario entries from catalog results
-    let scenarios: Vec<ScenarioEntry> = catalog_report
+    let mut scenarios: Vec<ScenarioEntry> = catalog_report
         .results
         .iter()
         .map(|r| {
@@ -91,25 +91,42 @@ pub(crate) fn run_selftest_tui(demo: bool) -> ExitCode {
                 description: r.description.clone(),
                 tamper_summary: r.tamper_summary.clone(),
                 passed: if demo { None } else { passed },
+                step_statuses: vec![],
             }
         })
         .collect();
 
-    // 3. Override DrandBlsSignature to SKIP on all per-scenario reports (test fixtures)
+    // 3. Override DrandBlsSignature to SKIP on scenario reports where BLS is NOT the
+    //    expected catch step. For scenarios that specifically test BLS tampering,
+    //    keep the real BLS result so the step panel shows the correct failure.
     let scenario_reports: Vec<Option<wallop_verifier::verify_steps::VerificationReport>> =
         scenario_reports
             .into_iter()
-            .map(|opt_report| {
+            .enumerate()
+            .map(|(i, opt_report)| {
+                let bls_is_catch_step = catalog_report
+                    .results
+                    .get(i)
+                    .is_some_and(|r| matches!(&r.outcome, ScenarioOutcome::Passed { caught_at } if *caught_at == StepName::DrandBlsSignature));
                 opt_report.map(|mut report| {
-                    for step in &mut report.steps {
-                        if step.name == StepName::DrandBlsSignature {
-                            step.status = StepStatus::Skip("test fixture".into());
+                    if !bls_is_catch_step {
+                        for step in &mut report.steps {
+                            if step.name == StepName::DrandBlsSignature {
+                                step.status = StepStatus::Skip("test fixture".into());
+                            }
                         }
                     }
                     report
                 })
             })
             .collect();
+
+    // Populate step_statuses from the (now-overridden) per-scenario reports
+    for (i, scenario) in scenarios.iter_mut().enumerate() {
+        if let Some(Some(report)) = scenario_reports.get(i) {
+            scenario.step_statuses = report.steps.iter().map(|s| s.status.clone()).collect();
+        }
+    }
 
     // 4. Build initial verification report from the first scenario
     let initial_report = scenario_reports
@@ -129,7 +146,7 @@ pub(crate) fn run_selftest_tui(demo: bool) -> ExitCode {
     }
 
     // 6. Run the TUI with pre-computed reports
-    if let Err(e) = app::run_with_reports(session, scenario_reports) {
+    if let Err(e) = app::run_with_reports(session, scenario_reports, record) {
         eprintln!("TUI error: {e}");
         return ExitCode::from(2);
     }

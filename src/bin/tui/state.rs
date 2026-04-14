@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use wallop_verifier::verify_steps::{StepResult, StepStatus, VerificationReport};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -25,12 +27,38 @@ pub enum PinState {
 }
 
 #[derive(Debug, Clone)]
+pub enum AnimationPhase {
+    Idle,
+    Spinning {
+        step: usize,
+        started_at: Instant,
+    },
+    #[allow(dead_code)]
+    Scrambling {
+        step: usize,
+        started_at: Instant,
+        target_hex: String,
+    },
+    Settled {
+        step: usize,
+        started_at: Instant,
+    },
+    VictoryRipple {
+        started_at: Instant,
+    },
+    /// Demo finished — show summary screen.
+    DemoComplete,
+}
+
+#[derive(Debug, Clone)]
 pub struct ScenarioEntry {
     pub name: String,
     #[allow(dead_code)]
     pub description: String,
     pub tamper_summary: String,
     pub passed: Option<bool>,
+    /// Per-step statuses for the heatmap display. Empty until the scenario has run.
+    pub step_statuses: Vec<StepStatus>,
 }
 
 pub struct VerificationSession {
@@ -45,6 +73,7 @@ pub struct VerificationSession {
     pub detail_expanded: bool,
     pub operator_pin: PinState,
     pub infra_pin: PinState,
+    pub animation: AnimationPhase,
     pub scenarios: Vec<ScenarioEntry>,
     pub selected_scenario: usize,
     pub scenarios_passed: usize,
@@ -66,6 +95,7 @@ impl VerificationSession {
             revealed_count: 0,
             selected_step: 0,
             detail_expanded: false,
+            animation: AnimationPhase::Idle,
             operator_pin: op_pin,
             infra_pin,
             scenarios: Vec::new(),
@@ -86,6 +116,7 @@ impl VerificationSession {
             revealed_count: 0,
             selected_step: 0,
             detail_expanded: false,
+            animation: AnimationPhase::Idle,
             operator_pin: PinState::Test,
             infra_pin: PinState::Test,
             scenarios,
@@ -202,6 +233,7 @@ impl VerificationSession {
         self.revealed_count = 0;
         self.selected_step = 0;
         self.detail_expanded = false;
+        self.animation = AnimationPhase::Idle;
     }
 }
 
@@ -253,18 +285,21 @@ mod tests {
                 description: "Modify entry weights".into(),
                 tamper_summary: "weight 1 -> 99".into(),
                 passed: None,
+                step_statuses: vec![],
             },
             ScenarioEntry {
                 name: "Bad lock sig".into(),
                 description: "Corrupt lock signature".into(),
                 tamper_summary: "flip sig bytes".into(),
                 passed: None,
+                step_statuses: vec![],
             },
             ScenarioEntry {
                 name: "Wrong seed".into(),
                 description: "Alter the seed value".into(),
                 tamper_summary: "seed -> ff..ff".into(),
                 passed: None,
+                step_statuses: vec![],
             },
         ]
     }
@@ -495,6 +530,43 @@ mod tests {
         assert_eq!(session.revealed_count, 0);
         assert_eq!(session.selected_step, 0);
         assert!(!session.detail_expanded);
+    }
+
+    #[test]
+    fn animation_phase_starts_idle() {
+        let session = VerificationSession::new_bundle_verify(
+            all_pass_report(),
+            PinState::Unpinned,
+            PinState::Unpinned,
+        );
+        assert!(matches!(session.animation, AnimationPhase::Idle));
+    }
+
+    #[test]
+    fn scenario_switch_resets_animation() {
+        let scenarios = vec![
+            ScenarioEntry {
+                name: "a".into(),
+                description: "".into(),
+                tamper_summary: "".into(),
+                passed: None,
+                step_statuses: vec![],
+            },
+            ScenarioEntry {
+                name: "b".into(),
+                description: "".into(),
+                tamper_summary: "".into(),
+                passed: None,
+                step_statuses: vec![],
+            },
+        ];
+        let mut session = VerificationSession::new_selftest(all_pass_report(), scenarios);
+        session.animation = AnimationPhase::Spinning {
+            step: 0,
+            started_at: std::time::Instant::now(),
+        };
+        session.next_scenario();
+        assert!(matches!(session.animation, AnimationPhase::Idle));
     }
 
     #[test]

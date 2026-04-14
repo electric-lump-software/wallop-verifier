@@ -6,7 +6,9 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use wallop_verifier::verify_steps::{StepDetail, StepStatus};
 
-use super::state::{Mode, PinState, VerificationSession, View};
+use super::state::{AnimationPhase, Mode, PinState, VerificationSession, View};
+
+const SPINNER_CHARS: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// Top-level render entry point.
 pub fn render(session: &VerificationSession, frame: &mut Frame) {
@@ -54,25 +56,32 @@ fn render_scenario_list(session: &VerificationSession, frame: &mut Frame, area: 
         .iter()
         .enumerate()
         .map(|(i, sc)| {
-            let marker = if i == session.selected_scenario {
-                "▶ "
-            } else {
-                "  "
-            };
+            let is_selected = i == session.selected_scenario
+                && !matches!(session.animation, AnimationPhase::DemoComplete);
+            let marker = if is_selected { "▶ " } else { "  " };
+
             let (prefix, color) = match sc.passed {
                 Some(true) => ("✓ ", Color::Green),
                 Some(false) => ("✗ ", Color::Red),
                 None => ("  ", Color::DarkGray),
             };
-            let row_color = if i == session.selected_scenario {
-                Color::Yellow
-            } else {
-                color
-            };
+            let row_color = if is_selected { Color::Yellow } else { color };
             let text = format!("{marker}{prefix}{}", sc.name);
-            ListItem::new(Line::from(
-                Span::from(text).style(Style::default().fg(row_color)),
-            ))
+            let name_line = Line::from(Span::from(text).style(Style::default().fg(row_color)));
+            let mut item_lines = vec![name_line];
+            if is_selected && !sc.step_statuses.is_empty() {
+                let mut hm_spans: Vec<Span> = vec![Span::from("      ").style(Style::default())];
+                for status in &sc.step_statuses {
+                    let (ch, color) = match status {
+                        StepStatus::Pass => ("▓", Color::Green),
+                        StepStatus::Fail(_) => ("▓", Color::Red),
+                        StepStatus::Skip(_) => ("░", Color::DarkGray),
+                    };
+                    hm_spans.push(Span::from(ch).style(Style::default().fg(color)));
+                }
+                item_lines.push(Line::from(hm_spans));
+            }
+            ListItem::new(item_lines)
         })
         .collect();
 
@@ -107,6 +116,11 @@ fn render_scenario_list(session: &VerificationSession, frame: &mut Frame, area: 
 // ── Step panel ─────────────────────────────────────────────────────────────
 
 fn render_step_panel(session: &VerificationSession, frame: &mut Frame, area: Rect) {
+    if matches!(session.animation, AnimationPhase::DemoComplete) {
+        render_demo_complete(session, frame, area);
+        return;
+    }
+
     let title = build_step_panel_title(session);
 
     let block = Block::default()
@@ -122,6 +136,13 @@ fn render_step_panel(session: &VerificationSession, frame: &mut Frame, area: Rec
     let total = session.total_steps();
 
     for i in 0..total {
+        // Check if this step is the one being animated
+        let anim_step = match &session.animation {
+            AnimationPhase::Spinning { step, .. } => Some(*step),
+            AnimationPhase::Scrambling { step, .. } => Some(*step),
+            _ => None,
+        };
+
         if i < session.revealed_count {
             // Revealed step
             let step = &session.steps[i];
@@ -166,6 +187,127 @@ fn render_step_panel(session: &VerificationSession, frame: &mut Frame, area: Rec
             if is_selected && session.detail_expanded {
                 render_detail_lines(&step.status, &step.detail, &mut lines);
             }
+        } else if anim_step == Some(i) {
+            // This step is being animated
+            let step = &session.steps[i];
+            let name_str = format!("{}", step.name);
+
+            match &session.animation {
+                AnimationPhase::Spinning { started_at, .. } => {
+                    let elapsed_ms = started_at.elapsed().as_millis() as usize;
+                    let spinner_idx = (elapsed_ms / 80) % SPINNER_CHARS.len();
+                    let spinner = SPINNER_CHARS[spinner_idx];
+
+                    // Calculate wave area width (same formula as dots)
+                    let available = inner.width as usize;
+                    let gutter_len = 3;
+                    let name_len = name_str.len();
+                    let status_len = 4;
+                    let min_dots = 2;
+                    let fixed_width = gutter_len + name_len + 2 + status_len;
+                    let wave_count = available.saturating_sub(fixed_width).max(min_dots);
+
+                    // Small travelling wave: mostly flat dots with a gentle
+                    // 3-4 char ripple moving across. Subtle, like a pulse.
+                    //
+                    // Most chars are '·' (flat). The wave is a small bump
+                    // that travels left-to-right across the dot area.
+                    const RIPPLE: &[char] = &['·', '⠒', '⠊', '⠉', '⠊', '⠒', '·'];
+                    let ripple_len = RIPPLE.len();
+
+                    // Wave position moves across the dot area
+                    let wave_speed = 40.0_f64; // ms per column
+                    let wave_pos = (elapsed_ms as f64 / wave_speed) as isize;
+
+                    let mut wave_spans: Vec<Span> = vec![
+                        Span::from(format!(" {spinner} "))
+                            .style(Style::default().fg(Color::Yellow)),
+                        Span::from(name_str).style(Style::default().fg(Color::White)),
+                        Span::from(" ").style(Style::default()),
+                    ];
+
+                    let dot_color = Color::Rgb(70, 70, 70);
+                    for ci in 0..wave_count {
+                        // Distance from wave centre
+                        let dist =
+                            ci as isize - (wave_pos % (wave_count as isize + ripple_len as isize));
+                        if dist >= 0 && (dist as usize) < ripple_len {
+                            let ch = RIPPLE[dist as usize];
+                            let brightness: u8 = if dist == 3 {
+                                120
+                            } else if dist == 2 || dist == 4 {
+                                100
+                            } else {
+                                80
+                            };
+                            wave_spans.push(Span::from(ch.to_string()).style(
+                                Style::default().fg(Color::Rgb(brightness, brightness, brightness)),
+                            ));
+                        } else {
+                            wave_spans.push(Span::from("·").style(Style::default().fg(dot_color)));
+                        }
+                    }
+
+                    wave_spans.push(Span::from(" ").style(Style::default()));
+                    wave_spans.push(Span::from("    ").style(Style::default()));
+
+                    lines.push(Line::from(wave_spans));
+                }
+                AnimationPhase::Scrambling { started_at, .. } => {
+                    // Status slot (4 chars) scrambles left-to-right to the real value
+                    let elapsed_ms = started_at.elapsed().as_millis() as usize;
+                    let step = &session.steps[i];
+
+                    let (status_label, status_color) = match &step.status {
+                        StepStatus::Pass => ("PASS", Color::Green),
+                        StepStatus::Fail(_) => ("FAIL", Color::Red),
+                        StepStatus::Skip(_) => ("SKIP", Color::DarkGray),
+                    };
+                    let status_chars: Vec<char> = status_label.chars().collect();
+                    let total = status_chars.len(); // always 4
+                    let elapsed_frac = (elapsed_ms as f64) / 300.0;
+                    let settled_count = ((elapsed_frac * total as f64) as usize).min(total);
+
+                    // Normal dots (no pulse)
+                    let available = inner.width as usize;
+                    let gutter_len = 3;
+                    let name_len = name_str.len();
+                    let min_dots = 2;
+                    let fixed_width = gutter_len + name_len + 2 + total;
+                    let dots_count = available.saturating_sub(fixed_width).max(min_dots);
+                    let dots: String = " ".to_string() + &".".repeat(dots_count) + " ";
+
+                    let mut spans: Vec<Span> = vec![
+                        Span::from("   ").style(Style::default().fg(Color::White)),
+                        Span::from(name_str).style(Style::default().fg(Color::White)),
+                        Span::from(dots).style(Style::default().fg(Color::DarkGray)),
+                    ];
+
+                    // Build the 4-char status with settled/scrambling chars
+                    for (ci, &real_ch) in status_chars.iter().enumerate() {
+                        if ci < settled_count {
+                            spans.push(
+                                Span::from(real_ch.to_string())
+                                    .style(Style::default().fg(status_color)),
+                            );
+                        } else {
+                            let pseudo = ((elapsed_ms / 30 + ci * 7) % 36) as u8;
+                            let ch = char::from(if pseudo < 10 {
+                                b'0' + pseudo
+                            } else {
+                                b'a' + pseudo - 10
+                            });
+                            spans.push(
+                                Span::from(ch.to_string())
+                                    .style(Style::default().fg(Color::Yellow)),
+                            );
+                        }
+                    }
+
+                    lines.push(Line::from(spans));
+                }
+                _ => {}
+            }
         } else {
             // Unrevealed step
             let step = &session.steps[i];
@@ -184,7 +326,16 @@ fn render_step_panel(session: &VerificationSession, frame: &mut Frame, area: Rec
     if let Some(summary) = session.result_summary() {
         lines.push(Line::from(""));
         let color = if summary.contains("PASS") {
-            Color::Green
+            // During victory ripple, pulse the green brightness
+            if let AnimationPhase::VictoryRipple { started_at } = &session.animation {
+                let elapsed_ms = started_at.elapsed().as_millis() as f64;
+                // Pulse: 180 -> 255 -> 180 over 800ms (sine wave)
+                let t = (elapsed_ms / 800.0) * std::f64::consts::PI;
+                let bright = 180.0 + 75.0 * t.sin();
+                Color::Rgb(0, bright.clamp(0.0, 255.0) as u8, 0)
+            } else {
+                Color::Green
+            }
         } else {
             Color::Red
         };
@@ -193,6 +344,90 @@ fn render_step_panel(session: &VerificationSession, frame: &mut Frame, area: Rec
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             )));
     }
+
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, inner);
+}
+
+fn render_demo_complete(session: &VerificationSession, frame: &mut Frame, area: Rect) {
+    let block = Block::default()
+        .title(" SELFTEST COMPLETE ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    let version = env!("CARGO_PKG_VERSION");
+    lines.push(Line::from(
+        Span::from(format!("   wallop-verify {version} selftest")).style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ));
+    lines.push(Line::from(""));
+
+    // Per-scenario results with heatmaps
+    for sc in &session.scenarios {
+        let (status_ch, color) = match sc.passed {
+            Some(true) => ("CAUGHT", Color::Green),
+            Some(false) => ("MISSED", Color::Red),
+            None => ("SKIP  ", Color::DarkGray),
+        };
+
+        let mut spans: Vec<Span> = vec![
+            Span::from("   ").style(Style::default()),
+            Span::from(status_ch).style(Style::default().fg(color)),
+            Span::from("  ").style(Style::default()),
+        ];
+
+        // Mini heatmap
+        for status in &sc.step_statuses {
+            let (ch, c) = match status {
+                StepStatus::Pass => ("▓", Color::Green),
+                StepStatus::Fail(_) => ("▓", Color::Red),
+                StepStatus::Skip(_) => ("░", Color::DarkGray),
+            };
+            spans.push(Span::from(ch).style(Style::default().fg(c)));
+        }
+
+        spans.push(Span::from(format!("  {}", sc.name)).style(Style::default().fg(Color::White)));
+        lines.push(Line::from(spans));
+    }
+
+    lines.push(Line::from(""));
+
+    // Summary
+    let passed = session
+        .scenarios
+        .iter()
+        .filter(|s| s.passed == Some(true))
+        .count();
+    let total = session.scenarios_total;
+    let all_passed = passed == total;
+
+    let summary_color = if all_passed { Color::Green } else { Color::Red };
+    let summary_text = if all_passed {
+        format!("   All {total} scenarios caught — verifier integrity confirmed")
+    } else {
+        let missed = total - passed;
+        format!("   {missed}/{total} tampered bundles were not rejected")
+    };
+    lines.push(Line::from(
+        Span::from(summary_text).style(
+            Style::default()
+                .fg(summary_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ));
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(
+        Span::from("   Press q to exit").style(Style::default().fg(Color::DarkGray)),
+    ));
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
@@ -391,6 +626,7 @@ mod tests {
             description: "A test scenario".to_string(),
             tamper_summary: String::new(),
             passed: None,
+            step_statuses: vec![],
         }];
         let session = VerificationSession::new_selftest(report, scenarios);
         let output = render_to_string(&session, 80, 15);
