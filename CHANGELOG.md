@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-04-14
+
+### Added
+
+- Demo mode visual polish: braille ripple animation on dots, status text
+  scramble effect, step heatmap under selected scenario, victory ripple
+  on all-pass completion.
+- Demo completion screen: lists all scenarios with CAUGHT/MISSED status,
+  per-scenario heatmaps, and a clear verdict summary.
+- `--record <PATH>` flag for `selftest --demo`: writes an asciicast v2
+  file for embedding in docs and READMEs.
+- Tamper mutation spec shown in the TUI step panel header (e.g.
+  `byte_flip lock_receipt.signature_hex offset 5`).
+
+### Fixed
+
+- Demo mode scenario pass/fail logic was inverted — step failures now
+  correctly indicate the verifier caught the tamper (scenario pass).
+- BLS step preserves real FAIL result for the drand tamper scenario
+  instead of blanket SKIP across all scenarios.
+- Last scenario in demo mode now properly marked before completion
+  screen renders.
+
+### Changed
+
+- Release artifact renamed from `wallop-rs-wasm` to `wallop-verifier-wasm`.
+
 ## [0.6.0] - 2026-04-12
 
 ### Added
