@@ -46,7 +46,9 @@ fn format_tamper(tamper: &Tamper) -> String {
             SemanticOp::SubstitutePayload { target, source, .. } => {
                 format!("substitute_payload {target} from {source}")
             }
-            SemanticOp::SubstituteKeyAndResign { target, keypair, .. } => {
+            SemanticOp::SubstituteKeyAndResign {
+                target, keypair, ..
+            } => {
                 format!("substitute_key_and_resign {target} with {keypair}")
             }
             SemanticOp::ReplayFrom { replace } => {
@@ -58,7 +60,10 @@ fn format_tamper(tamper: &Tamper) -> String {
                 modifications,
             } => {
                 let keys: Vec<&str> = modifications.keys().map(|k| k.as_str()).collect();
-                format!("modify_and_resign {target} with {keypair}: {}", keys.join(", "))
+                format!(
+                    "modify_and_resign {target} with {keypair}: {}",
+                    keys.join(", ")
+                )
             }
         },
     }
