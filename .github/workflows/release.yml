@@ -23,7 +23,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install wasm-pack
       - run: wasm-pack build --target web --release
-      - run: tar czf wallop-rs-wasm-${{ github.ref_name }}.tar.gz -C pkg .
+      - run: tar czf wallop-verifier-wasm-${{ github.ref_name }}.tar.gz -C pkg .
       - uses: softprops/action-gh-release@v2
         with:
-          files: wallop-rs-wasm-${{ github.ref_name }}.tar.gz
+          files: wallop-verifier-wasm-${{ github.ref_name }}.tar.gz
+      - name: Notify wallop repo
+        run: |
+          gh api repos/electric-lump-software/wallop/dispatches \
+            -f event_type=wasm-updated \
+            -f "client_payload[version]=${{ github.ref_name }}"
+        env:
+          GH_TOKEN: ${{ secrets.WALLOP_DISPATCH_TOKEN }}
