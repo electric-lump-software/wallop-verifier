@@ -1,15 +1,18 @@
 # wallop_verifier
 
-Protocol functions and WASM verifier for the Wallop! provably fair draw system.
+Protocol functions and verifier for the [Wallop!](https://wallop.run) provably fair draw system.
 
-Implements the cryptographic pipeline used to conduct and verify draws:
-- canonical entry serialisation (JCS + SHA-256)
-- seed derivation from drand randomness and an optional weather observation
-- full end-to-end verification
+Wallop runs verifiably fair random draws where nobody controls the outcome. Entries are locked before the draw. The seed comes from public entropy — a [drand](https://drand.love) beacon and a live weather observation from Middle Wallop, Hampshire. The algorithm is open source and deterministic. Anyone can re-run it and verify the result.
 
-WASM bindings expose every function to JavaScript via [wasm-bindgen](https://github.com/rustwasm/wasm-bindgen).
+This crate implements the cryptographic pipeline that ties it all together:
 
-The draw algorithm itself lives in [`fair_pick_rs`](https://github.com/electric-lump-software/fair_pick_rs); this crate wraps it with the protocol layer.
+- Canonical entry serialisation (JCS + SHA-256)
+- Seed derivation from drand randomness and an optional weather observation
+- Full end-to-end verification against published proof bundles
+- Ed25519 receipt signature verification and chain integrity checks
+- WASM bindings for [in-browser verification](https://wallop.run/how-verification-works) via [wasm-bindgen](https://github.com/rustwasm/wasm-bindgen)
+
+The draw algorithm itself lives in [`fair_pick_rs`](https://github.com/electric-lump-software/fair_pick_rs); this crate wraps it with the protocol layer. When you click "Verify independently" on a Wallop proof page, this is the code running in your browser — every check, every signature, no server round-trip.
 
 ---
 
@@ -28,6 +31,20 @@ git submodule update --init
 ```
 
 This fetches the shared test vectors from the [wallop](https://github.com/electric-lump-software/wallop) repo. The build will tell you if they're missing.
+
+---
+
+## CLI verifier
+
+A `wallop-verify` command-line binary is available behind the `cli` feature flag for verifying proof bundles, pinning trusted keys, and running the built-in tamper scenario self-test.
+
+```bash
+cargo install wallop_verifier --features cli
+wallop-verify proof.json
+wallop-verify selftest
+```
+
+See the [CLI reference](docs/cli.md) for full usage.
 
 ---
 
@@ -130,18 +147,6 @@ const ok = verify_wasm(
   2,
   expectedWinners
 );
-```
-
----
-
-## CLI verifier
-
-A `wallop-verify` command-line binary is available behind the `cli` feature flag for verifying proof bundles, pinning trusted keys, and running the built-in tamper scenario self-test. See the [CLI reference](docs/cli.md) for full usage.
-
-```bash
-cargo install wallop_verifier --features cli
-wallop-verify proof.json
-wallop-verify selftest
 ```
 
 ---
