@@ -7,22 +7,48 @@ use std::collections::BTreeMap;
 use fair_pick_rs::Entry;
 use sha2::{Digest, Sha256};
 
-/// Compute the entry hash for a list of entries.
+/// Compute the entry hash for a draw.
 ///
-/// Returns `(hex_hash, jcs_string)` where:
+/// Canonical form:
+///
+/// ```text
+/// SHA-256(JCS({
+///   "draw_id": "<lowercase-hyphenated-uuidv4>",
+///   "entries": [{"uuid": "...", "weight": N}, ...]
+/// }))
+/// ```
+///
+/// Entries are sorted ascending by `uuid` (binary lex). The input
+/// `fair_pick_rs::Entry` struct's `id` field is treated as the public
+/// UUID at this boundary.
+///
+/// # Durable invariant
+///
+/// Anything this function hashes MUST be derivable from the public
+/// ProofBundle bytes alone. Do not add fields here that aren't also
+/// present byte-identically in the public bundle — a third-party
+/// verifier reading the public bundle must be able to reproduce this
+/// exact hash without any operator-only data. `operator_ref` lives on
+/// the Entry resource as an operator-private sidecar and is deliberately
+/// NOT committed in the hash for this reason.
+///
+/// Returns `(hex_hash, jcs_string)`:
 /// - `hex_hash` is the 64-char lowercase hex SHA-256 of the JCS bytes
-/// - `jcs_string` is the canonical JSON for verification/debugging
-pub fn entry_hash(entries: &[Entry]) -> (String, String) {
+/// - `jcs_string` is the canonical JSON for verification / debugging
+pub fn entry_hash(draw_id: &str, entries: &[Entry]) -> (String, String) {
     let mut sorted: Vec<&Entry> = entries.iter().collect();
     sorted.sort_by(|a, b| a.id.cmp(&b.id));
 
-    // serde_json without `preserve_order` uses BTreeMap, which sorts keys
-    // alphabetically — matching JCS requirements.
     let entries_array: Vec<serde_json::Value> = sorted
         .iter()
-        .map(|e| serde_json::json!({"id": &e.id, "weight": e.weight}))
+        .map(|e| serde_json::json!({"uuid": &e.id, "weight": e.weight}))
         .collect();
-    let jcs = serde_json::to_string(&serde_json::json!({"entries": entries_array})).unwrap();
+
+    // BTreeMap sorts top-level keys alphabetically — draw_id < entries.
+    let mut top = BTreeMap::new();
+    top.insert("draw_id", serde_json::Value::String(draw_id.into()));
+    top.insert("entries", serde_json::Value::Array(entries_array));
+    let jcs = serde_json::to_string(&top).unwrap();
 
     let hash = Sha256::digest(jcs.as_bytes());
     let hex_hash = hex::encode(hash);

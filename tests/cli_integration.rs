@@ -13,7 +13,7 @@ fn run_verify_full(bundle: &ProofBundle) -> bool {
         .entries
         .iter()
         .map(|e| Entry {
-            id: e.id.clone(),
+            id: e.uuid.clone(),
             weight: e.weight,
         })
         .collect();

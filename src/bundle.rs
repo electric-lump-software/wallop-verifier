@@ -13,7 +13,7 @@ pub struct ProofBundle {
 
 #[derive(Debug, Deserialize)]
 pub struct BundleEntry {
-    pub id: String,
+    pub uuid: String,
     pub weight: u32,
 }
 
@@ -61,8 +61,11 @@ mod tests {
         serde_json::json!({
             "version": 1,
             "draw_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-            "entries": [{"id": "alice", "weight": 1}, {"id": "bob", "weight": 2}],
-            "results": [{"entry_id": "bob", "position": 1}],
+            "entries": [
+                {"uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "weight": 1},
+                {"uuid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "weight": 2}
+            ],
+            "results": [{"entry_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "position": 1}],
             "entropy": {
                 "drand_round": 12345,
                 "drand_randomness": "abababababababababababababababababababababababababababababababababab",
@@ -88,7 +91,10 @@ mod tests {
         let bundle = ProofBundle::from_json(&minimal_bundle_json()).unwrap();
         assert_eq!(bundle.version, 1);
         assert_eq!(bundle.entries.len(), 2);
-        assert_eq!(bundle.results[0].entry_id, "bob");
+        assert_eq!(
+            bundle.results[0].entry_id,
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        );
         assert!(!bundle.is_drand_only());
     }
 

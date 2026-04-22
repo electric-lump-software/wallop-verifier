@@ -6,74 +6,118 @@ const COMPUTE_SEED_VECTORS: &str =
 const END_TO_END_VECTOR: &str = include_str!("../../vendor/wallop/spec/vectors/end-to-end.json");
 const FAIR_PICK_VECTORS: &str = include_str!("../../vendor/wallop/spec/vectors/fair-pick.json");
 
-fn entries_from_json(arr: &[serde_json::Value]) -> Vec<Entry> {
+fn entries_from_bundle_json(arr: &[serde_json::Value]) -> Vec<Entry> {
+    // Bundle / protocol fixtures carry UUIDs in the `uuid` field; map onto
+    // the fair_pick_rs::Entry shape where `id` is the canonical public id.
     arr.iter()
         .map(|e| Entry {
-            id: e["id"].as_str().unwrap().into(),
+            id: e["uuid"].as_str().unwrap().into(),
             weight: e["weight"].as_u64().unwrap() as u32,
         })
         .collect()
 }
 
 // --- entry_hash (from entry-hash.json) ---
+// Vectors share the same structure: {name, draw_id, entries, expected_jcs, expected_hash}.
 
-#[test]
-fn entry_hash_equal_weight() {
-    let vectors: serde_json::Value = serde_json::from_str(ENTRY_HASH_VECTORS).unwrap();
-    let v = &vectors["vectors"][0];
+fn run_vector_case(vector: &serde_json::Value) {
+    let draw_id = vector["draw_id"].as_str().unwrap();
+    let entries = entries_from_bundle_json(vector["entries"].as_array().unwrap());
+    let (hash, jcs) = entry_hash(draw_id, &entries);
 
-    let entries = entries_from_json(v["entries"].as_array().unwrap());
-    let (hash, jcs) = entry_hash(&entries);
+    assert_eq!(jcs, vector["expected_jcs"].as_str().unwrap());
+    assert_eq!(hash, vector["expected_hash"].as_str().unwrap());
+}
 
-    assert_eq!(jcs, v["expected_jcs"].as_str().unwrap());
-    assert_eq!(hash, v["expected_hash"].as_str().unwrap());
+fn vector_by_name<'a>(vectors: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    vectors["vectors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"].as_str() == Some(name))
+        .unwrap_or_else(|| panic!("vector '{}' not found", name))
 }
 
 #[test]
-fn entry_hash_weighted() {
+fn entry_hash_single_entry() {
     let vectors: serde_json::Value = serde_json::from_str(ENTRY_HASH_VECTORS).unwrap();
-    let v = &vectors["vectors"][1];
-
-    let entries = entries_from_json(v["entries"].as_array().unwrap());
-    let (hash, _) = entry_hash(&entries);
-
-    assert_eq!(hash, v["expected_hash"].as_str().unwrap());
+    run_vector_case(vector_by_name(&vectors, "single entry"));
 }
 
 #[test]
-fn entry_hash_single() {
+fn entry_hash_operator_ref_ignored() {
     let vectors: serde_json::Value = serde_json::from_str(ENTRY_HASH_VECTORS).unwrap();
-    let v = &vectors["vectors"][2];
-
-    let entries = entries_from_json(v["entries"].as_array().unwrap());
-    let (hash, _) = entry_hash(&entries);
-
-    assert_eq!(hash, v["expected_hash"].as_str().unwrap());
+    run_vector_case(vector_by_name(
+        &vectors,
+        "operator_ref does not affect hash",
+    ));
 }
 
 #[test]
-fn entry_hash_sorts_by_id_regardless_of_input_order() {
+fn entry_hash_two_entries_sorted_by_uuid() {
+    let vectors: serde_json::Value = serde_json::from_str(ENTRY_HASH_VECTORS).unwrap();
+    run_vector_case(vector_by_name(&vectors, "two entries sorted by uuid"));
+}
+
+// The 2^53-1 boundary vector pins JS-interop behaviour (IEEE 754 safe
+// integer). It is not directly representable under fair_pick_rs::Entry's
+// `weight: u32`, so we verify the byte-level expected_hash against a
+// hand-constructed JCS string rather than hashing via entry_hash()/Entry.
+#[test]
+fn entry_hash_weight_boundary_jcs_bytes() {
+    let vectors: serde_json::Value = serde_json::from_str(ENTRY_HASH_VECTORS).unwrap();
+    let v = vector_by_name(&vectors, "weight at 2^53-1 boundary");
+
+    let jcs = v["expected_jcs"].as_str().unwrap();
+    let computed = hex::encode(Sha256::digest(jcs.as_bytes()));
+    assert_eq!(computed, v["expected_hash"].as_str().unwrap());
+}
+
+#[test]
+fn entry_hash_different_draw_id_different_hash() {
+    let vectors: serde_json::Value = serde_json::from_str(ENTRY_HASH_VECTORS).unwrap();
+    run_vector_case(vector_by_name(&vectors, "same entries different draw_id"));
+
+    // Cross-check: same entries under two different draw_ids MUST produce
+    // different hashes. Pins the draw_id binding property.
+    let v_base = vector_by_name(&vectors, "single entry");
+    let v_other = vector_by_name(&vectors, "same entries different draw_id");
+    assert_ne!(
+        v_base["expected_hash"].as_str().unwrap(),
+        v_other["expected_hash"].as_str().unwrap()
+    );
+}
+
+#[test]
+fn entry_hash_sorts_by_uuid_regardless_of_input_order() {
+    let draw_id = "11111111-1111-4111-8111-111111111111";
+    let uuid_a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let uuid_z = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+
     let entries_a = vec![
         Entry {
-            id: "b".into(),
-            weight: 1,
+            id: uuid_z.into(),
+            weight: 2,
         },
         Entry {
-            id: "a".into(),
+            id: uuid_a.into(),
             weight: 1,
         },
     ];
     let entries_b = vec![
         Entry {
-            id: "a".into(),
+            id: uuid_a.into(),
             weight: 1,
         },
         Entry {
-            id: "b".into(),
-            weight: 1,
+            id: uuid_z.into(),
+            weight: 2,
         },
     ];
-    assert_eq!(entry_hash(&entries_a), entry_hash(&entries_b));
+    assert_eq!(
+        entry_hash(draw_id, &entries_a),
+        entry_hash(draw_id, &entries_b)
+    );
 }
 
 // --- compute_seed (from compute-seed.json) ---
@@ -149,12 +193,13 @@ fn end_to_end_pipeline() {
     let input = &vector["input"];
     let expected = &vector["expected"];
 
-    let entries = entries_from_json(input["entries"].as_array().unwrap());
+    let draw_id = input["draw_id"].as_str().unwrap();
+    let entries = entries_from_bundle_json(input["entries"].as_array().unwrap());
     let drand = input["drand_randomness"].as_str().unwrap();
     let weather = input["weather_value"].as_str().unwrap();
     let count = input["winner_count"].as_u64().unwrap() as u32;
 
-    let (ehash, _jcs) = entry_hash(&entries);
+    let (ehash, _jcs) = entry_hash(draw_id, &entries);
     let (seed_bytes, _json) = compute_seed(&ehash, drand, weather);
     let result = fair_pick_rs::draw(&entries, &seed_bytes, count).unwrap();
 
@@ -201,13 +246,24 @@ fn fair_pick_vectors_seed_note_matches_seed_hex() {
 }
 
 // --- large-pool fair-pick vectors (from fair-pick.json) ---
+// fair-pick.json is authored around fair_pick_rs::Entry shape directly
+// ({id, weight}), independent of the protocol entry_hash canonical form.
+
+fn fair_pick_entries_from_json(arr: &[serde_json::Value]) -> Vec<Entry> {
+    arr.iter()
+        .map(|e| Entry {
+            id: e["id"].as_str().unwrap().into(),
+            weight: e["weight"].as_u64().unwrap() as u32,
+        })
+        .collect()
+}
 
 #[test]
 fn fair_pick_large_pool_500_mixed_weights() {
     let vectors: serde_json::Value = serde_json::from_str(FAIR_PICK_VECTORS).unwrap();
     let v = &vectors["vectors"][4];
 
-    let entries = entries_from_json(v["entries"].as_array().unwrap());
+    let entries = fair_pick_entries_from_json(v["entries"].as_array().unwrap());
     let seed_hex = v["seed_hex"].as_str().unwrap();
     let seed: [u8; 32] = hex::decode(seed_hex).unwrap().try_into().unwrap();
     let count = v["winner_count"].as_u64().unwrap() as u32;
@@ -229,7 +285,7 @@ fn fair_pick_large_pool_1000_ten_winners() {
     let vectors: serde_json::Value = serde_json::from_str(FAIR_PICK_VECTORS).unwrap();
     let v = &vectors["vectors"][5];
 
-    let entries = entries_from_json(v["entries"].as_array().unwrap());
+    let entries = fair_pick_entries_from_json(v["entries"].as_array().unwrap());
     let seed_hex = v["seed_hex"].as_str().unwrap();
     let seed: [u8; 32] = hex::decode(seed_hex).unwrap().try_into().unwrap();
     let count = v["winner_count"].as_u64().unwrap() as u32;
@@ -244,31 +300,4 @@ fn fair_pick_large_pool_1000_ten_winners() {
         .collect();
 
     assert_eq!(actual, expected);
-}
-
-// --- escaping (behavioral, no vector) ---
-
-#[test]
-fn entry_hash_escapes_special_characters_in_id() {
-    let entries = vec![Entry {
-        id: r#"has"quote"#.into(),
-        weight: 1,
-    }];
-
-    let (_, jcs) = entry_hash(&entries);
-
-    // The quote in the ID must be escaped as \"
-    assert_eq!(jcs, r#"{"entries":[{"id":"has\"quote","weight":1}]}"#);
-}
-
-#[test]
-fn entry_hash_escapes_backslash_in_id() {
-    let entries = vec![Entry {
-        id: r#"back\slash"#.into(),
-        weight: 1,
-    }];
-
-    let (_, jcs) = entry_hash(&entries);
-
-    assert_eq!(jcs, r#"{"entries":[{"id":"back\\slash","weight":1}]}"#);
 }

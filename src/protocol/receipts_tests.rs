@@ -14,8 +14,8 @@ fn sha256_hex(data: &str) -> String {
     hex::encode(Sha256::digest(data.as_bytes()))
 }
 
-fn lock_receipt_from_json(input: &serde_json::Value) -> LockReceiptV2 {
-    LockReceiptV2 {
+fn lock_receipt_from_json(input: &serde_json::Value) -> LockReceiptV3 {
+    LockReceiptV3 {
         commitment_hash: input["commitment_hash"].as_str().unwrap().into(),
         draw_id: input["draw_id"].as_str().unwrap().into(),
         drand_chain: input["drand_chain"].as_str().unwrap().into(),
@@ -242,12 +242,12 @@ fn v12_drand_only_payload_sha256_pinned() {
 // ── receipt_schema_version helper ──────────────────────────────────
 
 #[test]
-fn receipt_schema_version_v2() {
+fn receipt_schema_version_v3() {
     let vector: serde_json::Value = serde_json::from_str(LOCK_RECEIPT_VECTOR).unwrap();
     let input = lock_receipt_from_json(&vector["input"]);
 
     let payload = build_receipt_payload(&input);
-    assert_eq!(receipt_schema_version(&payload), Some("2".into()));
+    assert_eq!(receipt_schema_version(&payload), Some("3".into()));
 }
 
 #[test]

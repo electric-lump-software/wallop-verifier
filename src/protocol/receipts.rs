@@ -2,7 +2,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 #[derive(serde::Deserialize)]
-pub struct LockReceiptV2 {
+pub struct LockReceiptV3 {
     pub commitment_hash: String,
     pub draw_id: String,
     pub drand_chain: String,
@@ -50,7 +50,7 @@ fn option_to_value(opt: &Option<String>) -> serde_json::Value {
     }
 }
 
-pub fn build_receipt_payload(input: &LockReceiptV2) -> String {
+pub fn build_receipt_payload(input: &LockReceiptV3) -> String {
     let mut map = BTreeMap::new();
     map.insert(
         "commitment_hash",
@@ -82,7 +82,7 @@ pub fn build_receipt_payload(input: &LockReceiptV2) -> String {
         "operator_slug",
         serde_json::Value::String(input.operator_slug.clone()),
     );
-    map.insert("schema_version", serde_json::Value::String("2".into()));
+    map.insert("schema_version", serde_json::Value::String("3".into()));
     map.insert("sequence", serde_json::json!(input.sequence));
     map.insert(
         "signing_key_id",

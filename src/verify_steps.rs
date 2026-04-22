@@ -122,18 +122,20 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
     let operator_key_id = op_pk.as_ref().map(crypto::key_id);
     let infra_key_id = infra_pk.as_ref().map(crypto::key_id);
 
-    // Convert bundle entries to fair_pick Entry type
+    // Convert bundle entries to fair_pick Entry type. The bundle carries
+    // each entry's wallop-assigned UUID in the `uuid` field — treated as
+    // `id` in the FairPick / entry_hash layer below.
     let entries: Vec<Entry> = bundle
         .entries
         .iter()
         .map(|e| Entry {
-            id: e.id.clone(),
+            id: e.uuid.clone(),
             weight: e.weight,
         })
         .collect();
 
     // === Step 1: Entry hash ===
-    let (computed_entry_hash, _) = entry_hash(&entries);
+    let (computed_entry_hash, _) = entry_hash(&bundle.draw_id, &entries);
     steps.push(StepResult {
         name: StepName::EntryHash,
         status: StepStatus::Pass,
@@ -457,22 +459,29 @@ mod tests {
         let sk = test_signing_key();
         let pk_hex = hex::encode(sk.verifying_key().to_bytes());
 
+        // Entry `id` here carries the wallop-assigned UUID. Using real UUIDs
+        // (not operator-supplied strings) so the hash, sort, and bundle
+        // parse round-trip cleanly.
+        let uuid_a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let uuid_b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        let uuid_c = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
         let entries = vec![
             Entry {
-                id: "ticket-47".into(),
+                id: uuid_a.into(),
                 weight: 1,
             },
             Entry {
-                id: "ticket-48".into(),
+                id: uuid_b.into(),
                 weight: 1,
             },
             Entry {
-                id: "ticket-49".into(),
+                id: uuid_c.into(),
                 weight: 1,
             },
         ];
 
-        let (ehash, _) = entry_hash(&entries);
+        let draw_id = "22222222-2222-2222-2222-222222222222";
+        let (ehash, _) = entry_hash(draw_id, &entries);
         let drand_randomness = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         let weather_val = "1013";
         let (seed_bytes, _) = compute_seed(&ehash, drand_randomness, weather_val);
@@ -491,7 +500,7 @@ mod tests {
             "locked_at": "2026-04-09T12:00:00.000000Z",
             "operator_id": "11111111-1111-1111-1111-111111111111",
             "operator_slug": "acme-prizes",
-            "schema_version": "2",
+            "schema_version": "3",
             "sequence": 1,
             "signing_key_id": "deadbeef",
             "wallop_core_version": "0.14.1",
@@ -534,9 +543,9 @@ mod tests {
             "version": 1,
             "draw_id": "22222222-2222-2222-2222-222222222222",
             "entries": [
-                {"id": "ticket-47", "weight": 1},
-                {"id": "ticket-48", "weight": 1},
-                {"id": "ticket-49", "weight": 1}
+                {"uuid": uuid_a, "weight": 1},
+                {"uuid": uuid_b, "weight": 1},
+                {"uuid": uuid_c, "weight": 1}
             ],
             "results": winners.iter().map(|w| serde_json::json!({"entry_id": &w.entry_id, "position": w.position})).collect::<Vec<_>>(),
             "entropy": {

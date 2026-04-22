@@ -347,7 +347,7 @@ fn run_verify_full_check(bundle: &ProofBundle) -> bool {
         .entries
         .iter()
         .map(|e| wallop_verifier::Entry {
-            id: e.id.clone(),
+            id: e.uuid.clone(),
             weight: e.weight,
         })
         .collect();

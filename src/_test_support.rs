@@ -38,7 +38,10 @@ pub fn build_valid_bundle(entries: &[Entry], weather: Option<&str>, winner_count
     let sk = test_signing_key();
     let pk_hex = hex::encode(sk.verifying_key().to_bytes());
 
-    let (ehash, _) = entry_hash(entries);
+    // Fixed test draw_id — bound into entry_hash; same value in the lock
+    // and execution receipts below so signatures verify.
+    let draw_id = "22222222-2222-2222-2222-222222222222";
+    let (ehash, _) = entry_hash(draw_id, entries);
     let drand = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 
     let (seed_bytes, _) = match weather {
@@ -61,7 +64,7 @@ pub fn build_valid_bundle(entries: &[Entry], weather: Option<&str>, winner_count
         "locked_at": "2026-04-09T12:00:00.000000Z",
         "operator_id": "11111111-1111-1111-1111-111111111111",
         "operator_slug": "acme-prizes",
-        "schema_version": "2",
+        "schema_version": "3",
         "sequence": 1,
         "signing_key_id": "deadbeef",
         "wallop_core_version": "0.14.1",
@@ -115,7 +118,7 @@ pub fn build_valid_bundle(entries: &[Entry], weather: Option<&str>, winner_count
     serde_json::json!({
         "version": 1,
         "draw_id": "22222222-2222-2222-2222-222222222222",
-        "entries": entries.iter().map(|e| serde_json::json!({"id": &e.id, "weight": e.weight})).collect::<Vec<_>>(),
+        "entries": entries.iter().map(|e| serde_json::json!({"uuid": &e.id, "weight": e.weight})).collect::<Vec<_>>(),
         "results": winners.iter().map(|w| serde_json::json!({"entry_id": &w.entry_id, "position": w.position})).collect::<Vec<_>>(),
         "entropy": entropy,
         "lock_receipt": {

@@ -24,7 +24,7 @@ pub use verify_steps::StepName;
 pub use protocol::crypto::{key_id, verify_receipt};
 pub use protocol::merkle::{anchor_root, merkle_root};
 pub use protocol::receipts::{
-    ExecutionReceiptV1, LockReceiptV2, build_execution_receipt_payload, build_receipt_payload,
+    ExecutionReceiptV1, LockReceiptV3, build_execution_receipt_payload, build_receipt_payload,
     lock_receipt_hash, receipt_schema_version,
 };
 pub use protocol::{compute_seed, compute_seed_drand_only, entry_hash};
@@ -121,7 +121,12 @@ pub fn verify_full(
         .collect::<Result<Vec<&str>, String>>()?;
 
     // Step 6: Verify entry_hash (both receipts)
-    let (computed_entry_hash, _) = entry_hash(entries);
+    // draw_id is bound into the hash; pull it from the signed lock receipt.
+    let draw_id = lock_parsed
+        .get("draw_id")
+        .and_then(|v| v.as_str())
+        .ok_or("missing draw_id in lock receipt")?;
+    let (computed_entry_hash, _) = entry_hash(draw_id, entries);
 
     let lock_entry_hash = lock_parsed
         .get("entry_hash")
@@ -166,13 +171,14 @@ pub fn verify_full(
 /// Chains: entry_hash → compute_seed → draw → compare.
 /// Returns true if the recomputed results match `expected_results` exactly.
 pub fn verify(
+    draw_id: &str,
     entries: &[Entry],
     drand_randomness: &str,
     weather_value: Option<&str>,
     count: u32,
     expected_results: &[Winner],
 ) -> bool {
-    let (ehash, _) = entry_hash(entries);
+    let (ehash, _) = entry_hash(draw_id, entries);
 
     let (seed, _) = match weather_value {
         Some(w) => compute_seed(&ehash, drand_randomness, w),
@@ -192,10 +198,10 @@ mod tests {
 
     const END_TO_END_VECTOR: &str = include_str!("../vendor/wallop/spec/vectors/end-to-end.json");
 
-    fn entries_from_json(arr: &[serde_json::Value]) -> Vec<Entry> {
+    fn entries_from_bundle_json(arr: &[serde_json::Value]) -> Vec<Entry> {
         arr.iter()
             .map(|e| Entry {
-                id: e["id"].as_str().unwrap().into(),
+                id: e["uuid"].as_str().unwrap().into(),
                 weight: e["weight"].as_u64().unwrap() as u32,
             })
             .collect()
@@ -207,7 +213,8 @@ mod tests {
         let input = &vector["input"];
         let expected = &vector["expected"];
 
-        let entries = entries_from_json(input["entries"].as_array().unwrap());
+        let draw_id = input["draw_id"].as_str().unwrap();
+        let entries = entries_from_bundle_json(input["entries"].as_array().unwrap());
         let drand = input["drand_randomness"].as_str().unwrap();
         let weather = input["weather_value"].as_str().unwrap();
         let count = input["winner_count"].as_u64().unwrap() as u32;
@@ -224,6 +231,7 @@ mod tests {
             .collect();
 
         assert!(verify(
+            draw_id,
             &entries,
             drand,
             Some(weather),
@@ -238,7 +246,8 @@ mod tests {
         let input = &vector["input"];
         let expected = &vector["expected"];
 
-        let entries = entries_from_json(input["entries"].as_array().unwrap());
+        let draw_id = input["draw_id"].as_str().unwrap();
+        let entries = entries_from_bundle_json(input["entries"].as_array().unwrap());
         let drand = input["drand_randomness"].as_str().unwrap();
         let weather = input["weather_value"].as_str().unwrap();
         let count = input["winner_count"].as_u64().unwrap() as u32;
@@ -256,29 +265,37 @@ mod tests {
             .collect();
         wrong.reverse();
 
-        assert!(!verify(&entries, drand, Some(weather), count, &wrong));
+        assert!(!verify(
+            draw_id,
+            &entries,
+            drand,
+            Some(weather),
+            count,
+            &wrong
+        ));
     }
 
     #[test]
     fn verify_drand_only() {
+        let draw_id = "11111111-1111-4111-8111-111111111111";
         let entries = vec![
             Entry {
-                id: "a".into(),
+                id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 weight: 1,
             },
             Entry {
-                id: "b".into(),
+                id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
                 weight: 1,
             },
         ];
         let drand = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 
         // Compute expected results via the pipeline
-        let (ehash, _) = entry_hash(&entries);
+        let (ehash, _) = entry_hash(draw_id, &entries);
         let (seed, _) = compute_seed_drand_only(&ehash, drand);
         let expected = fair_pick_rs::draw(&entries, &seed, 2).unwrap();
 
-        assert!(verify(&entries, drand, None, 2, &expected));
+        assert!(verify(draw_id, &entries, drand, None, 2, &expected));
     }
 
     fn test_signing_key() -> SigningKey {
@@ -297,7 +314,8 @@ mod tests {
 
         // Build a lock receipt with winner_count embedded
         let lock_jcs = serde_json::json!({
-            "schema_version": "2",
+            "schema_version": "3",
+            "draw_id": "22222222-2222-2222-2222-222222222222",
             "winner_count": 2,
             "sequence": 1
         })
@@ -339,7 +357,7 @@ mod tests {
         let pk: [u8; 32] = sk.verifying_key().to_bytes();
 
         // Lock receipt WITHOUT winner_count
-        let lock_jcs = r#"{"schema_version":"2","sequence":1}"#;
+        let lock_jcs = r#"{"draw_id":"22222222-2222-2222-2222-222222222222","schema_version":"3","sequence":1}"#;
         let lock_sig: [u8; 64] = sk.sign(lock_jcs.as_bytes()).to_bytes();
 
         let lock_hash = protocol::receipts::lock_receipt_hash(lock_jcs);
@@ -375,23 +393,25 @@ mod tests {
 
         let entries = vec![
             Entry {
-                id: "ticket-47".into(),
+                id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 weight: 1,
             },
             Entry {
-                id: "ticket-48".into(),
+                id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
                 weight: 1,
             },
             Entry {
-                id: "ticket-49".into(),
+                id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc".into(),
                 weight: 1,
             },
         ];
-        let (real_entry_hash, _) = entry_hash(&entries);
+        let draw_id = "22222222-2222-2222-2222-222222222222";
+        let (real_entry_hash, _) = entry_hash(draw_id, &entries);
 
         // Lock receipt with WRONG entry_hash (but exec receipt has correct one)
         let lock_jcs = serde_json::json!({
-            "schema_version": "2",
+            "schema_version": "3",
+            "draw_id": "22222222-2222-2222-2222-222222222222",
             "winner_count": 2,
             "sequence": 1,
             "entry_hash": "0000000000000000000000000000000000000000000000000000000000000000"
@@ -430,7 +450,8 @@ mod tests {
 
         // Build a lock receipt with winner_count and sign it
         let lock_jcs = serde_json::json!({
-            "schema_version": "2",
+            "schema_version": "3",
+            "draw_id": "22222222-2222-2222-2222-222222222222",
             "sequence": 1,
             "winner_count": 1
         })
