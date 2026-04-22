@@ -2,7 +2,7 @@ use fair_pick_rs::{Entry, Winner};
 use wasm_bindgen::prelude::*;
 
 use crate::protocol;
-use crate::protocol::receipts::{ExecutionReceiptV1, LockReceiptV2};
+use crate::protocol::receipts::{ExecutionReceiptV1, LockReceiptV3};
 
 /// WASM entry point for draw.
 #[wasm_bindgen]
@@ -19,12 +19,16 @@ pub fn draw_wasm(entries_js: JsValue, seed_js: &[u8], count: u32) -> Result<JsVa
 }
 
 /// WASM entry point for entry_hash.
+///
+/// Takes `draw_id` (the public draw UUID) and an entries array. Each
+/// entry's `id` field is interpreted as the public UUID at this
+/// boundary. See `protocol::entry_hash` for the canonical form.
 #[wasm_bindgen]
-pub fn entry_hash_wasm(entries_js: JsValue) -> Result<JsValue, JsError> {
+pub fn entry_hash_wasm(draw_id: &str, entries_js: JsValue) -> Result<JsValue, JsError> {
     let entries: Vec<Entry> =
         serde_wasm_bindgen::from_value(entries_js).map_err(|e| JsError::new(&e.to_string()))?;
 
-    let (hash, jcs) = protocol::entry_hash(&entries);
+    let (hash, jcs) = protocol::entry_hash(draw_id, &entries);
 
     let result = serde_json::json!({ "hash": hash, "jcs": jcs });
     serde_wasm_bindgen::to_value(&result).map_err(|e| JsError::new(&e.to_string()))
@@ -64,6 +68,7 @@ pub fn compute_seed_drand_only_wasm(
 /// WASM entry point for full verification pipeline.
 #[wasm_bindgen]
 pub fn verify_wasm(
+    draw_id: &str,
     entries_js: JsValue,
     drand_randomness: &str,
     weather_value: Option<String>,
@@ -77,6 +82,7 @@ pub fn verify_wasm(
         .map_err(|e| JsError::new(&e.to_string()))?;
 
     Ok(crate::verify(
+        draw_id,
         &entries,
         drand_randomness,
         weather_value.as_deref(),
@@ -126,7 +132,7 @@ pub fn key_id_wasm(public_key_hex: &str) -> Result<String, JsError> {
 /// WASM entry point for build_receipt_payload (lock receipt v2).
 #[wasm_bindgen]
 pub fn build_receipt_payload_wasm(input_js: JsValue) -> Result<String, JsError> {
-    let input: LockReceiptV2 =
+    let input: LockReceiptV3 =
         serde_wasm_bindgen::from_value(input_js).map_err(|e| JsError::new(&e.to_string()))?;
     Ok(protocol::receipts::build_receipt_payload(&input))
 }
