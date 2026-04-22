@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - unreleased
+
+### BREAKING
+
+Entry identifier refactor. Matches `wallop_core` 0.15.0.
+
+- `entry_hash` signature changes from `entry_hash(entries)` to
+  `entry_hash(draw_id, entries)`. `draw_id` is bound into the hash to
+  prevent cross-draw confusion.
+- Canonical form is now
+  `SHA-256(JCS({draw_id, entries: [{uuid, weight} sorted by uuid]}))`.
+  `operator_ref` is an operator-private sidecar on the upstream
+  resource and is deliberately NOT committed in the hash — the
+  canonical form must be reproducible from the public proof bundle
+  alone. This fixes a verification gap where a v0.6.x verifier
+  reading a bundle with non-null `operator_ref` values would silently
+  fail to reproduce the committed hash.
+- `BundleEntry.id` renamed to `BundleEntry.uuid`. Proof bundles now
+  emit `{"uuid": "...", "weight": N}` per entry (not `{"id", ...}`).
+- `LockReceiptV2` renamed to `LockReceiptV3`. `schema_version` in the
+  signed lock receipt payload bumps `"2"` → `"3"`. Verifiers reject
+  unknown `schema_version` values rather than attempting to
+  reconstruct an older shape.
+- `verify()` gains a `draw_id` first parameter.
+- `verify_wasm()` gains a `draw_id` first parameter.
+- `entry_hash_wasm()` gains a `draw_id` first parameter.
+- `verify_full()` and `verify_full_wasm()` signatures unchanged —
+  `draw_id` is extracted from the signed lock receipt internally.
+
+### Notes
+
+- The `Entry { id, weight }` shape from `fair_pick_rs` is unchanged.
+  Where callers previously used `id` as an operator-supplied string,
+  they now pass the wallop-assigned UUID. Semantics shift; the
+  struct stays.
+- The 2^53-1 weight boundary vector from the shared test vectors is
+  not representable under `Entry::weight: u32`; its frozen
+  `expected_hash` is cross-checked at the JCS-byte level instead of
+  round-tripping through `entry_hash()`/`Entry`. Documented inline.
+
 ## [0.6.1] - 2026-04-14
 
 ### Added
