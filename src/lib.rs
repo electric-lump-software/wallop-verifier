@@ -24,7 +24,7 @@ pub use verify_steps::StepName;
 pub use protocol::crypto::{key_id, verify_receipt};
 pub use protocol::merkle::{anchor_root, merkle_root};
 pub use protocol::receipts::{
-    ExecutionReceiptV1, LockReceiptV3, build_execution_receipt_payload, build_receipt_payload,
+    ExecutionReceiptV2, LockReceiptV4, build_execution_receipt_payload, build_receipt_payload,
     lock_receipt_hash, receipt_schema_version,
 };
 pub use protocol::{compute_seed, compute_seed_drand_only, entry_hash};

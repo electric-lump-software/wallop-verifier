@@ -2,7 +2,7 @@ use fair_pick_rs::{Entry, Winner};
 use wasm_bindgen::prelude::*;
 
 use crate::protocol;
-use crate::protocol::receipts::{ExecutionReceiptV1, LockReceiptV3};
+use crate::protocol::receipts::{ExecutionReceiptV2, LockReceiptV4};
 
 /// WASM entry point for draw.
 #[wasm_bindgen]
@@ -132,7 +132,7 @@ pub fn key_id_wasm(public_key_hex: &str) -> Result<String, JsError> {
 /// WASM entry point for build_receipt_payload (lock receipt v2).
 #[wasm_bindgen]
 pub fn build_receipt_payload_wasm(input_js: JsValue) -> Result<String, JsError> {
-    let input: LockReceiptV3 =
+    let input: LockReceiptV4 =
         serde_wasm_bindgen::from_value(input_js).map_err(|e| JsError::new(&e.to_string()))?;
     Ok(protocol::receipts::build_receipt_payload(&input))
 }
@@ -140,7 +140,7 @@ pub fn build_receipt_payload_wasm(input_js: JsValue) -> Result<String, JsError> 
 /// WASM entry point for build_execution_receipt_payload.
 #[wasm_bindgen]
 pub fn build_execution_receipt_payload_wasm(input_js: JsValue) -> Result<String, JsError> {
-    let input: ExecutionReceiptV1 =
+    let input: ExecutionReceiptV2 =
         serde_wasm_bindgen::from_value(input_js).map_err(|e| JsError::new(&e.to_string()))?;
     Ok(protocol::receipts::build_execution_receipt_payload(&input))
 }
