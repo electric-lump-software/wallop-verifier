@@ -14,18 +14,22 @@ fn sha256_hex(data: &str) -> String {
     hex::encode(Sha256::digest(data.as_bytes()))
 }
 
-fn lock_receipt_from_json(input: &serde_json::Value) -> LockReceiptV3 {
-    LockReceiptV3 {
+fn lock_receipt_from_json(input: &serde_json::Value) -> LockReceiptV4 {
+    LockReceiptV4 {
         commitment_hash: input["commitment_hash"].as_str().unwrap().into(),
         draw_id: input["draw_id"].as_str().unwrap().into(),
         drand_chain: input["drand_chain"].as_str().unwrap().into(),
         drand_round: input["drand_round"].as_u64().unwrap(),
+        entropy_composition: ENTROPY_COMPOSITION.into(),
         entry_hash: input["entry_hash"].as_str().unwrap().into(),
         fair_pick_version: input["fair_pick_version"].as_str().unwrap().into(),
+        jcs_version: JCS_VERSION.into(),
         locked_at: input["locked_at"].as_str().unwrap().into(),
         operator_id: input["operator_id"].as_str().unwrap().into(),
         operator_slug: input["operator_slug"].as_str().unwrap().into(),
+        schema_version: LOCK_SCHEMA_VERSION.into(),
         sequence: input["sequence"].as_u64().unwrap(),
+        signature_algorithm: SIGNATURE_ALGORITHM.into(),
         signing_key_id: input["signing_key_id"].as_str().unwrap().into(),
         wallop_core_version: input["wallop_core_version"].as_str().unwrap().into(),
         weather_station: input["weather_station"].as_str().unwrap().into(),
@@ -34,17 +38,21 @@ fn lock_receipt_from_json(input: &serde_json::Value) -> LockReceiptV3 {
     }
 }
 
-fn execution_receipt_from_json(input: &serde_json::Value) -> ExecutionReceiptV1 {
-    ExecutionReceiptV1 {
+fn execution_receipt_from_json(input: &serde_json::Value) -> ExecutionReceiptV2 {
+    ExecutionReceiptV2 {
         drand_chain: input["drand_chain"].as_str().unwrap().into(),
         drand_randomness: input["drand_randomness"].as_str().unwrap().into(),
         drand_round: input["drand_round"].as_u64().unwrap(),
         drand_signature: input["drand_signature"].as_str().unwrap().into(),
+        drand_signature_algorithm: DRAND_SIGNATURE_ALGORITHM.into(),
         draw_id: input["draw_id"].as_str().unwrap().into(),
+        entropy_composition: ENTROPY_COMPOSITION.into(),
         entry_hash: input["entry_hash"].as_str().unwrap().into(),
         executed_at: input["executed_at"].as_str().unwrap().into(),
         fair_pick_version: input["fair_pick_version"].as_str().unwrap().into(),
+        jcs_version: JCS_VERSION.into(),
         lock_receipt_hash: input["lock_receipt_hash"].as_str().unwrap().into(),
+        merkle_algorithm: MERKLE_ALGORITHM.into(),
         operator_id: input["operator_id"].as_str().unwrap().into(),
         operator_slug: input["operator_slug"].as_str().unwrap().into(),
         results: input["results"]
@@ -53,8 +61,10 @@ fn execution_receipt_from_json(input: &serde_json::Value) -> ExecutionReceiptV1 
             .iter()
             .map(|v| v.as_str().unwrap().into())
             .collect(),
+        schema_version: EXECUTION_SCHEMA_VERSION.into(),
         seed: input["seed"].as_str().unwrap().into(),
         sequence: input["sequence"].as_u64().unwrap(),
+        signature_algorithm: SIGNATURE_ALGORITHM.into(),
         wallop_core_version: input["wallop_core_version"].as_str().unwrap().into(),
         weather_fallback_reason: input["weather_fallback_reason"].as_str().map(String::from),
         weather_observation_time: input["weather_observation_time"].as_str().map(String::from),
@@ -132,18 +142,17 @@ fn v6_execution_receipt_payload_sha256_pinned() {
 }
 
 #[test]
-fn v6_execution_receipt_schema_version_is_1() {
+fn v6_execution_receipt_schema_version_is_2() {
     let vector: serde_json::Value = serde_json::from_str(EXECUTION_RECEIPT_VECTOR).unwrap();
     let input = execution_receipt_from_json(&vector["input"]);
 
     let payload = build_execution_receipt_payload(&input);
     let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
     assert_eq!(
-        parsed["execution_schema_version"].as_str().unwrap(),
-        vector["expected_execution_schema_version"]
-            .as_str()
-            .unwrap()
+        parsed["schema_version"].as_str().unwrap(),
+        vector["expected_schema_version"].as_str().unwrap()
     );
+    assert_eq!(parsed.get("execution_schema_version"), None);
 }
 
 #[test]
@@ -223,7 +232,7 @@ fn v12_drand_only_null_weather_fields_present() {
     assert!(parsed["weather_station"].is_null());
     assert!(parsed["weather_observation_time"].is_null());
     assert!(parsed["weather_value"].is_null());
-    assert_eq!(parsed["weather_fallback_reason"], "met_office_timeout");
+    assert_eq!(parsed["weather_fallback_reason"], "unreachable");
 }
 
 #[test]
@@ -242,12 +251,12 @@ fn v12_drand_only_payload_sha256_pinned() {
 // ── receipt_schema_version helper ──────────────────────────────────
 
 #[test]
-fn receipt_schema_version_v3() {
+fn receipt_schema_version_v4() {
     let vector: serde_json::Value = serde_json::from_str(LOCK_RECEIPT_VECTOR).unwrap();
     let input = lock_receipt_from_json(&vector["input"]);
 
     let payload = build_receipt_payload(&input);
-    assert_eq!(receipt_schema_version(&payload), Some("3".into()));
+    assert_eq!(receipt_schema_version(&payload), Some("4".into()));
 }
 
 #[test]

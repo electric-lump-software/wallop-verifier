@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - unreleased
+
+### BREAKING
+
+Receipt shape v4 (lock) / v2 (execution). Matches `wallop_core` 0.16.0
+receipt hardening pass.
+
+- `LockReceiptV3` → `LockReceiptV4`. `schema_version` bumps `"3"` → `"4"`.
+  Adds three algorithm identity tags inside the signed payload:
+  `jcs_version: "sha256-jcs-v1"`, `signature_algorithm: "ed25519"`,
+  `entropy_composition: "drand-quicknet+openmeteo-v1"`.
+- `ExecutionReceiptV1` → `ExecutionReceiptV2`. Key
+  `"execution_schema_version"` renamed to `"schema_version"` and bumped
+  `"1"` → `"2"`. Adds the three tags above plus
+  `drand_signature_algorithm: "bls12_381_g2"` and
+  `merkle_algorithm: "sha256-pairwise-v1"`.
+- `weather_fallback_reason` is a frozen enum: `"station_down"`,
+  `"stale"`, `"unreachable"`, or null. Verifier rejects unknown values.
+  Upstream classifies raw weather-client errors into these four before
+  writing to the receipt; a fifth value requires a schema bump.
+- New `validate_lock_receipt_tags` / `validate_execution_receipt_tags`
+  helpers that reject unknown schema versions and tag values.
+- Frozen vectors regenerated: `lock-receipt.json`,
+  `execution-receipt.json`, `execution-receipt-drand-only.json`,
+  `cross-receipt-linkage.json`, `proof-bundle.json`,
+  `proof-bundle-drand-only.json`.
+
+Unchanged (zero-drift proof, byte-identical to v0.7.0):
+`entry-hash.json`, `compute-seed.json`, `fair-pick.json`,
+`merkle-root.json`, `ed25519.json`, `key-id.json`, `anchor-root.json`.
+
+Verifiers pinned to v0.7.0 continue to verify historical receipts;
+new receipts require v0.8.0+ to parse.
+
 ## [0.7.0] - unreleased
 
 ### BREAKING
