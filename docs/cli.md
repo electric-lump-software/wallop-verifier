@@ -36,6 +36,12 @@ Each step reports PASS, FAIL (with reason), or SKIP (when an upstream step faile
 
 ## Trust anchors (`--pin-key`)
 
+> **Important — attributable authenticity vs self-consistency.** By default, `wallop-verify` validates a bundle against the public keys embedded in the bundle itself. This is *self-consistent* verification: the bytes and signatures agree internally. It is **not** *attributable authenticity*: an attacker serving a forged bundle can sign it with their own keypair and embed that keypair's public half, and every step of the verification pipeline will pass. The stderr warning below is the only sign that attributable authenticity was not checked. Use the `--pin-*` flags below whenever you want to assert "this bundle was signed by the specific party I expected," not just "this bundle's insides are internally consistent."
+>
+> **Note:** `--pin-from-bundle` is TOFU (trust-on-first-use) self-consistency, not attributable authenticity — it extracts a key from a previously trusted bundle, so it only carries whatever attribution the initial bundle itself carried.
+>
+> Spec reference: `wallop/spec/protocol.md` §4.2.4 "CLI-without-keyring caveat."
+
 By default, the verifier trusts the public keys embedded in the bundle. If an attacker controls the bundle, they can substitute a different valid key paired with a forged signature — the bundle would verify against the wrong key.
 
 Pin a trusted key to close this attack:
