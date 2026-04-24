@@ -1,0 +1,38 @@
+[package]
+name = "wallop_verifier-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.wallop_verifier]
+path = ".."
+# CLI features (drand BLS verification) pull in heavier deps and rely on
+# network-signed artefacts; fuzzing the pure protocol paths is enough.
+default-features = false
+
+[[bin]]
+name = "fuzz_parse_execution_receipt"
+path = "fuzz_targets/fuzz_parse_execution_receipt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_bundle_parse"
+path = "fuzz_targets/fuzz_bundle_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_verify_full"
+path = "fuzz_targets/fuzz_verify_full.rs"
+test = false
+doc = false
+bench = false
