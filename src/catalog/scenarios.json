@@ -60,7 +60,7 @@
         "kind": "field_op",
         "op": "add",
         "path": "entries",
-        "value": { "id": "ticket-injected", "weight": 1 }
+        "value": { "uuid": "deadbeef-dead-4bee-8bed-deadbeefdead", "weight": 1 }
       },
       "expected_catch_steps": ["lock_receipt_entry_hash", "exec_receipt_entry_hash"]
     },
