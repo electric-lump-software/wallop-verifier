@@ -9,6 +9,10 @@ const CROSS_RECEIPT_VECTOR: &str =
     include_str!("../../vendor/wallop/spec/vectors/cross-receipt-linkage.json");
 const DRAND_ONLY_VECTOR: &str =
     include_str!("../../vendor/wallop/spec/vectors/execution-receipt-drand-only.json");
+const EXECUTION_RECEIPT_V3_VECTOR: &str =
+    include_str!("../../vendor/wallop/spec/vectors/execution-receipt-v3.json");
+const DRAND_ONLY_V3_VECTOR: &str =
+    include_str!("../../vendor/wallop/spec/vectors/execution-receipt-drand-only-v3.json");
 
 fn sha256_hex(data: &str) -> String {
     hex::encode(Sha256::digest(data.as_bytes()))
@@ -440,6 +444,117 @@ fn v14_dispatcher_rejects_v2_payload_relabelled_as_v3() {
         err,
         ParseExecutionReceiptError::PayloadShapeMismatch(_)
     ));
+}
+
+// ── V-15: v3 execution receipt — byte-pinned against vendored vectors ──
+
+// Builds an ExecutionReceiptV3 from a vector file's "input" JSON object.
+// Mirror of execution_receipt_from_json but for the v3 shape — the
+// vendored v3 vector includes signing_key_id, so this helper reads it
+// from the JSON rather than taking it as a separate argument.
+fn execution_receipt_v3_from_json(input: &serde_json::Value) -> ExecutionReceiptV3 {
+    ExecutionReceiptV3 {
+        drand_chain: input["drand_chain"].as_str().unwrap().into(),
+        drand_randomness: input["drand_randomness"].as_str().unwrap().into(),
+        drand_round: input["drand_round"].as_u64().unwrap(),
+        drand_signature: input["drand_signature"].as_str().unwrap().into(),
+        drand_signature_algorithm: DRAND_SIGNATURE_ALGORITHM.into(),
+        draw_id: input["draw_id"].as_str().unwrap().into(),
+        entropy_composition: ENTROPY_COMPOSITION.into(),
+        entry_hash: input["entry_hash"].as_str().unwrap().into(),
+        executed_at: input["executed_at"].as_str().unwrap().into(),
+        fair_pick_version: input["fair_pick_version"].as_str().unwrap().into(),
+        jcs_version: JCS_VERSION.into(),
+        lock_receipt_hash: input["lock_receipt_hash"].as_str().unwrap().into(),
+        merkle_algorithm: MERKLE_ALGORITHM.into(),
+        operator_id: input["operator_id"].as_str().unwrap().into(),
+        operator_slug: input["operator_slug"].as_str().unwrap().into(),
+        results: input["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().into())
+            .collect(),
+        schema_version: EXECUTION_SCHEMA_VERSION_V3.into(),
+        seed: input["seed"].as_str().unwrap().into(),
+        sequence: input["sequence"].as_u64().unwrap(),
+        signature_algorithm: SIGNATURE_ALGORITHM.into(),
+        signing_key_id: input["signing_key_id"].as_str().unwrap().into(),
+        wallop_core_version: input["wallop_core_version"].as_str().unwrap().into(),
+        weather_fallback_reason: input["weather_fallback_reason"].as_str().map(String::from),
+        weather_observation_time: input["weather_observation_time"].as_str().map(String::from),
+        weather_station: input["weather_station"].as_str().map(String::from),
+        weather_value: input["weather_value"].as_str().map(String::from),
+    }
+}
+
+#[test]
+fn v15_execution_receipt_v3_payload_sha256_pinned() {
+    let vector: serde_json::Value = serde_json::from_str(EXECUTION_RECEIPT_V3_VECTOR).unwrap();
+    let input = execution_receipt_v3_from_json(&vector["input"]);
+
+    let payload = build_execution_receipt_payload_v3(&input);
+
+    assert_eq!(
+        sha256_hex(&payload),
+        vector["expected_payload_sha256"].as_str().unwrap()
+    );
+
+    let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(
+        parsed.as_object().unwrap().len(),
+        vector["expected_field_count"].as_u64().unwrap() as usize
+    );
+}
+
+#[test]
+fn v15_execution_receipt_v3_schema_version_matches_vector() {
+    let vector: serde_json::Value = serde_json::from_str(EXECUTION_RECEIPT_V3_VECTOR).unwrap();
+    let input = execution_receipt_v3_from_json(&vector["input"]);
+
+    let payload = build_execution_receipt_payload_v3(&input);
+    let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+    assert_eq!(
+        parsed["schema_version"].as_str().unwrap(),
+        vector["expected_schema_version"].as_str().unwrap()
+    );
+    assert_eq!(parsed["signing_key_id"].as_str().unwrap(), "cafebabe");
+}
+
+#[test]
+fn v15_execution_receipt_v3_exact_jcs_roundtrip() {
+    let vector: serde_json::Value = serde_json::from_str(EXECUTION_RECEIPT_V3_VECTOR).unwrap();
+    let input = execution_receipt_v3_from_json(&vector["input"]);
+
+    let payload = build_execution_receipt_payload_v3(&input);
+
+    let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    let reserialized = serde_json::to_string(&parsed).unwrap();
+    assert_eq!(payload, reserialized);
+}
+
+#[test]
+fn v15_execution_receipt_v3_drand_only_payload_sha256_pinned() {
+    let vector: serde_json::Value = serde_json::from_str(DRAND_ONLY_V3_VECTOR).unwrap();
+    let input = execution_receipt_v3_from_json(&vector["input"]);
+
+    let payload = build_execution_receipt_payload_v3(&input);
+
+    assert_eq!(
+        sha256_hex(&payload),
+        vector["expected_payload_sha256"].as_str().unwrap()
+    );
+
+    // null weather fields must be present as JSON null, not omitted
+    let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert!(parsed.get("weather_station").unwrap().is_null());
+    assert!(parsed.get("weather_observation_time").unwrap().is_null());
+    assert!(parsed.get("weather_value").unwrap().is_null());
+    assert_eq!(
+        parsed["weather_fallback_reason"].as_str().unwrap(),
+        "unreachable"
+    );
 }
 
 // ── receipt_schema_version helper ──────────────────────────────────
