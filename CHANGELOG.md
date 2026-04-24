@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] - unreleased
+
+### Fixed
+
+- **Weather observation window bound direction.** The 0.10.0 verifier
+  implemented the window as `obs ∈ [lock.weather_time, lock.weather_time + 3600s]`.
+  That direction is wrong for production bundles: Met Office publishes
+  observations at hour boundaries (XX:00:00 UTC), and the entropy worker
+  fetches the most recent observation **at or before** the declared target.
+  A real bundle with lock.weather_time = 13:41:57 and observation = 13:00:00
+  would fail the 0.10.0 check. Corrected bound: `obs ∈ [lock.weather_time - 3600s, lock.weather_time]`.
+  This is the first production bundle the 0.10.0 verifier was run against —
+  0.10.0 was never published to crates.io.
+
+### Added — selftest catalog
+
+- `weather_window_violation_too_old` — observation more than 1 hour
+  before the declared target. Covers the attack vector opposite to
+  `weather_window_violation_future`.
+
+### Tests fixture update
+
+- `src/bin/tui/{state,render}.rs` — the `StepStatus::Pass` fixture lists
+  were hardcoded at 9 and are now 11 to match the step count after the
+  0.10.0 additions.
+
 ## [0.10.0] - unreleased
 
 ### Added

@@ -240,7 +240,7 @@
     {
       "name": "weather_window_violation_future",
       "category": "cross_receipt_binding",
-      "description": "Exec receipt declares a weather_observation_time more than 1 hour after the lock receipt's weather_time. Without the window check, an infra-level attacker can fetch weather from any point in time and attribute it to the draw's declared window.",
+      "description": "Exec receipt declares a weather_observation_time after the lock receipt's weather_time. Per spec §4.2.5, the observation MUST be at or before the declared target (Met Office publishes observations at hour boundaries and the worker fetches the most recent one before the target); any observation after lock.weather_time fails the window check.",
       "severity": "critical",
       "tamper": {
         "kind": "semantic_op",
@@ -249,6 +249,22 @@
         "keypair": "original_signer",
         "modifications": {
           "weather_observation_time": "2099-04-09T12:00:00.000000Z"
+        }
+      },
+      "expected_catch_steps": ["weather_observation_window"]
+    },
+    {
+      "name": "weather_window_violation_too_old",
+      "category": "cross_receipt_binding",
+      "description": "Exec receipt declares a weather_observation_time more than 1 hour before the lock receipt's weather_time. Without the window check, an infra-level attacker could fetch weather from any point in the past and attribute it to the draw's declared window.",
+      "severity": "critical",
+      "tamper": {
+        "kind": "semantic_op",
+        "op": "modify_payload_and_resign",
+        "target": "execution_receipt",
+        "keypair": "original_signer",
+        "modifications": {
+          "weather_observation_time": "1999-04-09T12:00:00.000000Z"
         }
       },
       "expected_catch_steps": ["weather_observation_window"]

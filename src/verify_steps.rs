@@ -631,12 +631,19 @@ fn check_weather_observation_window(bundle: &ProofBundle) -> StepResult {
         }
     };
 
+    // Bound direction: Met Office publishes observations at hour
+    // boundaries (XX:00:00 UTC). `lock.weather_time` is the declared
+    // target; the entropy worker fetches the most recent observation
+    // at or before the target, so `exec.weather_observation_time` is
+    // typically earlier than `lock.weather_time` by up to 3600s.
+    //
+    // Correct bound: obs ∈ [lock.weather_time - 3600s, lock.weather_time].
     let delta = parsed_exec.timestamp() - parsed_lock.timestamp();
-    if !(0..=3600).contains(&delta) {
+    if !(-3600..=0).contains(&delta) {
         return StepResult {
             name: StepName::WeatherObservationWindow,
             status: StepStatus::Fail(format!(
-                "weather_observation_time outside [lock.weather_time, lock.weather_time + 3600s]: \
+                "weather_observation_time outside [lock.weather_time - 3600s, lock.weather_time]: \
                  delta = {}s (lock.weather_time = {}, exec.weather_observation_time = {})",
                 delta, lock_weather_time, exec_observation_time
             )),

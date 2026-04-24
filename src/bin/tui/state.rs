@@ -261,7 +261,7 @@ mod tests {
     }
 
     fn all_pass_report() -> VerificationReport {
-        make_report(vec![StepStatus::Pass; 9])
+        make_report(vec![StepStatus::Pass; 11])
     }
 
     fn mixed_report() -> VerificationReport {
@@ -298,6 +298,14 @@ mod tests {
                 name: "Wrong seed".into(),
                 description: "Alter the seed value".into(),
                 tamper_summary: "seed -> ff..ff".into(),
+                passed: None,
+                step_statuses: vec![],
+            },
+            ScenarioEntry {
+                name: "Cross-receipt splice".into(),
+                description:
+                    "Splice exec receipt's draw_id to a different value while preserving the lock link".into(),
+                tamper_summary: "exec.draw_id -> ff..ff".into(),
                 passed: None,
                 step_statuses: vec![],
             },

@@ -1,6 +1,6 @@
 [package]
 name = "wallop_verifier"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2024"
 description = "Independent verifier for the Wallop! provably fair draw protocol."
 license = "MIT"
