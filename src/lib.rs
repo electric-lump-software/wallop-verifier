@@ -24,8 +24,12 @@ pub use verify_steps::StepName;
 pub use protocol::crypto::{key_id, verify_receipt};
 pub use protocol::merkle::{anchor_root, merkle_root};
 pub use protocol::receipts::{
-    ExecutionReceiptV2, LockReceiptV4, build_execution_receipt_payload, build_receipt_payload,
-    lock_receipt_hash, receipt_schema_version,
+    EXECUTION_SCHEMA_VERSION, EXECUTION_SCHEMA_VERSION_V3, ExecutionReceiptV2, ExecutionReceiptV3,
+    LOCK_SCHEMA_VERSION, LockReceiptV4, ParseExecutionReceiptError, ParsedExecutionReceipt,
+    build_execution_receipt_payload, build_execution_receipt_payload_v3, build_receipt_payload,
+    lock_receipt_hash, parse_execution_receipt, receipt_schema_version,
+    validate_execution_receipt_tags, validate_execution_receipt_tags_v3,
+    validate_lock_receipt_tags,
 };
 pub use protocol::{compute_seed, compute_seed_drand_only, entry_hash};
 

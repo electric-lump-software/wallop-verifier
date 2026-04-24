@@ -248,6 +248,200 @@ fn v12_drand_only_payload_sha256_pinned() {
     );
 }
 
+// ── V-13: execution receipt v3 (signing_key_id) ────────────────────
+
+fn execution_receipt_v3_from_v2(
+    v2: &ExecutionReceiptV2,
+    signing_key_id: &str,
+) -> ExecutionReceiptV3 {
+    ExecutionReceiptV3 {
+        drand_chain: v2.drand_chain.clone(),
+        drand_randomness: v2.drand_randomness.clone(),
+        drand_round: v2.drand_round,
+        drand_signature: v2.drand_signature.clone(),
+        drand_signature_algorithm: v2.drand_signature_algorithm.clone(),
+        draw_id: v2.draw_id.clone(),
+        entropy_composition: v2.entropy_composition.clone(),
+        entry_hash: v2.entry_hash.clone(),
+        executed_at: v2.executed_at.clone(),
+        fair_pick_version: v2.fair_pick_version.clone(),
+        jcs_version: v2.jcs_version.clone(),
+        lock_receipt_hash: v2.lock_receipt_hash.clone(),
+        merkle_algorithm: v2.merkle_algorithm.clone(),
+        operator_id: v2.operator_id.clone(),
+        operator_slug: v2.operator_slug.clone(),
+        results: v2.results.clone(),
+        schema_version: EXECUTION_SCHEMA_VERSION_V3.into(),
+        seed: v2.seed.clone(),
+        sequence: v2.sequence,
+        signature_algorithm: v2.signature_algorithm.clone(),
+        signing_key_id: signing_key_id.into(),
+        wallop_core_version: v2.wallop_core_version.clone(),
+        weather_fallback_reason: v2.weather_fallback_reason.clone(),
+        weather_observation_time: v2.weather_observation_time.clone(),
+        weather_station: v2.weather_station.clone(),
+        weather_value: v2.weather_value.clone(),
+    }
+}
+
+#[test]
+fn v13_execution_receipt_v3_payload_contains_signing_key_id() {
+    let vector: serde_json::Value = serde_json::from_str(EXECUTION_RECEIPT_VECTOR).unwrap();
+    let v2_input = execution_receipt_from_json(&vector["input"]);
+    let v3_input = execution_receipt_v3_from_v2(&v2_input, "cafebabe");
+
+    let payload = build_execution_receipt_payload_v3(&v3_input);
+    let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+    assert_eq!(parsed["schema_version"].as_str().unwrap(), "3");
+    assert_eq!(parsed["signing_key_id"].as_str().unwrap(), "cafebabe");
+    // v2 field count + 1 for signing_key_id
+    let v2_count = vector["expected_field_count"].as_u64().unwrap() as usize;
+    assert_eq!(parsed.as_object().unwrap().len(), v2_count + 1);
+}
+
+#[test]
+fn v13_execution_receipt_v3_deny_unknown_fields_on_v2_payload_missing_signing_key_id() {
+    // A V2 payload (no signing_key_id) relabelled as schema_version "3"
+    // MUST fail to deserialize as ExecutionReceiptV3 because signing_key_id
+    // is a required field (no Option, no default). Closes the upgrade
+    // spoof attack — attacker cannot relabel a historical v2 payload as v3.
+    let vector: serde_json::Value = serde_json::from_str(EXECUTION_RECEIPT_VECTOR).unwrap();
+    let v2_input = execution_receipt_from_json(&vector["input"]);
+    let v2_payload = build_execution_receipt_payload(&v2_input);
+
+    // Mutate schema_version in the v2 payload to "3"
+    let mut parsed: serde_json::Value = serde_json::from_str(&v2_payload).unwrap();
+    parsed["schema_version"] = serde_json::Value::String("3".into());
+    let mutated = serde_json::to_string(&parsed).unwrap();
+
+    let result: Result<ExecutionReceiptV3, _> = serde_json::from_str(&mutated);
+    assert!(
+        result.is_err(),
+        "V3 parser MUST reject a v2 payload missing signing_key_id even when schema_version is relabelled; got Ok({:?})",
+        result.ok().map(|r| r.signing_key_id)
+    );
+}
+
+#[test]
+fn v13_execution_receipt_v2_rejects_v3_payload_with_signing_key_id() {
+    // A V3 payload (with signing_key_id) relabelled as schema_version "2"
+    // MUST fail to deserialize as ExecutionReceiptV2 because
+    // deny_unknown_fields rejects the extra key. Closes the downgrade
+    // attack — attacker cannot relabel a v3 payload as v2 to trick an
+    // older verifier.
+    let vector: serde_json::Value = serde_json::from_str(EXECUTION_RECEIPT_VECTOR).unwrap();
+    let v2_input = execution_receipt_from_json(&vector["input"]);
+    let v3_input = execution_receipt_v3_from_v2(&v2_input, "cafebabe");
+    let v3_payload = build_execution_receipt_payload_v3(&v3_input);
+
+    // Mutate schema_version in the v3 payload to "2"
+    let mut parsed: serde_json::Value = serde_json::from_str(&v3_payload).unwrap();
+    parsed["schema_version"] = serde_json::Value::String("2".into());
+    let mutated = serde_json::to_string(&parsed).unwrap();
+
+    let result: Result<ExecutionReceiptV2, _> = serde_json::from_str(&mutated);
+    assert!(
+        result.is_err(),
+        "V2 parser MUST reject a v3 payload with signing_key_id even when schema_version is relabelled"
+    );
+}
+
+// ── V-14: parse_execution_receipt dispatcher ───────────────────────
+
+#[test]
+fn v14_dispatcher_parses_v2_payload() {
+    let vector: serde_json::Value = serde_json::from_str(EXECUTION_RECEIPT_VECTOR).unwrap();
+    let v2_input = execution_receipt_from_json(&vector["input"]);
+    let payload = build_execution_receipt_payload(&v2_input);
+
+    let parsed = parse_execution_receipt(&payload).expect("v2 payload should parse");
+    assert!(matches!(parsed, ParsedExecutionReceipt::V2(_)));
+}
+
+#[test]
+fn v14_dispatcher_parses_v3_payload() {
+    let vector: serde_json::Value = serde_json::from_str(EXECUTION_RECEIPT_VECTOR).unwrap();
+    let v2_input = execution_receipt_from_json(&vector["input"]);
+    let v3_input = execution_receipt_v3_from_v2(&v2_input, "deadbeef");
+    let payload = build_execution_receipt_payload_v3(&v3_input);
+
+    let parsed = parse_execution_receipt(&payload).expect("v3 payload should parse");
+    match parsed {
+        ParsedExecutionReceipt::V3(r) => assert_eq!(r.signing_key_id, "deadbeef"),
+        other => panic!("expected V3, got {:?}", other),
+    }
+}
+
+#[test]
+fn v14_dispatcher_rejects_unknown_schema_version_terminally() {
+    // A payload with schema_version "99" MUST return UnknownSchemaVersion.
+    // This is terminal — the error carries the offending value and is not
+    // mapped to any transient/retryable variant. A verifier receiving this
+    // MUST upgrade (spec §4.2.1 older-schema rejection), not retry.
+    let payload = r#"{"schema_version":"99","foo":"bar"}"#;
+    let err = parse_execution_receipt(payload).expect_err("must reject unknown schema");
+    match err {
+        ParseExecutionReceiptError::UnknownSchemaVersion(v) => assert_eq!(v, "99"),
+        other => panic!("expected UnknownSchemaVersion, got {:?}", other),
+    }
+}
+
+#[test]
+fn v14_dispatcher_rejects_missing_schema_version() {
+    let payload = r#"{"foo":"bar"}"#;
+    let err = parse_execution_receipt(payload).expect_err("must reject missing schema");
+    assert_eq!(err, ParseExecutionReceiptError::MissingSchemaVersion);
+}
+
+#[test]
+fn v14_dispatcher_rejects_invalid_json() {
+    let err = parse_execution_receipt("not json").expect_err("must reject invalid json");
+    assert!(matches!(err, ParseExecutionReceiptError::InvalidJson(_)));
+}
+
+#[test]
+fn v14_dispatcher_rejects_v3_payload_relabelled_as_v2() {
+    // Downgrade attack: v3 payload (with signing_key_id) relabelled as v2.
+    // Dispatcher routes to V2 parser because schema_version says "2"; V2
+    // parser rejects because deny_unknown_fields disallows signing_key_id.
+    // Result: PayloadShapeMismatch.
+    let vector: serde_json::Value = serde_json::from_str(EXECUTION_RECEIPT_VECTOR).unwrap();
+    let v2_input = execution_receipt_from_json(&vector["input"]);
+    let v3_input = execution_receipt_v3_from_v2(&v2_input, "deadbeef");
+    let v3_payload = build_execution_receipt_payload_v3(&v3_input);
+
+    let mut parsed: serde_json::Value = serde_json::from_str(&v3_payload).unwrap();
+    parsed["schema_version"] = serde_json::Value::String("2".into());
+    let mutated = serde_json::to_string(&parsed).unwrap();
+
+    let err = parse_execution_receipt(&mutated).expect_err("must reject downgrade");
+    assert!(matches!(
+        err,
+        ParseExecutionReceiptError::PayloadShapeMismatch(_)
+    ));
+}
+
+#[test]
+fn v14_dispatcher_rejects_v2_payload_relabelled_as_v3() {
+    // Upgrade spoof: v2 payload (no signing_key_id) relabelled as v3.
+    // Dispatcher routes to V3 parser because schema_version says "3"; V3
+    // parser rejects because signing_key_id is a required field.
+    let vector: serde_json::Value = serde_json::from_str(EXECUTION_RECEIPT_VECTOR).unwrap();
+    let v2_input = execution_receipt_from_json(&vector["input"]);
+    let v2_payload = build_execution_receipt_payload(&v2_input);
+
+    let mut parsed: serde_json::Value = serde_json::from_str(&v2_payload).unwrap();
+    parsed["schema_version"] = serde_json::Value::String("3".into());
+    let mutated = serde_json::to_string(&parsed).unwrap();
+
+    let err = parse_execution_receipt(&mutated).expect_err("must reject upgrade spoof");
+    assert!(matches!(
+        err,
+        ParseExecutionReceiptError::PayloadShapeMismatch(_)
+    ));
+}
+
 // ── receipt_schema_version helper ──────────────────────────────────
 
 #[test]

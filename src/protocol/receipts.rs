@@ -14,6 +14,10 @@ pub const MERKLE_ALGORITHM: &str = "sha256-pairwise-v1";
 // Current supported schema versions. Verifier rejects anything else.
 pub const LOCK_SCHEMA_VERSION: &str = "4";
 pub const EXECUTION_SCHEMA_VERSION: &str = "2";
+// v3 adds `signing_key_id` to the signed payload (F2 closure — see
+// `spec/protocol.md` §4.2). Both v2 and v3 remain verifiable for the
+// life of 1.x; historical v2 receipts continue to verify byte-identically.
+pub const EXECUTION_SCHEMA_VERSION_V3: &str = "3";
 
 // Allowed values for execution receipt's weather_fallback_reason.
 // A fifth value requires a receipt schema bump.
@@ -47,7 +51,8 @@ pub struct LockReceiptV4 {
     pub winner_count: u64,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionReceiptV2 {
     pub drand_chain: String,
     pub drand_randomness: String,
@@ -69,6 +74,37 @@ pub struct ExecutionReceiptV2 {
     pub seed: String,
     pub sequence: u64,
     pub signature_algorithm: String,
+    pub wallop_core_version: String,
+    pub weather_fallback_reason: Option<String>,
+    pub weather_observation_time: Option<String>,
+    pub weather_station: Option<String>,
+    pub weather_value: Option<String>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionReceiptV3 {
+    pub drand_chain: String,
+    pub drand_randomness: String,
+    pub drand_round: u64,
+    pub drand_signature: String,
+    pub drand_signature_algorithm: String,
+    pub draw_id: String,
+    pub entropy_composition: String,
+    pub entry_hash: String,
+    pub executed_at: String,
+    pub fair_pick_version: String,
+    pub jcs_version: String,
+    pub lock_receipt_hash: String,
+    pub merkle_algorithm: String,
+    pub operator_id: String,
+    pub operator_slug: String,
+    pub results: Vec<String>,
+    pub schema_version: String,
+    pub seed: String,
+    pub sequence: u64,
+    pub signature_algorithm: String,
+    pub signing_key_id: String,
     pub wallop_core_version: String,
     pub weather_fallback_reason: Option<String>,
     pub weather_observation_time: Option<String>,
@@ -230,6 +266,91 @@ pub fn build_execution_receipt_payload(input: &ExecutionReceiptV2) -> String {
     serde_json::to_string(&map).unwrap()
 }
 
+pub fn build_execution_receipt_payload_v3(input: &ExecutionReceiptV3) -> String {
+    let mut map = BTreeMap::new();
+    map.insert(
+        "drand_chain",
+        serde_json::Value::String(input.drand_chain.clone()),
+    );
+    map.insert(
+        "drand_randomness",
+        serde_json::Value::String(input.drand_randomness.clone()),
+    );
+    map.insert("drand_round", serde_json::json!(input.drand_round));
+    map.insert(
+        "drand_signature",
+        serde_json::Value::String(input.drand_signature.clone()),
+    );
+    map.insert(
+        "drand_signature_algorithm",
+        serde_json::Value::String(DRAND_SIGNATURE_ALGORITHM.into()),
+    );
+    map.insert("draw_id", serde_json::Value::String(input.draw_id.clone()));
+    map.insert(
+        "entropy_composition",
+        serde_json::Value::String(ENTROPY_COMPOSITION.into()),
+    );
+    map.insert(
+        "entry_hash",
+        serde_json::Value::String(input.entry_hash.clone()),
+    );
+    map.insert(
+        "executed_at",
+        serde_json::Value::String(input.executed_at.clone()),
+    );
+    map.insert(
+        "fair_pick_version",
+        serde_json::Value::String(input.fair_pick_version.clone()),
+    );
+    map.insert("jcs_version", serde_json::Value::String(JCS_VERSION.into()));
+    map.insert(
+        "lock_receipt_hash",
+        serde_json::Value::String(input.lock_receipt_hash.clone()),
+    );
+    map.insert(
+        "merkle_algorithm",
+        serde_json::Value::String(MERKLE_ALGORITHM.into()),
+    );
+    map.insert(
+        "operator_id",
+        serde_json::Value::String(input.operator_id.clone()),
+    );
+    map.insert(
+        "operator_slug",
+        serde_json::Value::String(input.operator_slug.clone()),
+    );
+    map.insert("results", serde_json::json!(input.results));
+    map.insert(
+        "schema_version",
+        serde_json::Value::String(EXECUTION_SCHEMA_VERSION_V3.into()),
+    );
+    map.insert("seed", serde_json::Value::String(input.seed.clone()));
+    map.insert("sequence", serde_json::json!(input.sequence));
+    map.insert(
+        "signature_algorithm",
+        serde_json::Value::String(SIGNATURE_ALGORITHM.into()),
+    );
+    map.insert(
+        "signing_key_id",
+        serde_json::Value::String(input.signing_key_id.clone()),
+    );
+    map.insert(
+        "wallop_core_version",
+        serde_json::Value::String(input.wallop_core_version.clone()),
+    );
+    map.insert(
+        "weather_fallback_reason",
+        option_to_value(&input.weather_fallback_reason),
+    );
+    map.insert(
+        "weather_observation_time",
+        option_to_value(&input.weather_observation_time),
+    );
+    map.insert("weather_station", option_to_value(&input.weather_station));
+    map.insert("weather_value", option_to_value(&input.weather_value));
+    serde_json::to_string(&map).unwrap()
+}
+
 pub fn lock_receipt_hash(payload_jcs: &str) -> String {
     hex::encode(Sha256::digest(payload_jcs.as_bytes()))
 }
@@ -309,6 +430,119 @@ pub fn validate_execution_receipt_tags(payload: &ExecutionReceiptV2) -> Result<(
         ));
     }
     Ok(())
+}
+
+pub fn validate_execution_receipt_tags_v3(payload: &ExecutionReceiptV3) -> Result<(), String> {
+    if payload.schema_version != EXECUTION_SCHEMA_VERSION_V3 {
+        return Err(format!(
+            "unknown execution receipt schema_version: {} (expected {})",
+            payload.schema_version, EXECUTION_SCHEMA_VERSION_V3
+        ));
+    }
+    if payload.jcs_version != JCS_VERSION {
+        return Err(format!("unknown jcs_version: {}", payload.jcs_version));
+    }
+    if payload.signature_algorithm != SIGNATURE_ALGORITHM {
+        return Err(format!(
+            "unknown signature_algorithm: {}",
+            payload.signature_algorithm
+        ));
+    }
+    if payload.entropy_composition != ENTROPY_COMPOSITION {
+        return Err(format!(
+            "unknown entropy_composition: {}",
+            payload.entropy_composition
+        ));
+    }
+    if payload.drand_signature_algorithm != DRAND_SIGNATURE_ALGORITHM {
+        return Err(format!(
+            "unknown drand_signature_algorithm: {}",
+            payload.drand_signature_algorithm
+        ));
+    }
+    if payload.merkle_algorithm != MERKLE_ALGORITHM {
+        return Err(format!(
+            "unknown merkle_algorithm: {}",
+            payload.merkle_algorithm
+        ));
+    }
+    let reason_ref = payload.weather_fallback_reason.as_deref();
+    if !VALID_WEATHER_FALLBACK_REASONS.contains(&reason_ref) {
+        return Err(format!(
+            "unknown weather_fallback_reason: {:?}",
+            payload.weather_fallback_reason
+        ));
+    }
+    Ok(())
+}
+
+/// Parse an execution receipt JCS payload and dispatch to the correct
+/// struct based on `schema_version`. Returns a typed enum that callers
+/// pattern-match on. Any unknown `schema_version` returns
+/// `Err(UnknownSchemaVersion)` — this is **terminal**, not retryable.
+/// A verifier receiving this error MUST upgrade, not retry the draw
+/// (spec §4.2.1 — older-schema rejection).
+#[derive(Debug)]
+pub enum ParsedExecutionReceipt {
+    V2(ExecutionReceiptV2),
+    V3(ExecutionReceiptV3),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ParseExecutionReceiptError {
+    InvalidJson(String),
+    MissingSchemaVersion,
+    UnknownSchemaVersion(String),
+    PayloadShapeMismatch(String),
+}
+
+impl std::fmt::Display for ParseExecutionReceiptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidJson(e) => write!(f, "invalid execution receipt JSON: {}", e),
+            Self::MissingSchemaVersion => write!(f, "missing schema_version"),
+            Self::UnknownSchemaVersion(v) => write!(
+                f,
+                "unknown execution receipt schema_version: {} (expected \"2\" or \"3\")",
+                v
+            ),
+            Self::PayloadShapeMismatch(e) => write!(
+                f,
+                "payload shape does not match declared schema_version: {}",
+                e
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ParseExecutionReceiptError {}
+
+pub fn parse_execution_receipt(
+    payload_jcs: &str,
+) -> Result<ParsedExecutionReceipt, ParseExecutionReceiptError> {
+    let value: serde_json::Value = serde_json::from_str(payload_jcs)
+        .map_err(|e| ParseExecutionReceiptError::InvalidJson(e.to_string()))?;
+
+    let schema = value
+        .get("schema_version")
+        .and_then(|v| v.as_str())
+        .ok_or(ParseExecutionReceiptError::MissingSchemaVersion)?;
+
+    match schema {
+        "2" => {
+            let parsed: ExecutionReceiptV2 = serde_json::from_str(payload_jcs)
+                .map_err(|e| ParseExecutionReceiptError::PayloadShapeMismatch(e.to_string()))?;
+            Ok(ParsedExecutionReceipt::V2(parsed))
+        }
+        "3" => {
+            let parsed: ExecutionReceiptV3 = serde_json::from_str(payload_jcs)
+                .map_err(|e| ParseExecutionReceiptError::PayloadShapeMismatch(e.to_string()))?;
+            Ok(ParsedExecutionReceipt::V3(parsed))
+        }
+        other => Err(ParseExecutionReceiptError::UnknownSchemaVersion(
+            other.to_string(),
+        )),
+    }
 }
 
 #[cfg(test)]
