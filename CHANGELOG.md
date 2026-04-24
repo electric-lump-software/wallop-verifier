@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - unreleased
+
+### Added
+
+Dual v2+v3 execution receipt support. Matches `wallop_core` 0.17.0's
+F2 closure — the execution receipt now commits `signing_key_id` for
+the wallop infrastructure key.
+
+- `ExecutionReceiptV3` struct — v2 fields plus required
+  `signing_key_id`. `schema_version` is `"3"`.
+- `build_execution_receipt_payload_v3` — canonical JCS builder for v3.
+- `validate_execution_receipt_tags_v3` — tag validation for v3.
+- `parse_execution_receipt(payload_jcs)` dispatcher — reads
+  `schema_version`, routes to the V2 or V3 parser, and returns
+  `Err(ParseExecutionReceiptError::UnknownSchemaVersion(v))` on any
+  other value. Terminal: no retryable variant exists in the error
+  enum.
+- `ParsedExecutionReceipt` enum (V2 | V3) and
+  `ParseExecutionReceiptError` enum with `Display` +
+  `std::error::Error` impls.
+
+### Hardening
+
+- `#[serde(deny_unknown_fields)]` on both `ExecutionReceiptV2` and
+  `ExecutionReceiptV3`. A v3 payload relabelled as schema `"2"` fails
+  V2 deserialisation (unknown `signing_key_id` field). A v2 payload
+  relabelled as `"3"` fails V3 deserialisation (missing required
+  `signing_key_id`). Closes the downgrade and upgrade-spoof relabel
+  attacks by construction.
+- New v3 frozen vectors (`execution-receipt-v3.json`,
+  `execution-receipt-drand-only-v3.json`) vendored via the
+  `spec/vectors/` submodule. v2 vectors preserved byte-identically
+  for historical-verification coverage.
+
+### Compatibility
+
+- v0.16.x-era v2 receipts continue to verify byte-identically.
+- No changes to lock receipt parsing, transparency anchor
+  construction, drand BLS verification, `entry_hash`,
+  `compute_seed`, or the `verify_full` pipeline.
+
+### Docs
+
+- `README.md` updated: `entry_hash` / `verify` signatures include
+  `draw_id`; JSON examples use `{uuid, weight}`; the Functions
+  section covers the full verifier surface (dispatcher, `verify_full`,
+  tag validators, ed25519 dependency).
+
 ## [0.8.0] - unreleased
 
 ### BREAKING
