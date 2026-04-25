@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.10.1] - unreleased
 
+### Audit closure (V-19)
+
+- **Coverage-guided fuzz campaign completed.** 8-hour libFuzzer run
+  against three targets covering the highest-value verifier attack
+  surfaces. No panics, no `Ok(true)` false-positive verifications, no
+  crashes. Corpus growth confirms healthy coverage (single-digit
+  corpus would suggest the harness never reached interesting branches;
+  these are well past that threshold).
+
+  | Target | Corpus size after 8h |
+  |---|---|
+  | `fuzz_parse_execution_receipt` | 1,696 |
+  | `fuzz_bundle_parse` | 2,938 |
+  | `fuzz_verify_full` | 932 |
+
+  This closes the V-19 method gap from the round 2 vulnerability audit.
+  Re-run on protocol changes; add seed inputs to `fuzz/corpus/<target>/`
+  when new schema shapes land.
+
 ### Fixed
 
 - **Weather observation window bound direction.** The 0.10.0 verifier
