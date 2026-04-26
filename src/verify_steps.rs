@@ -135,9 +135,17 @@ pub struct StepResult {
 /// The variant is wired in here so consumers can begin matching on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum VerifierMode {
+    /// Keys resolved against an operator-hosted `.well-known` pin on a
+    /// domain wallop_core does not control. **Not constructable in 1.0.0
+    /// — pending the `KeyResolver` work in ADR-0009.**
     Attributable,
+    /// Keys resolved from `/operator/:slug/keys` only. Same-origin caveat.
+    /// **Not constructable in 1.0.0 — pending ADR-0009.**
     Attestable,
+    /// Keys read from the bundle itself. The only reachable variant in
+    /// 1.0.0; spec §4.2.4 caveat mode.
     SelfConsistencyOnly,
 }
 
@@ -162,6 +170,15 @@ pub struct VerificationReport {
 }
 
 impl VerificationReport {
+    /// Returns `true` iff the bundle is acceptable. **This is the
+    /// authoritative gate for verification.** Callers MUST NOT infer
+    /// acceptance from per-step results — a per-step `Pass` is a
+    /// diagnostic about the bytes that step examined, not a claim about
+    /// the bundle as a whole. A bundle with a malformed `signature_algorithm`
+    /// can produce step-level `Pass` on the cryptographic checks (the
+    /// signatures genuinely verify over the bytes presented) while still
+    /// failing the `BundleShape` step that catches the protocol violation.
+    /// `passed()` correctly returns `false` in that case.
     pub fn passed(&self) -> bool {
         self.steps
             .iter()
