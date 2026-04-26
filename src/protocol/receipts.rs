@@ -28,7 +28,8 @@ pub const VALID_WEATHER_FALLBACK_REASONS: &[Option<&str>] = &[
     None,
 ];
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct LockReceiptV4 {
     pub commitment_hash: String,
     pub draw_id: String,
@@ -385,6 +386,7 @@ pub fn validate_lock_receipt_tags(payload: &LockReceiptV4) -> Result<(), String>
             payload.entropy_composition
         ));
     }
+    validate_weather_station(&payload.weather_station)?;
     Ok(())
 }
 
@@ -428,6 +430,9 @@ pub fn validate_execution_receipt_tags(payload: &ExecutionReceiptV2) -> Result<(
             "unknown weather_fallback_reason: {:?}",
             payload.weather_fallback_reason
         ));
+    }
+    if let Some(station) = &payload.weather_station {
+        validate_weather_station(station)?;
     }
     Ok(())
 }
@@ -473,7 +478,101 @@ pub fn validate_execution_receipt_tags_v3(payload: &ExecutionReceiptV3) -> Resul
             payload.weather_fallback_reason
         ));
     }
+    if let Some(station) = &payload.weather_station {
+        validate_weather_station(station)?;
+    }
     Ok(())
+}
+
+/// Validate `weather_station` against the spec §4.2.1 charset rule.
+///
+/// MUST match `^[a-z][a-z0-9-]*$` — lowercase ASCII letters, digits, and
+/// hyphens, starting with a letter. Free-form station names smuggle
+/// arbitrary strings into a signed payload and break cross-language
+/// canonicalisation parity. The charset matches the producer-side rule
+/// in wallop_core's weather station registry.
+pub fn validate_weather_station(station: &str) -> Result<(), String> {
+    if station.is_empty() {
+        return Err("weather_station is empty".into());
+    }
+    let mut chars = station.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_lowercase() {
+        return Err(format!(
+            "weather_station must start with [a-z], got: {}",
+            station
+        ));
+    }
+    for c in chars {
+        if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+            return Err(format!(
+                "weather_station has invalid character {:?} in: {}",
+                c, station
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Parse a lock receipt JCS payload as `LockReceiptV4`, the only schema
+/// version supported in 1.x. Strict — `deny_unknown_fields` rejects any
+/// extra field, and an unknown `schema_version` returns
+/// `Err(UnknownSchemaVersion)`. **Terminal**: a verifier receiving this
+/// error MUST upgrade, MUST NOT retry. Mirrors `parse_execution_receipt`'s
+/// dispatcher pattern so future lock receipt schema bumps land cleanly.
+#[derive(Debug)]
+pub enum ParsedLockReceipt {
+    V4(LockReceiptV4),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ParseLockReceiptError {
+    InvalidJson(String),
+    MissingSchemaVersion,
+    UnknownSchemaVersion(String),
+    PayloadShapeMismatch(String),
+}
+
+impl std::fmt::Display for ParseLockReceiptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidJson(e) => write!(f, "invalid lock receipt JSON: {}", e),
+            Self::MissingSchemaVersion => write!(f, "missing schema_version"),
+            Self::UnknownSchemaVersion(v) => write!(
+                f,
+                "unknown lock receipt schema_version: {} (expected \"4\")",
+                v
+            ),
+            Self::PayloadShapeMismatch(e) => write!(
+                f,
+                "payload shape does not match declared schema_version: {}",
+                e
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ParseLockReceiptError {}
+
+pub fn parse_lock_receipt(payload_jcs: &str) -> Result<ParsedLockReceipt, ParseLockReceiptError> {
+    let value: serde_json::Value = serde_json::from_str(payload_jcs)
+        .map_err(|e| ParseLockReceiptError::InvalidJson(e.to_string()))?;
+
+    let schema = value
+        .get("schema_version")
+        .and_then(|v| v.as_str())
+        .ok_or(ParseLockReceiptError::MissingSchemaVersion)?;
+
+    match schema {
+        "4" => {
+            let parsed: LockReceiptV4 = serde_json::from_str(payload_jcs)
+                .map_err(|e| ParseLockReceiptError::PayloadShapeMismatch(e.to_string()))?;
+            Ok(ParsedLockReceipt::V4(parsed))
+        }
+        other => Err(ParseLockReceiptError::UnknownSchemaVersion(
+            other.to_string(),
+        )),
+    }
 }
 
 /// Parse an execution receipt JCS payload and dispatch to the correct

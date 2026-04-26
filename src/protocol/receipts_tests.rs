@@ -577,3 +577,146 @@ fn receipt_schema_version_missing() {
 fn receipt_schema_version_invalid_json() {
     assert_eq!(receipt_schema_version("not json"), None);
 }
+
+// ── A1: closed-set discipline on LockReceiptV4 ─────────────────────────
+
+#[test]
+fn lock_receipt_rejects_unknown_field() {
+    // Build a valid lock receipt JCS payload, then add an unknown field.
+    let vector: serde_json::Value = serde_json::from_str(LOCK_RECEIPT_VECTOR).unwrap();
+    let input = lock_receipt_from_json(&vector["input"]);
+    let payload_jcs = build_receipt_payload(&input);
+    let mut payload: serde_json::Value = serde_json::from_str(&payload_jcs).unwrap();
+    payload
+        .as_object_mut()
+        .unwrap()
+        .insert("backdoor".into(), serde_json::Value::String("evil".into()));
+
+    let result: Result<LockReceiptV4, _> = serde_json::from_value(payload);
+    assert!(
+        result.is_err(),
+        "lock receipt with unknown field must reject"
+    );
+    assert!(
+        result.unwrap_err().to_string().contains("unknown field"),
+        "error must name the unknown field"
+    );
+}
+
+// ── A1: parse_lock_receipt dispatcher ──────────────────────────────────
+
+#[test]
+fn parse_lock_receipt_accepts_v4() {
+    let vector: serde_json::Value = serde_json::from_str(LOCK_RECEIPT_VECTOR).unwrap();
+    let input = lock_receipt_from_json(&vector["input"]);
+    let payload = build_receipt_payload(&input);
+
+    let parsed = parse_lock_receipt(&payload).expect("v4 payload must parse");
+    match parsed {
+        ParsedLockReceipt::V4(_) => (),
+    }
+}
+
+#[test]
+fn parse_lock_receipt_rejects_unknown_schema_version() {
+    let payload = serde_json::json!({
+        "schema_version": "99",
+        "draw_id": "00000000-0000-4000-8000-000000000000"
+    })
+    .to_string();
+
+    let result = parse_lock_receipt(&payload);
+    match result {
+        Err(ParseLockReceiptError::UnknownSchemaVersion(v)) => assert_eq!(v, "99"),
+        other => panic!("expected UnknownSchemaVersion(\"99\"), got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_lock_receipt_rejects_missing_schema_version() {
+    let payload = r#"{"draw_id":"00000000-0000-4000-8000-000000000000"}"#;
+    let result = parse_lock_receipt(payload);
+    assert!(matches!(
+        result,
+        Err(ParseLockReceiptError::MissingSchemaVersion)
+    ));
+}
+
+#[test]
+fn parse_lock_receipt_rejects_unknown_field_via_dispatcher() {
+    // The dispatcher inherits deny_unknown_fields from LockReceiptV4.
+    let vector: serde_json::Value = serde_json::from_str(LOCK_RECEIPT_VECTOR).unwrap();
+    let input = lock_receipt_from_json(&vector["input"]);
+    let payload_jcs = build_receipt_payload(&input);
+    let mut payload: serde_json::Value = serde_json::from_str(&payload_jcs).unwrap();
+    payload
+        .as_object_mut()
+        .unwrap()
+        .insert("backdoor".into(), serde_json::Value::String("evil".into()));
+
+    let result = parse_lock_receipt(&payload.to_string());
+    assert!(
+        matches!(result, Err(ParseLockReceiptError::PayloadShapeMismatch(_))),
+        "expected PayloadShapeMismatch, got: {:?}",
+        result
+    );
+}
+
+// ── A3: weather_station charset validation ─────────────────────────────
+
+#[test]
+fn validate_weather_station_accepts_canonical() {
+    assert!(validate_weather_station("middle-wallop").is_ok());
+    assert!(validate_weather_station("heathrow").is_ok());
+    assert!(validate_weather_station("station-42").is_ok());
+}
+
+#[test]
+fn validate_weather_station_rejects_capitals() {
+    assert!(validate_weather_station("Middle-Wallop").is_err());
+    assert!(validate_weather_station("HEATHROW").is_err());
+}
+
+#[test]
+fn validate_weather_station_rejects_spaces() {
+    assert!(validate_weather_station("middle wallop").is_err());
+}
+
+#[test]
+fn validate_weather_station_rejects_special_chars() {
+    assert!(validate_weather_station("middle_wallop").is_err());
+    assert!(validate_weather_station("middle.wallop").is_err());
+    assert!(validate_weather_station("middle/wallop").is_err());
+    assert!(validate_weather_station("middle:wallop").is_err());
+}
+
+#[test]
+fn validate_weather_station_rejects_leading_digit() {
+    assert!(validate_weather_station("42-station").is_err());
+    assert!(validate_weather_station("-leading-hyphen").is_err());
+}
+
+#[test]
+fn validate_weather_station_rejects_empty() {
+    assert!(validate_weather_station("").is_err());
+}
+
+// ── A3: weather_station validation flows through tag validators ────────
+
+#[test]
+fn validate_lock_receipt_tags_rejects_bad_weather_station() {
+    let vector: serde_json::Value = serde_json::from_str(LOCK_RECEIPT_VECTOR).unwrap();
+    let mut input = lock_receipt_from_json(&vector["input"]);
+    input.weather_station = "Middle-Wallop".into();
+
+    assert!(validate_lock_receipt_tags(&input).is_err());
+}
+
+#[test]
+fn validate_execution_receipt_tags_rejects_bad_weather_station() {
+    let vector: serde_json::Value = serde_json::from_str(EXECUTION_RECEIPT_VECTOR).unwrap();
+    let mut input = execution_receipt_from_json(&vector["input"]);
+    input.weather_station = Some("HEATHROW".into());
+
+    assert!(validate_execution_receipt_tags(&input).is_err());
+}
