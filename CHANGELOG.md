@@ -5,9 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.10.1] - unreleased
+## [0.11.0] - unreleased
 
-### Audit closure (V-19)
+### Breaking
+
+- **`VerificationReport` gains a required `mode: VerifierMode` field.** External callers constructing a `VerificationReport` literal will fail to compile until they set the mode. The new field is needed to make the verifier's trust mode explicit in every report. In 1.0.0 the only constructible variant is `SelfConsistencyOnly`; `Attributable` and `Attestable` are reserved for the `KeyResolver` work in a follow-up release. The enum is `#[non_exhaustive]` so that future expansion is not itself a breaking change.
+- **`StepName::all()` now returns 12 entries (was 11).** Callers that hard-code the count, iterate to a fixed offset, or pin a `Vec<_>` length will break. The new variant `StepName::BundleShape` is appended (preserves ordinal stability for existing entries).
+
+### Added — `BundleShape` verification step
+
+A new 12th verification step that wires the typed parsers and tag validators (which the crate has shipped since the receipts module landed) into the `verify_bundle` pipeline. The validators existed but `verify_bundle` never called them, so closed-set discipline, `schema_version` strict dispatch, algorithm-identity-tag pinning, `weather_station` charset, and canonical RFC 3339 timestamps were not enforced at runtime.
+
+`BundleShape` runs `parse_lock_receipt` and `parse_execution_receipt` (both with `deny_unknown_fields` and schema-version dispatchers), then the version-specific tag validators, then `chrono_parse_canonical` on every signed timestamp (`locked_at`, `weather_time`, `executed_at`, and `weather_observation_time` when present). A bundle whose lock receipt contains an unknown field, declares an unsupported `schema_version`, names an algorithm tag that doesn't match the pinned constant, or carries a non-canonical timestamp now fails `BundleShape` rather than silently passing through `unwrap_or_default()` in the older steps.
+
+The step is appended to `StepName::all()` rather than inserted mid-list so external consumers pinning step ordinals are not broken; in execution order it runs alongside the existing 11 steps and produces a per-step diagnostic on the report. `VerificationReport::passed()` is the authoritative acceptance gate — per-step `Pass` is a diagnostic about the bytes that step examined, not a claim that the bundle is well-formed; the `passed()` doc comment now states this explicitly so downstream callers can't infer acceptance from step counts.
+
+### Added — typed parser surface
+
+Pure-additive tightening of the typed surface ahead of `BundleShape` wiring (the wiring would have been incoherent without it):
+
+- `LockReceiptV4` gains `#[serde(deny_unknown_fields)]`, matching the execution receipt structs. A lock receipt with an extra field now rejects at parse time (closed-set discipline, spec §4.2.1, §4.2.5).
+- New `parse_lock_receipt` dispatcher with `ParsedLockReceipt` enum and `ParseLockReceiptError`, mirroring `parse_execution_receipt`. Currently routes only to v4; an unknown `schema_version` returns terminal `UnknownSchemaVersion` (spec §4.2.1 — verifiers MUST upgrade, MUST NOT retry).
+- New `validate_weather_station(station: &str)` enforcing the spec §4.2.1 charset rule (`^[a-z][a-z0-9-]*$`), capped at `WEATHER_STATION_MAX_LEN = 64` bytes for defence-in-depth against pathologically long values. Wired into `validate_lock_receipt_tags`, `validate_execution_receipt_tags`, and `validate_execution_receipt_tags_v3`.
+
+### Added — `VerifierMode` enum
+
+A public, `#[non_exhaustive]` enum naming the three verifier trust modes: `Attributable` (operator-hosted `.well-known` pin — not constructable in 1.0.0), `Attestable` (`/operator/:slug/keys` endpoint resolution — not constructable in 1.0.0), and `SelfConsistencyOnly` (bundle-embedded keys — the only reachable variant in 1.0.0). `Display`, `Serialize`, and `Deserialize` use snake-case wire form. The enum is wired into `VerificationReport.mode` now so that the `KeyResolver` follow-up can light up the other two variants without a breaking change.
+
+### Audit closure
 
 - **Coverage-guided fuzz campaign completed.** 8-hour libFuzzer run
   against three targets covering the highest-value verifier attack
@@ -22,7 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   | `fuzz_bundle_parse` | 2,938 |
   | `fuzz_verify_full` | 932 |
 
-  This closes the V-19 method gap from the round 2 vulnerability audit.
+  This closes the fuzzing method gap.
   Re-run on protocol changes; add seed inputs to `fuzz/corpus/<target>/`
   when new schema shapes land.
 
