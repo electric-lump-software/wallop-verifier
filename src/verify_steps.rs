@@ -1,9 +1,10 @@
 use crate::bundle::ProofBundle;
+use crate::key_resolver::{BundleEmbeddedResolver, KeyClass, KeyResolver};
 use crate::protocol::crypto;
 use crate::protocol::receipts::{
-    ParsedExecutionReceipt, lock_receipt_hash, parse_execution_receipt, parse_lock_receipt,
-    validate_execution_receipt_tags, validate_execution_receipt_tags_v3,
-    validate_lock_receipt_tags,
+    ParsedExecutionReceipt, ParsedLockReceipt, lock_receipt_hash, parse_execution_receipt,
+    parse_lock_receipt, validate_execution_receipt_tags, validate_execution_receipt_tags_v3,
+    validate_execution_receipt_tags_v4, validate_lock_receipt_tags, validate_lock_receipt_tags_v5,
 };
 use crate::{Entry, compute_seed, compute_seed_drand_only, draw, entry_hash};
 use serde::{Deserialize, Serialize};
@@ -46,10 +47,9 @@ pub enum StepName {
     /// dispatcher (terminal `UnknownSchemaVersion` on anything else), MUST
     /// pass the algorithm-identity-tag and `weather_station` charset
     /// validators, and every signed timestamp MUST be in canonical
-    /// RFC 3339 form (`chrono_parse_canonical`). Closes the A1/A2/A3 air
-    /// gaps named in the round-2 topology review — the typed parsers and
-    /// validators ship in `protocol/receipts.rs` but until this step
-    /// existed, the verifier never called them. Appended to the end of
+    /// RFC 3339 form (`chrono_parse_canonical`). The typed parsers and
+    /// validators ship in `protocol/receipts.rs`; this step is the entry
+    /// point that wires them into the verifier pipeline. Appended to the end of
     /// `StepName::all()` so external consumers pinning step ordinals are
     /// not broken; in pipeline execution order, this step runs FIRST and
     /// gates everything else.
@@ -120,10 +120,10 @@ pub struct StepResult {
 /// the report itself (CLI header, JSON top-level, WASM page UX) so the
 /// guarantee a user is reading is never ambiguous.
 ///
-/// Per ADR-0009, three tiers exist:
+/// Per spec §4.2.4, three tiers exist:
 ///
 /// - `Attributable` — keys resolved against an operator-hosted
-///   `.well-known` pin on a domain wallop_core does not control.
+///   `.well-known` pin on a domain the verifier crate does not control.
 /// - `Attestable` — keys resolved from `/operator/:slug/keys` only.
 ///   Same-origin caveat: a CDN compromise can serve coherent forgeries.
 /// - `SelfConsistencyOnly` — keys read from the bundle itself. Catches
@@ -138,11 +138,11 @@ pub struct StepResult {
 #[non_exhaustive]
 pub enum VerifierMode {
     /// Keys resolved against an operator-hosted `.well-known` pin on a
-    /// domain wallop_core does not control. **Not constructable in 1.0.0
-    /// — pending the `KeyResolver` work in ADR-0009.**
+    /// domain the verifier crate does not control. **Not constructable
+    /// in 1.0.0 — pending the resolver follow-up.**
     Attributable,
     /// Keys resolved from `/operator/:slug/keys` only. Same-origin caveat.
-    /// **Not constructable in 1.0.0 — pending ADR-0009.**
+    /// **Not constructable in 1.0.0 — pending the resolver follow-up.**
     Attestable,
     /// Keys read from the bundle itself. The only reachable variant in
     /// 1.0.0; spec §4.2.4 caveat mode.
@@ -197,16 +197,98 @@ impl VerificationReport {
     }
 }
 
+/// Run the full verification pipeline using the bundle's inline keys
+/// (legacy / self-consistency mode). Constructs a `BundleEmbeddedResolver`
+/// internally; see `verify_bundle_with` for resolver-driven verification.
+///
+/// The returned report carries `mode = VerifierMode::SelfConsistencyOnly`,
+/// which the proof page UX, CLI header, and JSON output MUST surface so a
+/// reader of the report knows what the report's signature checks actually
+/// proved (spec §4.2.4 caveat-mode disclosure).
 pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
+    let resolver = BundleEmbeddedResolver::from_bundle(bundle);
+    verify_bundle_with(bundle, &resolver, VerifierMode::SelfConsistencyOnly)
+}
+
+/// Run the full verification pipeline against a caller-supplied
+/// `KeyResolver`. The verifier reads keys exclusively via the resolver —
+/// failure to resolve is terminal — the pipeline MUST NOT fall back to
+/// receipt-inline keys (spec §4.2.4).
+///
+/// `mode` is recorded in the returned `VerificationReport.mode`. Callers
+/// MUST pick a mode that matches the resolver's actual trust root —
+/// `Attributable` for an operator-hosted `.well-known` pin,
+/// `Attestable` for an unpinned `/operator/:slug/keys` endpoint,
+/// `SelfConsistencyOnly` for `BundleEmbeddedResolver`. The verifier crate
+/// does not police this association — it is the caller's contract with
+/// the trust model. See spec §4.2.4.
+pub fn verify_bundle_with<R: KeyResolver>(
+    bundle: &ProofBundle,
+    resolver: &R,
+    mode: VerifierMode,
+) -> VerificationReport {
     let mut steps = Vec::new();
 
-    // Decode keys for key_id display
-    let op_pk = hex::decode(&bundle.lock_receipt.public_key_hex)
+    // Pre-parse receipts to extract `signing_key_id` for resolver lookups.
+    // Parse failure is captured by `BundleShape` (which runs at the end of
+    // the pipeline); when it occurs here, signature steps will fail too
+    // because `resolver.resolve` cannot succeed without a key_id.
+    let lock_signing_key_id = parse_lock_receipt(&bundle.lock_receipt.payload_jcs)
         .ok()
-        .and_then(|b| <[u8; 32]>::try_from(b).ok());
-    let infra_pk = hex::decode(&bundle.execution_receipt.public_key_hex)
+        .map(|p| match p {
+            ParsedLockReceipt::V4(r) => r.signing_key_id,
+            ParsedLockReceipt::V5(r) => r.signing_key_id,
+        });
+    let exec_signing_key_id = parse_execution_receipt(&bundle.execution_receipt.payload_jcs)
         .ok()
-        .and_then(|b| <[u8; 32]>::try_from(b).ok());
+        .and_then(|p| match p {
+            // exec v2 carries no signing_key_id on the signed payload.
+            // The pipeline below derives a synthetic key_id by hashing
+            // the inline pubkey, so every resolver call carries a real
+            // key_id; tier-2 / tier-1 resolvers will not find it in
+            // their keyring and return `KeyNotFound` — the correct
+            // outcome (exec v2 has no out-of-band identity).
+            ParsedExecutionReceipt::V2(_) => None,
+            ParsedExecutionReceipt::V3(r) => Some(r.signing_key_id),
+            ParsedExecutionReceipt::V4(r) => Some(r.signing_key_id),
+        });
+
+    // Synthesise the exec key_id for v2 bundles: hash the inline pubkey.
+    // This keeps every resolver call honest — the resolver receives a
+    // real key_id in every call, never a sentinel.
+    let exec_key_id_for_resolve: Option<String> = exec_signing_key_id.clone().or_else(|| {
+        let inline = bundle.execution_receipt.public_key_hex.as_deref()?;
+        let bytes = hex::decode(inline).ok()?;
+        let pk: [u8; 32] = bytes.try_into().ok()?;
+        Some(crypto::key_id(&pk))
+    });
+
+    // Resolve operator and infrastructure keys. Failure is terminal — the
+    // signature step will simply fail to verify when `op_pk` / `infra_pk`
+    // is `None`, and the verifier never inspects inline keys after this
+    // point.
+    //
+    // After resolution, assert that `crypto::key_id(resolved.public_key)`
+    // equals the requested key_id. A buggy or hostile resolver answering
+    // a request for `key_id=X` with `pk_Y` (where Y != X) would otherwise
+    // pass — the signature would verify against pk_Y. This is the
+    // verifier-side mirror of the producer's keyring-row consistency
+    // check (spec §4.2.4).
+    let op_resolved = lock_signing_key_id.as_deref().and_then(|kid| {
+        resolver
+            .resolve(kid, KeyClass::Operator)
+            .ok()
+            .filter(|r| crypto::key_id(&r.public_key) == kid)
+    });
+    let infra_resolved = exec_key_id_for_resolve.as_deref().and_then(|kid| {
+        resolver
+            .resolve(kid, KeyClass::Infrastructure)
+            .ok()
+            .filter(|r| crypto::key_id(&r.public_key) == kid)
+    });
+
+    let op_pk = op_resolved.as_ref().map(|r| r.public_key);
+    let infra_pk = infra_resolved.as_ref().map(|r| r.public_key);
 
     let operator_key_id = op_pk.as_ref().map(crypto::key_id);
     let infra_key_id = infra_pk.as_ref().map(crypto::key_id);
@@ -558,7 +640,7 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
         steps,
         operator_key_id,
         infra_key_id,
-        mode: VerifierMode::SelfConsistencyOnly,
+        mode,
     }
 }
 
@@ -568,45 +650,87 @@ pub fn verify_bundle(bundle: &ProofBundle) -> VerificationReport {
 /// the tag validators (`validate_lock_receipt_tags`,
 /// `validate_execution_receipt_tags`/`_v3`), and a canonical RFC 3339
 /// regex check (`chrono_parse_canonical`) on every signed timestamp. Closes
-/// the A1/A2/A3 air gaps from the round-2 topology review — the validators
-/// ship in `protocol/receipts.rs` but until this step existed, the verifier
-/// never called them.
+/// the validators in `protocol/receipts.rs` and ensures the verifier
+/// pipeline calls every one of them on every bundle.
 ///
 /// A bundle that passes this step is well-shaped per spec §4.2.1: closed
 /// field set on receipts, recognised `schema_version`, pinned algorithm
 /// tags, charset-conforming `weather_station`, canonical signed timestamps.
 fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
     // Lock receipt — typed parse via dispatcher (deny_unknown_fields,
-    // schema_version dispatch).
-    let parsed_lock = match parse_lock_receipt(&bundle.lock_receipt.payload_jcs) {
-        Ok(crate::protocol::receipts::ParsedLockReceipt::V4(p)) => p,
-        Err(e) => {
-            return StepResult {
-                name: StepName::BundleShape,
-                status: StepStatus::Fail(format!("lock receipt: {}", e)),
-                detail: None,
-            };
-        }
-    };
-
-    // Lock receipt — algorithm identity tags + weather_station charset.
-    if let Err(e) = validate_lock_receipt_tags(&parsed_lock) {
-        return StepResult {
-            name: StepName::BundleShape,
-            status: StepStatus::Fail(format!("lock receipt validation: {}", e)),
-            detail: None,
+    // schema_version dispatch). V4 and V5 carry byte-identical field sets;
+    // version-specific tag validators differ only in the schema_version
+    // constant they assert against.
+    //
+    // Schema-version-vs-bundle-shape consistency rule (spec §4.2.4): a v5
+    // lock receipt MUST be paired with a wrapper that omits
+    // `public_key_hex` (resolver-driven), and a v4 lock receipt MUST be
+    // paired with a wrapper that includes one (inline-key legacy mode).
+    // Mismatches reject as downgrade-relabel / upgrade-spoof attempts —
+    // the same shape as the v2/v3 deny_unknown_fields defence (F2).
+    let inline_lock_pk_present = bundle.lock_receipt.public_key_hex.is_some();
+    let (lock_locked_at, lock_weather_time) =
+        match parse_lock_receipt(&bundle.lock_receipt.payload_jcs) {
+            Ok(ParsedLockReceipt::V4(p)) => {
+                if let Err(e) = validate_lock_receipt_tags(&p) {
+                    return StepResult {
+                        name: StepName::BundleShape,
+                        status: StepStatus::Fail(format!("lock receipt validation: {}", e)),
+                        detail: None,
+                    };
+                }
+                if !inline_lock_pk_present {
+                    return StepResult {
+                        name: StepName::BundleShape,
+                        status: StepStatus::Fail(
+                            "lock receipt schema_version=\"4\" requires inline \
+                             public_key_hex on the bundle wrapper (upgrade-spoof check)"
+                                .into(),
+                        ),
+                        detail: None,
+                    };
+                }
+                (p.locked_at, p.weather_time)
+            }
+            Ok(ParsedLockReceipt::V5(p)) => {
+                if let Err(e) = validate_lock_receipt_tags_v5(&p) {
+                    return StepResult {
+                        name: StepName::BundleShape,
+                        status: StepStatus::Fail(format!("lock receipt validation: {}", e)),
+                        detail: None,
+                    };
+                }
+                if inline_lock_pk_present {
+                    return StepResult {
+                        name: StepName::BundleShape,
+                        status: StepStatus::Fail(
+                            "lock receipt schema_version=\"5\" must not carry inline \
+                             public_key_hex on the bundle wrapper (downgrade-relabel check)"
+                                .into(),
+                        ),
+                        detail: None,
+                    };
+                }
+                (p.locked_at, p.weather_time)
+            }
+            Err(e) => {
+                return StepResult {
+                    name: StepName::BundleShape,
+                    status: StepStatus::Fail(format!("lock receipt: {}", e)),
+                    detail: None,
+                };
+            }
         };
-    }
 
     // Lock receipt — canonical timestamps.
-    if let Err(e) = chrono_parse_canonical(&parsed_lock.locked_at) {
+    if let Err(e) = chrono_parse_canonical(&lock_locked_at) {
         return StepResult {
             name: StepName::BundleShape,
             status: StepStatus::Fail(format!("lock.locked_at: {}", e)),
             detail: None,
         };
     }
-    if let Err(e) = chrono_parse_canonical(&parsed_lock.weather_time) {
+    if let Err(e) = chrono_parse_canonical(&lock_weather_time) {
         return StepResult {
             name: StepName::BundleShape,
             status: StepStatus::Fail(format!("lock.weather_time: {}", e)),
@@ -627,14 +751,28 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
     };
 
     // Execution receipt — version-specific tag validators + canonical
-    // timestamp checks. v2 and v3 share field shape modulo
-    // `signing_key_id`; checks are otherwise identical.
+    // timestamp checks + schema-version-vs-wrapper consistency. v2/v3/v4
+    // share field shape modulo `signing_key_id` (added in v3) and the
+    // schema_version constant (v4 is byte-identical to v3 on the signed
+    // payload; the bump signals resolver-driven verification).
+    let inline_exec_pk_present = bundle.execution_receipt.public_key_hex.is_some();
     let (executed_at, weather_observation_time) = match &parsed_exec {
         ParsedExecutionReceipt::V2(p) => {
             if let Err(e) = validate_execution_receipt_tags(p) {
                 return StepResult {
                     name: StepName::BundleShape,
                     status: StepStatus::Fail(format!("exec receipt validation: {}", e)),
+                    detail: None,
+                };
+            }
+            if !inline_exec_pk_present {
+                return StepResult {
+                    name: StepName::BundleShape,
+                    status: StepStatus::Fail(
+                        "execution receipt schema_version=\"2\" requires inline \
+                         public_key_hex on the bundle wrapper (upgrade-spoof check)"
+                            .into(),
+                    ),
                     detail: None,
                 };
             }
@@ -645,6 +783,38 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
                 return StepResult {
                     name: StepName::BundleShape,
                     status: StepStatus::Fail(format!("exec receipt validation: {}", e)),
+                    detail: None,
+                };
+            }
+            if !inline_exec_pk_present {
+                return StepResult {
+                    name: StepName::BundleShape,
+                    status: StepStatus::Fail(
+                        "execution receipt schema_version=\"3\" requires inline \
+                         public_key_hex on the bundle wrapper (upgrade-spoof check)"
+                            .into(),
+                    ),
+                    detail: None,
+                };
+            }
+            (p.executed_at.clone(), p.weather_observation_time.clone())
+        }
+        ParsedExecutionReceipt::V4(p) => {
+            if let Err(e) = validate_execution_receipt_tags_v4(p) {
+                return StepResult {
+                    name: StepName::BundleShape,
+                    status: StepStatus::Fail(format!("exec receipt validation: {}", e)),
+                    detail: None,
+                };
+            }
+            if inline_exec_pk_present {
+                return StepResult {
+                    name: StepName::BundleShape,
+                    status: StepStatus::Fail(
+                        "execution receipt schema_version=\"4\" must not carry inline \
+                         public_key_hex on the bundle wrapper (downgrade-relabel check)"
+                            .into(),
+                    ),
                     detail: None,
                 };
             }
@@ -967,7 +1137,9 @@ mod tests {
     /// Build a fully valid proof bundle with real Ed25519 signatures and correct protocol values.
     fn valid_signed_bundle() -> (String, String) {
         let sk = test_signing_key();
-        let pk_hex = hex::encode(sk.verifying_key().to_bytes());
+        let pk_bytes: [u8; 32] = sk.verifying_key().to_bytes();
+        let pk_hex = hex::encode(pk_bytes);
+        let kid = crate::protocol::crypto::key_id(&pk_bytes);
 
         // Entry `id` here carries the wallop-assigned UUID. Using real UUIDs
         // (not operator-supplied strings) so the hash, sort, and bundle
@@ -1017,7 +1189,7 @@ mod tests {
             "schema_version": "4",
             "sequence": 1,
             "signature_algorithm": "ed25519",
-            "signing_key_id": "deadbeef",
+            "signing_key_id": &kid,
             "wallop_core_version": "0.14.1",
             "weather_station": "middle-wallop",
             "weather_time": "2026-04-09T12:10:00.000000Z",
@@ -1409,7 +1581,7 @@ mod tests {
         );
     }
 
-    // ── A1/A2/A3: BundleShape gate ─────────────────────────────────────
+    // ── BundleShape gate ───────────────────────────────────────────────
 
     /// Mutate the lock receipt's signed JCS payload by injecting/replacing a
     /// field. Re-signs the lock receipt so the signature step still passes;
@@ -1579,6 +1751,153 @@ mod tests {
         let (json, _) = valid_signed_bundle();
         let bundle = ProofBundle::from_json(&json).unwrap();
         let report = verify_bundle(&bundle);
+        assert_eq!(report.mode, VerifierMode::SelfConsistencyOnly);
+    }
+
+    // ── v5/v4 resolver-driven verification ────────────────────────────────
+
+    use crate::_test_support::{MockResolver, build_valid_v5_bundle};
+    use crate::key_resolver::BundleEmbeddedResolver;
+
+    fn three_uuid_entries() -> Vec<Entry> {
+        vec![
+            Entry {
+                id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+                weight: 1,
+            },
+            Entry {
+                id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
+                weight: 1,
+            },
+            Entry {
+                id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc".into(),
+                weight: 1,
+            },
+        ]
+    }
+
+    #[test]
+    fn verify_bundle_v5_with_bundle_embedded_resolver_fails_keynotfound() {
+        // BundleEmbeddedResolver cannot resolve a v5 bundle (no inline pk
+        // in the wrapper). Lock-signature step fails because op_pk is None.
+        let (json, _, _) = build_valid_v5_bundle(&three_uuid_entries(), Some("1013"), 2);
+        let bundle = ProofBundle::from_json(&json).unwrap();
+        let report = verify_bundle(&bundle);
+        assert!(!report.passed());
+        let lock_sig = report
+            .steps
+            .iter()
+            .find(|s| s.name == StepName::LockSignature)
+            .unwrap();
+        assert!(matches!(lock_sig.status, StepStatus::Fail(_)));
+    }
+
+    #[test]
+    fn verify_bundle_with_mock_resolver_passes_v5() {
+        let (json, pk_hex, signing_key_id) =
+            build_valid_v5_bundle(&three_uuid_entries(), Some("1013"), 2);
+        let bundle = ProofBundle::from_json(&json).unwrap();
+        let pk: [u8; 32] = hex::decode(&pk_hex).unwrap().try_into().unwrap();
+        let resolver = MockResolver::new(signing_key_id, pk);
+
+        let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attestable);
+        // Steps 1-7 should all be Pass under the resolver-driven path.
+        for step in &report.steps[..7] {
+            assert!(
+                matches!(step.status, StepStatus::Pass),
+                "step {} was {:?}",
+                step.name,
+                step.status
+            );
+        }
+        // Without cli feature, BLS step is Skip; report passes overall.
+        #[cfg(not(feature = "cli"))]
+        assert!(report.passed(), "expected pass; got {:?}", report.steps);
+        // mode is plumbed through.
+        assert_eq!(report.mode, VerifierMode::Attestable);
+    }
+
+    #[test]
+    fn bundle_shape_rejects_v5_lock_with_inline_pubkey_downgrade_relabel() {
+        let (json, pk_hex, _) = build_valid_v5_bundle(&three_uuid_entries(), Some("1013"), 2);
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // Inject inline operator_public_key_hex into the v5 wrapper —
+        // protocol violation; BundleShape MUST reject as downgrade-relabel.
+        val["lock_receipt"]["operator_public_key_hex"] = serde_json::json!(pk_hex);
+        let bundle = ProofBundle::from_json(&val.to_string()).unwrap();
+        let report = verify_bundle(&bundle);
+        let shape = report
+            .steps
+            .iter()
+            .find(|s| s.name == StepName::BundleShape)
+            .unwrap();
+        assert!(
+            matches!(&shape.status, StepStatus::Fail(msg) if msg.contains("downgrade-relabel")),
+            "expected downgrade-relabel rejection; got {:?}",
+            shape.status
+        );
+    }
+
+    #[test]
+    fn bundle_shape_rejects_v4_lock_without_inline_pubkey_upgrade_spoof() {
+        let (json, _) = valid_signed_bundle();
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // Strip the inline operator_public_key_hex from a legacy v4 bundle —
+        // protocol violation; BundleShape MUST reject as upgrade-spoof.
+        val["lock_receipt"]
+            .as_object_mut()
+            .unwrap()
+            .remove("operator_public_key_hex");
+        let bundle = ProofBundle::from_json(&val.to_string()).unwrap();
+        let report = verify_bundle(&bundle);
+        let shape = report
+            .steps
+            .iter()
+            .find(|s| s.name == StepName::BundleShape)
+            .unwrap();
+        assert!(
+            matches!(&shape.status, StepStatus::Fail(msg) if msg.contains("upgrade-spoof")),
+            "expected upgrade-spoof rejection; got {:?}",
+            shape.status
+        );
+    }
+
+    #[test]
+    fn bundle_shape_rejects_v2_exec_without_inline_pubkey_upgrade_spoof() {
+        // Strip the infra public_key_hex from a legacy v2-exec bundle —
+        // BundleShape MUST reject (v2 requires inline). Distinct lock
+        // shape isolates the exec-side rule from the lock-side one.
+        let (json, _) = valid_signed_bundle();
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        val["execution_receipt"]
+            .as_object_mut()
+            .unwrap()
+            .remove("infrastructure_public_key_hex");
+        let bundle = ProofBundle::from_json(&val.to_string()).unwrap();
+        let report = verify_bundle(&bundle);
+        let shape = report
+            .steps
+            .iter()
+            .find(|s| s.name == StepName::BundleShape)
+            .unwrap();
+        assert!(
+            matches!(&shape.status, StepStatus::Fail(msg) if msg.contains("upgrade-spoof")
+                && msg.contains("execution receipt")),
+            "expected exec upgrade-spoof rejection; got {:?}",
+            shape.status
+        );
+    }
+
+    #[test]
+    fn bundle_embedded_resolver_v5_in_self_consistency_mode_fails() {
+        // Direct construction: take a v5 bundle, run through default
+        // verify_bundle (uses BundleEmbeddedResolver internally). All sig
+        // steps fail because the resolver returns KeyNotFound.
+        let (json, _, _) = build_valid_v5_bundle(&three_uuid_entries(), Some("1013"), 2);
+        let bundle = ProofBundle::from_json(&json).unwrap();
+        let resolver = BundleEmbeddedResolver::from_bundle(&bundle);
+        let report = verify_bundle_with(&bundle, &resolver, VerifierMode::SelfConsistencyOnly);
+        assert!(!report.passed());
         assert_eq!(report.mode, VerifierMode::SelfConsistencyOnly);
     }
 }

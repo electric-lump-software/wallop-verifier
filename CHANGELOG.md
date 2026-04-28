@@ -5,7 +5,80 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.11.0] - unreleased
+## [0.12.0] - unreleased
+
+### Breaking
+
+- **`ReceiptBlock.public_key_hex` is now `Option<String>`** (was `String`). Bundles with v5 lock receipts and v4 execution receipts MUST omit the inline key from the wrapper; bundles with v3 / v4 lock and v2 / v3 execution receipts MUST continue to supply it. The `BundleShape` step enforces this consistency rule and rejects mismatches as downgrade-relabel or upgrade-spoof attempts. The serde aliases `operator_public_key_hex` and `infrastructure_public_key_hex` continue to work.
+- **`verify_bundle` is now a thin wrapper around `verify_bundle_with(bundle, &resolver, mode)`.** The new function accepts any `KeyResolver`. The old `verify_bundle(bundle)` constructs a `BundleEmbeddedResolver` internally and runs the pipeline in `VerifierMode::SelfConsistencyOnly` — drop-in compatible for callers verifying legacy bundles. Callers that want resolver-driven verification (tier-1 attributable or tier-2 attestable) call `verify_bundle_with` directly.
+- **Receipt schema versions accepted by the typed dispatchers:** `parse_lock_receipt` now accepts `"4"` and `"5"`; `parse_execution_receipt` now accepts `"2"`, `"3"`, and `"4"`. Unknown-schema-version errors carry the full set in their `Display` output.
+
+### Added — `KeyResolver` trait surface
+
+A new public module `key_resolver` defines the resolution surface used by `verify_bundle_with`:
+
+- `KeyResolver` trait — single `resolve(key_id, key_class)` entry point. Failure is terminal; the verifier pipeline does not fall back to inline keys.
+- `ResolvedKey { public_key, inserted_at, key_class }` — the resolved key plus the metadata required for V-02 temporal binding (verifier-side V-02 enforcement is not yet wired; the carrier is in place).
+- `KeyClass::{Operator, Infrastructure}` — discriminator passed to the resolver.
+- `ResolutionError::{Unreachable, KeyNotFound, PinMismatch, MalformedResponse, InconsistentRow}` — closed-set failure modes.
+- `BundleEmbeddedResolver` — the only built-in implementation, used for legacy v3 / v4 bundles and for `--mode self-consistency` debug runs. Reads keys directly from the bundle's inline `public_key_hex` fields.
+
+HTTP-backed implementations (`EndpointResolver` for tier-2 attestable, `PinnedResolver` for tier-1 attributable) are CLI-side concerns and ship in a follow-up release. The verifier crate stays free of HTTP dependencies so the WASM build remains lean.
+
+### Added — `LockReceiptV5` and `ExecutionReceiptV4`
+
+New typed structs in `protocol::receipts`. **Field set is byte-identical to their predecessors** (`LockReceiptV4` / `ExecutionReceiptV3`) — only the `schema_version` constant differs. The bump is a coordination flag: a v5 / v4 receipt signals to the verifier that the bundle wrapper omits inline keys and the pipeline MUST resolve via `KeyResolver`. New validators `validate_lock_receipt_tags_v5` and `validate_execution_receipt_tags_v4` mirror the v4 / v3 validators against the new schema-version constant.
+
+### Added — schema-version-vs-bundle-shape consistency rule
+
+`BundleShape` now enforces the producer-side protocol rule:
+
+- v5 lock receipt + bundle wrapper carrying inline `public_key_hex` rejects (downgrade-relabel attempt).
+- v4 lock receipt + bundle wrapper missing inline `public_key_hex` rejects (upgrade-spoof attempt).
+- Symmetric rules for v4 / v3 / v2 execution receipts.
+
+Mirrors the v2 / v3 deny_unknown_fields pattern one level out: producers cannot relabel one schema as another to elide or smuggle a field.
+
+### Added — verifier-side keyring-row consistency check
+
+After every successful `KeyResolver::resolve`, the pipeline asserts that `crypto::key_id(resolved.public_key) == requested_key_id`. A buggy or hostile resolver answering a request for `key_id=X` with `pk_Y` (where `Y != X`) would otherwise pass — the signature would verify against `pk_Y`. This is the verifier-side mirror of the producer's keyring-row consistency check; it makes the pipeline the chokepoint rather than relying on every resolver implementation to enforce it internally.
+
+The exec-v2 path now derives a synthetic `key_id` by hashing the inline pubkey, so every resolver call carries a real `key_id`. The previous empty-string fallback (where `BundleEmbeddedResolver` substituted any requested `key_id` for the absent v2 `signing_key_id`) is gone — tier-2 / tier-1 resolvers now fail v2 bundles with `KeyNotFound` for the right reason.
+
+### Added — `deny_unknown_fields` on bundle envelope and receipt wrapper
+
+`ProofBundle`, `BundleEntry`, `BundleResult`, `Entropy`, and `ReceiptBlock` all gain `#[serde(deny_unknown_fields)]`. Brings the same closed-set discipline the receipt payloads already have one level out, to the bundle envelope itself. A future v2 bundle envelope field would need to be deserialised explicitly rather than silently absorbed by an old verifier. Supplying both `operator_public_key_hex` and `infrastructure_public_key_hex` aliases on the same wrapper now also rejects.
+
+### Added — non-empty `signing_key_id` validation on v5 / v4 receipts
+
+`validate_lock_receipt_tags_v5` and `validate_execution_receipt_tags_v4` now reject an empty `signing_key_id`. v5 / v4 receipts carry `signing_key_id` as load-bearing data (the value the resolver looks up); an empty string would conflate the resolver call with the v2 inline-pk fallback and is otherwise nonsensical.
+
+### Added — selftest catalog scenarios
+
+Four new scenarios cover `BundleShape` at runtime:
+
+- `lock_v5_with_inline_pubkey_rejects` (downgrade-relabel)
+- `lock_v4_without_inline_pubkey_rejects` (upgrade-spoof)
+- `exec_v2_without_inline_pubkey_rejects` (upgrade-spoof)
+- `unknown_lock_schema_version_rejects` (terminal `UnknownSchemaVersion`)
+
+Selftest now reports 21 scenarios (was 17) and `BundleShape` is covered at runtime — bringing covered-step count to 11 / 12 (`EntryHash` is structurally excluded — it's a computation step that always passes).
+
+### Added — `verify_bundle_with_resolved_keys_wasm`
+
+New WASM entry point for resolver-driven verification on v5 / v4 bundles. Accepts the bundle JSON, a JS-side array of pre-resolved `{key_id, public_key_hex, key_class, inserted_at}` entries, and a verifier mode string. The JS layer fetches keys out of band (operator endpoint or `.well-known` pin) and hands them in as one shot — the WASM build does not pull `reqwest`. The legacy `verify_full_wasm` continues to work unchanged for v4 / v3 bundles.
+
+### Added — `--mode` CLI flag
+
+`wallop-verify` now accepts `--mode {self-consistency|attestable|attributable}` (default `self-consistency`). Self-consistency mode is current behaviour. Attestable and attributable modes parse correctly but exit with a "not yet implemented in this release" message — the CLI-side HTTP resolvers (`EndpointResolver`, `PinnedResolver`) ship in a follow-up release. The library `KeyResolver` trait is in place; the CLI's pin flags (`--pin-operator-key`, `--pin-from-bundle`) continue to apply to bundles that carry inline keys.
+
+The CLI report header now includes a `Mode` line surfacing `report.mode` so a reader of the report knows what the report's "PASS" actually proved (spec §4.2.4 caveat-mode disclosure).
+
+### Tests fixture update
+
+- `src/bin/tui/state.rs` — fixture step counts and sample scenarios brought up to date with the 0.10.0 / 0.11.0 step additions (was failing under `cargo test --all-features`; the lib gate ran fine because the tests are behind the `tui` feature).
+
+## [0.11.0] - 2026-04-26
 
 ### Breaking
 

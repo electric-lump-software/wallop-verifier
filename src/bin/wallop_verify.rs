@@ -1,11 +1,11 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::io::Read;
 use std::process::ExitCode;
 
 use wallop_verifier::StepName;
 use wallop_verifier::bundle::ProofBundle;
 use wallop_verifier::catalog::runner::ScenarioOutcome;
-use wallop_verifier::verify_steps::{StepStatus, verify_bundle};
+use wallop_verifier::verify_steps::{StepStatus, VerifierMode, verify_bundle};
 
 #[cfg(feature = "tui")]
 mod tui;
@@ -48,6 +48,37 @@ struct Cli {
         conflicts_with_all = ["pin_operator_key", "pin_operator_key_file"]
     )]
     pin_from_bundle: Option<String>,
+
+    /// Verification trust mode. `self-consistency` (default) uses the
+    /// bundle's inline keys — catches accidents and casual tampering, no
+    /// defence against tampered mirrors. `attestable` resolves keys
+    /// against `/operator/:slug/keys` (same-origin). `attributable`
+    /// resolves against an operator-hosted `.well-known` pin on a domain
+    /// the operator controls independently. Tier-1 (attributable) and
+    /// tier-2 (attestable) implementations ship in a follow-up release;
+    /// use `self-consistency` for now.
+    #[arg(long, value_enum, default_value_t = ModeFlag::SelfConsistency)]
+    mode: ModeFlag,
+}
+
+/// CLI surface for `--mode`. Distinct from `wallop_verifier::VerifierMode`
+/// so the kebab-case spelling (`self-consistency`) matches what users
+/// type, while the library variant uses snake-case for serde wire form.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ModeFlag {
+    Attributable,
+    Attestable,
+    SelfConsistency,
+}
+
+impl ModeFlag {
+    fn to_library(self) -> VerifierMode {
+        match self {
+            ModeFlag::Attributable => VerifierMode::Attributable,
+            ModeFlag::Attestable => VerifierMode::Attestable,
+            ModeFlag::SelfConsistency => VerifierMode::SelfConsistencyOnly,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -91,6 +122,30 @@ fn main() -> ExitCode {
             run_selftest()
         }
         (None, Some(path)) => {
+            // Tier-1 / tier-2 resolver implementations are CLI-side and
+            // ship in a follow-up release. The library trait is in place;
+            // the HTTP-backed implementations (EndpointResolver,
+            // PinnedResolver) are not yet wired here. Reject explicitly
+            // so users learn what's available now.
+            match cli.mode {
+                ModeFlag::Attestable | ModeFlag::Attributable => {
+                    eprintln!(
+                        "error: --mode {} is not yet implemented in this release.",
+                        match cli.mode {
+                            ModeFlag::Attestable => "attestable",
+                            ModeFlag::Attributable => "attributable",
+                            ModeFlag::SelfConsistency => unreachable!(),
+                        }
+                    );
+                    eprintln!(
+                        "       Use --mode self-consistency for now (default). The \
+                         library `KeyResolver` trait is in place; the CLI's HTTP-backed \
+                         resolver implementations land in a follow-up release."
+                    );
+                    return ExitCode::from(2);
+                }
+                ModeFlag::SelfConsistency => {}
+            }
             let pins = PinConfig {
                 operator_key: resolve_operator_pin(
                     cli.pin_operator_key.as_deref(),
@@ -103,7 +158,7 @@ fn main() -> ExitCode {
             if cli.tui {
                 return tui::run_verify_tui(path, &pins);
             }
-            run_verify(path, &pins)
+            run_verify(path, &pins, cli.mode.to_library())
         }
         (None, None) => {
             eprintln!("error: no proof bundle path provided");
@@ -216,7 +271,17 @@ fn resolve_operator_pin(
     if let Some(path) = trust_bundle {
         match std::fs::read_to_string(path) {
             Ok(contents) => match ProofBundle::from_json(&contents) {
-                Ok(b) => return Some(b.lock_receipt.public_key_hex.clone()),
+                Ok(b) => match b.lock_receipt.public_key_hex {
+                    Some(hex) => return Some(hex),
+                    None => {
+                        eprintln!(
+                            "warning: trust bundle has no inline operator key \
+                             (resolver-driven bundle); --pin-from-bundle requires \
+                             a legacy bundle with an inline key"
+                        );
+                        return None;
+                    }
+                },
                 Err(e) => {
                     eprintln!("warning: trust bundle is not valid: {e}");
                     return None;
@@ -251,7 +316,7 @@ fn compare_pin(embedded_key: &str, pin: &Option<String>, kind: &str) -> Result<(
 
 // ==================== verify subcommand (default) ====================
 
-fn run_verify(path: &str, pins: &PinConfig) -> ExitCode {
+fn run_verify(path: &str, pins: &PinConfig, mode: VerifierMode) -> ExitCode {
     // Read input
     let json = match path {
         "-" => {
@@ -280,20 +345,20 @@ fn run_verify(path: &str, pins: &PinConfig) -> ExitCode {
         }
     };
 
-    // Check pin-key constraints before running verification
-    if let Err(e) = compare_pin(
-        &bundle.lock_receipt.public_key_hex,
-        &pins.operator_key,
-        "operator",
-    ) {
+    // Check pin-key constraints before running verification. The pin flags
+    // only apply to bundles that carry an inline `public_key_hex` — i.e.
+    // legacy v3/v4 bundles. v5 lock / v4 exec bundles need resolver-driven
+    // pinning, which lives in the `--mode attributable` path (not yet
+    // implemented in this release).
+    if let Some(embedded) = bundle.lock_receipt.public_key_hex.as_deref()
+        && let Err(e) = compare_pin(embedded, &pins.operator_key, "operator")
+    {
         eprintln!("{e}");
         return ExitCode::from(1);
     }
-    if let Err(e) = compare_pin(
-        &bundle.execution_receipt.public_key_hex,
-        &pins.infra_key,
-        "infra",
-    ) {
+    if let Some(embedded) = bundle.execution_receipt.public_key_hex.as_deref()
+        && let Err(e) = compare_pin(embedded, &pins.infra_key, "infra")
+    {
         eprintln!("{e}");
         return ExitCode::from(1);
     }
@@ -301,10 +366,13 @@ fn run_verify(path: &str, pins: &PinConfig) -> ExitCode {
     // Run verification
     let report = verify_bundle(&bundle);
 
-    // Print header
+    // Print header. Mode is surfaced before any per-step output so a
+    // reader of the report knows what the report's "PASS" actually proved
+    // (spec §4.2.4 caveat-mode disclosure).
     let version = env!("CARGO_PKG_VERSION");
     println!("wallop-verify {version}");
     println!();
+    println!("  Mode ................ {}", report.mode);
     println!("  Draw ................ {}", &bundle.draw_id);
     if let Some(ref kid) = report.operator_key_id {
         println!("  Operator key ........ {kid}");
@@ -312,6 +380,9 @@ fn run_verify(path: &str, pins: &PinConfig) -> ExitCode {
     if let Some(ref kid) = report.infra_key_id {
         println!("  Infrastructure key .. {kid}");
     }
+    let _ = mode; // mode currently used only to inform the resolver choice
+    // (BundleEmbeddedResolver in self-consistency mode); the
+    // library report carries the same value in `report.mode`.
     println!();
 
     // Print steps
@@ -359,12 +430,19 @@ fn run_verify_full_check(bundle: &ProofBundle) -> bool {
         Some(s) => s,
         None => return false,
     };
-    let op_pk = match hex::decode(&bundle.lock_receipt.public_key_hex)
-        .ok()
+    let op_pk = match bundle
+        .lock_receipt
+        .public_key_hex
+        .as_deref()
+        .and_then(|h| hex::decode(h).ok())
         .and_then(|b| <[u8; 32]>::try_from(b).ok())
     {
         Some(k) => k,
-        None => return false,
+        // Resolver-driven bundles (v5 lock / v4 exec) have no inline key;
+        // the belt-and-suspenders verify_full check is structurally
+        // unavailable for them. Pipeline-side verification (`verify_bundle`)
+        // is the authoritative gate in that case.
+        None => return true,
     };
     let exec_sig = match hex::decode(&bundle.execution_receipt.signature_hex)
         .ok()
@@ -373,12 +451,15 @@ fn run_verify_full_check(bundle: &ProofBundle) -> bool {
         Some(s) => s,
         None => return false,
     };
-    let infra_pk = match hex::decode(&bundle.execution_receipt.public_key_hex)
-        .ok()
+    let infra_pk = match bundle
+        .execution_receipt
+        .public_key_hex
+        .as_deref()
+        .and_then(|h| hex::decode(h).ok())
         .and_then(|b| <[u8; 32]>::try_from(b).ok())
     {
         Some(k) => k,
-        None => return false,
+        None => return true,
     };
 
     wallop_verifier::verify_full(

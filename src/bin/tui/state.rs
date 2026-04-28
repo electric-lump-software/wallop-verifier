@@ -266,6 +266,7 @@ mod tests {
     }
 
     fn mixed_report() -> VerificationReport {
+        // 12 entries to match `StepName::all().len()` in 0.11.0+.
         make_report(vec![
             StepStatus::Pass,
             StepStatus::Pass,
@@ -275,6 +276,9 @@ mod tests {
             StepStatus::Fail("mismatch".into()),
             StepStatus::Skip("upstream failed".into()),
             StepStatus::Skip("upstream failed".into()),
+            StepStatus::Pass,
+            StepStatus::Pass,
+            StepStatus::Pass,
             StepStatus::Pass,
         ])
     }
@@ -323,7 +327,7 @@ mod tests {
         assert_eq!(session.revealed_count, 0);
         assert_eq!(session.selected_step, 0);
         assert!(!session.detail_expanded);
-        assert_eq!(session.total_steps(), 9);
+        assert_eq!(session.total_steps(), 12);
         assert!(!session.all_revealed());
         assert!(session.visible_steps().is_empty());
     }
@@ -349,12 +353,12 @@ mod tests {
             PinState::Unpinned,
             PinState::Unpinned,
         );
-        for _ in 0..9 {
+        for _ in 0..12 {
             assert!(session.advance());
         }
         assert!(session.all_revealed());
         assert!(!session.advance());
-        assert_eq!(session.revealed_count, 9);
+        assert_eq!(session.revealed_count, 12);
     }
 
     #[test]
@@ -366,9 +370,9 @@ mod tests {
         );
         session.continue_all();
         assert!(session.all_revealed());
-        assert_eq!(session.revealed_count, 9);
-        assert_eq!(session.selected_step, 8);
-        assert_eq!(session.visible_steps().len(), 9);
+        assert_eq!(session.revealed_count, 12);
+        assert_eq!(session.selected_step, 11);
+        assert_eq!(session.visible_steps().len(), 12);
     }
 
     #[test]
@@ -477,8 +481,8 @@ mod tests {
         assert_eq!(session.operator_pin, PinState::Test);
         assert_eq!(session.infra_pin, PinState::Test);
         assert_eq!(session.selected_scenario, 0);
-        assert_eq!(session.scenarios_total, 3);
-        assert_eq!(session.scenarios.len(), 3);
+        assert_eq!(session.scenarios_total, 4);
+        assert_eq!(session.scenarios.len(), 4);
     }
 
     #[test]
@@ -487,8 +491,9 @@ mod tests {
         let mut session = VerificationSession::new_selftest(all_pass_report(), scenarios);
         assert!(session.next_scenario()); // 0 -> 1
         assert!(session.next_scenario()); // 1 -> 2
-        assert!(!session.next_scenario()); // 2 -> can't go further
-        assert_eq!(session.selected_scenario, 2);
+        assert!(session.next_scenario()); // 2 -> 3
+        assert!(!session.next_scenario()); // 3 -> can't go further
+        assert_eq!(session.selected_scenario, 3);
     }
 
     #[test]
@@ -528,13 +533,13 @@ mod tests {
         );
         // Reveal several steps and move the cursor
         session.continue_all();
-        assert_eq!(session.revealed_count, 9);
-        assert_eq!(session.selected_step, 8);
+        assert_eq!(session.revealed_count, 12);
+        assert_eq!(session.selected_step, 11);
 
         // Replace with a fresh all-pass report
         session.replace_report(all_pass_report());
 
-        assert_eq!(session.steps.len(), 9);
+        assert_eq!(session.steps.len(), 12);
         assert!(session.steps.iter().all(|s| s.status == StepStatus::Pass));
         assert_eq!(session.revealed_count, 0);
         assert_eq!(session.selected_step, 0);
@@ -588,9 +593,9 @@ mod tests {
         // Reveal all steps so we can navigate freely
         session.continue_all();
 
-        // Move cursor to index 4 (Fail "bad sig")
-        // continue_all leaves selected_step at 8; move up to 4
-        for _ in 0..4 {
+        // Move cursor to index 4 (Fail "bad sig").
+        // continue_all leaves selected_step at the last revealed (11); move up 7.
+        for _ in 0..7 {
             session.move_step_up();
         }
         assert_eq!(session.selected_step, 4);

@@ -1,4 +1,5 @@
 pub mod bundle;
+pub mod key_resolver;
 pub mod protocol;
 pub mod verify_steps;
 mod wasm;

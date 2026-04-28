@@ -1,8 +1,12 @@
 use fair_pick_rs::{Entry, Winner};
+use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
+use crate::bundle::ProofBundle;
+use crate::key_resolver::{KeyClass, KeyResolver, ResolutionError, ResolvedKey};
 use crate::protocol;
 use crate::protocol::receipts::{ExecutionReceiptV2, LockReceiptV4};
+use crate::verify_steps::{VerifierMode, verify_bundle_with};
 
 /// WASM entry point for draw.
 #[wasm_bindgen]
@@ -240,4 +244,109 @@ pub fn verify_full_wasm(
         &entries,
     )
     .map_err(|e| JsError::new(&e))
+}
+
+/// JS-side representation of a pre-resolved key. The browser fetches the
+/// keyring out-of-band (operator endpoint or pinned `.well-known`) and
+/// hands the resolved entries in to WASM. Keeping the HTTP layer in JS
+/// avoids dragging `reqwest` into the WASM binary.
+#[derive(Deserialize)]
+struct ResolvedKeyJs {
+    key_id: String,
+    public_key_hex: String,
+    key_class: String,
+    inserted_at: String,
+}
+
+/// Synthetic resolver wrapping a vector of pre-resolved keys. JS-driven
+/// resolvers serialise their lookups across the WASM boundary in one
+/// shot, so this lookup is linear over `keys` — fine for the small
+/// keyring sizes we expect (<10 entries per operator).
+struct PreResolvedResolver {
+    keys: Vec<(String, KeyClass, [u8; 32], String)>,
+}
+
+impl KeyResolver for PreResolvedResolver {
+    fn resolve(&self, key_id: &str, key_class: KeyClass) -> Result<ResolvedKey, ResolutionError> {
+        for (k_id, k_class, pk, inserted_at) in &self.keys {
+            if k_id == key_id && *k_class == key_class {
+                return Ok(ResolvedKey {
+                    public_key: *pk,
+                    inserted_at: inserted_at.clone(),
+                    key_class: *k_class,
+                });
+            }
+        }
+        Err(ResolutionError::KeyNotFound)
+    }
+}
+
+fn parse_key_class(s: &str) -> Result<KeyClass, JsError> {
+    match s {
+        "operator" => Ok(KeyClass::Operator),
+        "infrastructure" => Ok(KeyClass::Infrastructure),
+        other => Err(JsError::new(&format!(
+            "unknown key_class: {} (expected \"operator\" or \"infrastructure\")",
+            other
+        ))),
+    }
+}
+
+fn parse_verifier_mode(s: &str) -> Result<VerifierMode, JsError> {
+    match s {
+        "attributable" => Ok(VerifierMode::Attributable),
+        "attestable" => Ok(VerifierMode::Attestable),
+        "self_consistency_only" => Ok(VerifierMode::SelfConsistencyOnly),
+        other => Err(JsError::new(&format!(
+            "unknown verifier mode: {} (expected \"attributable\", \"attestable\", \
+             or \"self_consistency_only\")",
+            other
+        ))),
+    }
+}
+
+/// Verify a v5/v4 (resolver-driven) bundle in the browser. The JS side
+/// resolves keys out of band — from `/operator/:slug/keys` (attestable
+/// mode) or from a pinned `.well-known` document (attributable mode) —
+/// and passes them in as `resolved_keys_js`. The WASM verifier then runs
+/// `verify_bundle_with` against a synthetic resolver wrapping that array.
+///
+/// The `mode` argument is recorded on the returned report and MUST match
+/// the trust root the JS side actually consulted. The verifier crate does
+/// not police this association — see `verify_bundle_with` doc.
+///
+/// Returns `true` iff the bundle passes every reachable verification step
+/// under the supplied resolver and mode. Per-step diagnostics are not
+/// surfaced from this entry point yet — the WASM caller already runs its
+/// own UI; full report serialisation is a follow-up.
+#[wasm_bindgen]
+pub fn verify_bundle_with_resolved_keys_wasm(
+    bundle_json: &str,
+    resolved_keys_js: JsValue,
+    mode: &str,
+) -> Result<bool, JsError> {
+    let bundle = ProofBundle::from_json(bundle_json).map_err(|e| JsError::new(&e))?;
+    let parsed_mode = parse_verifier_mode(mode)?;
+
+    let raw_keys: Vec<ResolvedKeyJs> = serde_wasm_bindgen::from_value(resolved_keys_js)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+
+    let mut keys = Vec::with_capacity(raw_keys.len());
+    for entry in raw_keys {
+        let key_class = parse_key_class(&entry.key_class)?;
+        let pk_bytes = hex::decode(&entry.public_key_hex).map_err(|e| {
+            JsError::new(&format!(
+                "invalid public key hex for {}: {}",
+                entry.key_id, e
+            ))
+        })?;
+        let pk: [u8; 32] = pk_bytes.try_into().map_err(|_| {
+            JsError::new(&format!("public key for {} is not 32 bytes", entry.key_id))
+        })?;
+        keys.push((entry.key_id, key_class, pk, entry.inserted_at));
+    }
+
+    let resolver = PreResolvedResolver { keys };
+    let report = verify_bundle_with(&bundle, &resolver, parsed_mode);
+    Ok(report.passed())
 }

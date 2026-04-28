@@ -1,6 +1,7 @@
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProofBundle {
     pub version: u32,
     pub draw_id: String,
@@ -12,18 +13,21 @@ pub struct ProofBundle {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BundleEntry {
     pub uuid: String,
     pub weight: u32,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BundleResult {
     pub entry_id: String,
     pub position: u32,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Entropy {
     pub drand_round: u64,
     pub drand_randomness: String,
@@ -33,14 +37,31 @@ pub struct Entropy {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReceiptBlock {
     pub payload_jcs: String,
     pub signature_hex: String,
+    /// Inline operator/infrastructure public key (hex). Present on v3/v4
+    /// legacy bundles where the verifier reads the key directly from the
+    /// bundle (self-consistency mode). Absent on v5 lock / v4 execution
+    /// bundles where the verifier MUST resolve the key via `KeyResolver`
+    /// — see spec §4.2.4.
+    ///
+    /// `BundleShape` enforces the protocol consistency rule:
+    ///   v5 lock + Some(...) wrapper rejects (downgrade-relabel),
+    ///   v4 lock + None wrapper rejects (upgrade-spoof). Symmetric for exec.
+    ///
+    /// The wrapper accepts both serde aliases (`operator_public_key_hex`
+    /// and `infrastructure_public_key_hex`) so the producer's name on the
+    /// wire matches the receipt class. Supplying both at once is rejected
+    /// by `deny_unknown_fields` because serde collapses aliases to a
+    /// single field at parse time.
     #[serde(
+        default,
         alias = "operator_public_key_hex",
         alias = "infrastructure_public_key_hex"
     )]
-    pub public_key_hex: String,
+    pub public_key_hex: Option<String>,
 }
 
 impl ProofBundle {
@@ -120,12 +141,72 @@ mod tests {
         let json = minimal_bundle_json();
         let bundle = ProofBundle::from_json(&json).unwrap();
         assert_eq!(
-            bundle.lock_receipt.public_key_hex,
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            bundle.lock_receipt.public_key_hex.as_deref(),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
         );
         assert_eq!(
-            bundle.execution_receipt.public_key_hex,
-            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            bundle.execution_receipt.public_key_hex.as_deref(),
+            Some("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
         );
+    }
+
+    #[test]
+    fn rejects_unknown_field_on_bundle_envelope() {
+        let mut val: serde_json::Value = serde_json::from_str(&minimal_bundle_json()).unwrap();
+        val["sneaky_field"] = serde_json::json!("evil");
+        let result = ProofBundle::from_json(&val.to_string());
+        assert!(
+            result.is_err(),
+            "unknown top-level field must reject; got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_field_on_receipt_block() {
+        let mut val: serde_json::Value = serde_json::from_str(&minimal_bundle_json()).unwrap();
+        val["lock_receipt"]["surprise"] = serde_json::json!("evil");
+        let result = ProofBundle::from_json(&val.to_string());
+        assert!(
+            result.is_err(),
+            "unknown wrapper field must reject; got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn rejects_both_public_key_hex_aliases_on_one_wrapper() {
+        // serde alias collapses multiple keys to one field; supplying
+        // both `operator_public_key_hex` and `public_key_hex` on the
+        // same wrapper is ambiguous. We require either the canonical
+        // name or one alias — not both.
+        let mut val: serde_json::Value = serde_json::from_str(&minimal_bundle_json()).unwrap();
+        val["lock_receipt"]["public_key_hex"] = serde_json::json!("ee".repeat(32));
+        // The minimal bundle already supplies operator_public_key_hex.
+        let result = ProofBundle::from_json(&val.to_string());
+        assert!(
+            result.is_err(),
+            "duplicate aliased keys must reject; got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn parses_bundle_with_omitted_public_key_hex() {
+        // v5 lock / v4 exec bundles omit the inline public_key_hex from
+        // the wrapper. The serde `default` attribute means `None` is the
+        // accepted absence representation.
+        let mut val: serde_json::Value = serde_json::from_str(&minimal_bundle_json()).unwrap();
+        val["lock_receipt"]
+            .as_object_mut()
+            .unwrap()
+            .remove("operator_public_key_hex");
+        val["execution_receipt"]
+            .as_object_mut()
+            .unwrap()
+            .remove("infrastructure_public_key_hex");
+        let bundle = ProofBundle::from_json(&val.to_string()).unwrap();
+        assert!(bundle.lock_receipt.public_key_hex.is_none());
+        assert!(bundle.execution_receipt.public_key_hex.is_none());
     }
 }

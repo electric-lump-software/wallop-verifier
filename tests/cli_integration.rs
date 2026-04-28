@@ -21,18 +21,30 @@ fn run_verify_full(bundle: &ProofBundle) -> bool {
         .unwrap()
         .try_into()
         .unwrap();
-    let op_pk: [u8; 32] = hex::decode(&bundle.lock_receipt.public_key_hex)
-        .unwrap()
-        .try_into()
-        .unwrap();
+    let op_pk: [u8; 32] = hex::decode(
+        bundle
+            .lock_receipt
+            .public_key_hex
+            .as_deref()
+            .expect("legacy bundle in this test must carry inline operator key"),
+    )
+    .unwrap()
+    .try_into()
+    .unwrap();
     let exec_sig: [u8; 64] = hex::decode(&bundle.execution_receipt.signature_hex)
         .unwrap()
         .try_into()
         .unwrap();
-    let infra_pk: [u8; 32] = hex::decode(&bundle.execution_receipt.public_key_hex)
-        .unwrap()
-        .try_into()
-        .unwrap();
+    let infra_pk: [u8; 32] = hex::decode(
+        bundle
+            .execution_receipt
+            .public_key_hex
+            .as_deref()
+            .expect("legacy bundle in this test must carry inline infra key"),
+    )
+    .unwrap()
+    .try_into()
+    .unwrap();
 
     wallop_verifier::verify_full(
         &bundle.lock_receipt.payload_jcs,

@@ -614,6 +614,7 @@ fn parse_lock_receipt_accepts_v4() {
     let parsed = parse_lock_receipt(&payload).expect("v4 payload must parse");
     match parsed {
         ParsedLockReceipt::V4(_) => (),
+        ParsedLockReceipt::V5(_) => panic!("expected V4, got V5"),
     }
 }
 
@@ -660,6 +661,242 @@ fn parse_lock_receipt_rejects_unknown_field_via_dispatcher() {
         "expected PayloadShapeMismatch, got: {:?}",
         result
     );
+}
+
+// ── v5/v4 dispatch + validators ────────────────────────────────────────
+
+fn lock_receipt_v5_from_v4(v4: &LockReceiptV4) -> LockReceiptV5 {
+    LockReceiptV5 {
+        commitment_hash: v4.commitment_hash.clone(),
+        draw_id: v4.draw_id.clone(),
+        drand_chain: v4.drand_chain.clone(),
+        drand_round: v4.drand_round,
+        entropy_composition: v4.entropy_composition.clone(),
+        entry_hash: v4.entry_hash.clone(),
+        fair_pick_version: v4.fair_pick_version.clone(),
+        jcs_version: v4.jcs_version.clone(),
+        locked_at: v4.locked_at.clone(),
+        operator_id: v4.operator_id.clone(),
+        operator_slug: v4.operator_slug.clone(),
+        schema_version: LOCK_SCHEMA_VERSION_V5.into(),
+        sequence: v4.sequence,
+        signature_algorithm: v4.signature_algorithm.clone(),
+        signing_key_id: v4.signing_key_id.clone(),
+        wallop_core_version: v4.wallop_core_version.clone(),
+        weather_station: v4.weather_station.clone(),
+        weather_time: v4.weather_time.clone(),
+        winner_count: v4.winner_count,
+    }
+}
+
+fn build_lock_receipt_payload_v5(input: &LockReceiptV5) -> String {
+    // v5 is byte-identical to v4 modulo schema_version, so we drive the v4
+    // builder via a temporary v4 struct and then patch the schema_version
+    // value in the resulting JCS string.
+    let v4 = LockReceiptV4 {
+        commitment_hash: input.commitment_hash.clone(),
+        draw_id: input.draw_id.clone(),
+        drand_chain: input.drand_chain.clone(),
+        drand_round: input.drand_round,
+        entropy_composition: input.entropy_composition.clone(),
+        entry_hash: input.entry_hash.clone(),
+        fair_pick_version: input.fair_pick_version.clone(),
+        jcs_version: input.jcs_version.clone(),
+        locked_at: input.locked_at.clone(),
+        operator_id: input.operator_id.clone(),
+        operator_slug: input.operator_slug.clone(),
+        schema_version: input.schema_version.clone(),
+        sequence: input.sequence,
+        signature_algorithm: input.signature_algorithm.clone(),
+        signing_key_id: input.signing_key_id.clone(),
+        wallop_core_version: input.wallop_core_version.clone(),
+        weather_station: input.weather_station.clone(),
+        weather_time: input.weather_time.clone(),
+        winner_count: input.winner_count,
+    };
+    let payload = build_receipt_payload(&v4);
+    // build_receipt_payload hardcodes LOCK_SCHEMA_VERSION ("4"). Patch.
+    payload.replace("\"schema_version\":\"4\"", "\"schema_version\":\"5\"")
+}
+
+#[test]
+fn parse_lock_receipt_accepts_v5() {
+    let vector: serde_json::Value = serde_json::from_str(LOCK_RECEIPT_VECTOR).unwrap();
+    let v4 = lock_receipt_from_json(&vector["input"]);
+    let v5 = lock_receipt_v5_from_v4(&v4);
+    let payload = build_lock_receipt_payload_v5(&v5);
+
+    let parsed = parse_lock_receipt(&payload).expect("v5 payload must parse");
+    match parsed {
+        ParsedLockReceipt::V5(_) => (),
+        ParsedLockReceipt::V4(_) => panic!("expected V5, got V4"),
+    }
+}
+
+#[test]
+fn validate_lock_receipt_tags_v5_accepts_well_formed() {
+    let vector: serde_json::Value = serde_json::from_str(LOCK_RECEIPT_VECTOR).unwrap();
+    let v4 = lock_receipt_from_json(&vector["input"]);
+    let v5 = lock_receipt_v5_from_v4(&v4);
+    assert!(validate_lock_receipt_tags_v5(&v5).is_ok());
+}
+
+#[test]
+fn validate_lock_receipt_tags_v5_rejects_wrong_schema_version() {
+    let vector: serde_json::Value = serde_json::from_str(LOCK_RECEIPT_VECTOR).unwrap();
+    let v4 = lock_receipt_from_json(&vector["input"]);
+    let mut v5 = lock_receipt_v5_from_v4(&v4);
+    v5.schema_version = "4".into();
+    let err = validate_lock_receipt_tags_v5(&v5).unwrap_err();
+    assert!(err.contains("schema_version"));
+}
+
+#[test]
+fn validate_lock_receipt_tags_v5_rejects_empty_signing_key_id() {
+    let vector: serde_json::Value = serde_json::from_str(LOCK_RECEIPT_VECTOR).unwrap();
+    let v4 = lock_receipt_from_json(&vector["input"]);
+    let mut v5 = lock_receipt_v5_from_v4(&v4);
+    v5.signing_key_id = "".into();
+    let err = validate_lock_receipt_tags_v5(&v5).unwrap_err();
+    assert!(err.contains("signing_key_id"));
+}
+
+#[test]
+fn validate_execution_receipt_tags_v4_rejects_empty_signing_key_id() {
+    let vector: serde_json::Value = serde_json::from_str(EXECUTION_RECEIPT_V3_VECTOR).unwrap();
+    let v3 = execution_receipt_v3_from_json(&vector["input"]);
+    let mut v4 = execution_receipt_v4_from_v3(&v3);
+    v4.signing_key_id = "".into();
+    let err = validate_execution_receipt_tags_v4(&v4).unwrap_err();
+    assert!(err.contains("signing_key_id"));
+}
+
+#[test]
+fn validate_lock_receipt_tags_v5_rejects_bad_weather_station() {
+    let vector: serde_json::Value = serde_json::from_str(LOCK_RECEIPT_VECTOR).unwrap();
+    let v4 = lock_receipt_from_json(&vector["input"]);
+    let mut v5 = lock_receipt_v5_from_v4(&v4);
+    v5.weather_station = "Middle-Wallop".into();
+    assert!(validate_lock_receipt_tags_v5(&v5).is_err());
+}
+
+fn execution_receipt_v4_from_v3(v3: &ExecutionReceiptV3) -> ExecutionReceiptV4 {
+    ExecutionReceiptV4 {
+        drand_chain: v3.drand_chain.clone(),
+        drand_randomness: v3.drand_randomness.clone(),
+        drand_round: v3.drand_round,
+        drand_signature: v3.drand_signature.clone(),
+        drand_signature_algorithm: v3.drand_signature_algorithm.clone(),
+        draw_id: v3.draw_id.clone(),
+        entropy_composition: v3.entropy_composition.clone(),
+        entry_hash: v3.entry_hash.clone(),
+        executed_at: v3.executed_at.clone(),
+        fair_pick_version: v3.fair_pick_version.clone(),
+        jcs_version: v3.jcs_version.clone(),
+        lock_receipt_hash: v3.lock_receipt_hash.clone(),
+        merkle_algorithm: v3.merkle_algorithm.clone(),
+        operator_id: v3.operator_id.clone(),
+        operator_slug: v3.operator_slug.clone(),
+        results: v3.results.clone(),
+        schema_version: EXECUTION_SCHEMA_VERSION_V4.into(),
+        seed: v3.seed.clone(),
+        sequence: v3.sequence,
+        signature_algorithm: v3.signature_algorithm.clone(),
+        signing_key_id: v3.signing_key_id.clone(),
+        wallop_core_version: v3.wallop_core_version.clone(),
+        weather_fallback_reason: v3.weather_fallback_reason.clone(),
+        weather_observation_time: v3.weather_observation_time.clone(),
+        weather_station: v3.weather_station.clone(),
+        weather_value: v3.weather_value.clone(),
+    }
+}
+
+fn build_execution_receipt_payload_v4(input: &ExecutionReceiptV4) -> String {
+    let v3 = ExecutionReceiptV3 {
+        drand_chain: input.drand_chain.clone(),
+        drand_randomness: input.drand_randomness.clone(),
+        drand_round: input.drand_round,
+        drand_signature: input.drand_signature.clone(),
+        drand_signature_algorithm: input.drand_signature_algorithm.clone(),
+        draw_id: input.draw_id.clone(),
+        entropy_composition: input.entropy_composition.clone(),
+        entry_hash: input.entry_hash.clone(),
+        executed_at: input.executed_at.clone(),
+        fair_pick_version: input.fair_pick_version.clone(),
+        jcs_version: input.jcs_version.clone(),
+        lock_receipt_hash: input.lock_receipt_hash.clone(),
+        merkle_algorithm: input.merkle_algorithm.clone(),
+        operator_id: input.operator_id.clone(),
+        operator_slug: input.operator_slug.clone(),
+        results: input.results.clone(),
+        schema_version: input.schema_version.clone(),
+        seed: input.seed.clone(),
+        sequence: input.sequence,
+        signature_algorithm: input.signature_algorithm.clone(),
+        signing_key_id: input.signing_key_id.clone(),
+        wallop_core_version: input.wallop_core_version.clone(),
+        weather_fallback_reason: input.weather_fallback_reason.clone(),
+        weather_observation_time: input.weather_observation_time.clone(),
+        weather_station: input.weather_station.clone(),
+        weather_value: input.weather_value.clone(),
+    };
+    let payload = build_execution_receipt_payload_v3(&v3);
+    payload.replace("\"schema_version\":\"3\"", "\"schema_version\":\"4\"")
+}
+
+#[test]
+fn parse_execution_receipt_accepts_v4() {
+    let vector: serde_json::Value = serde_json::from_str(EXECUTION_RECEIPT_V3_VECTOR).unwrap();
+    let v3 = execution_receipt_v3_from_json(&vector["input"]);
+    let v4 = execution_receipt_v4_from_v3(&v3);
+    let payload = build_execution_receipt_payload_v4(&v4);
+
+    let parsed = parse_execution_receipt(&payload).expect("v4 payload must parse");
+    match parsed {
+        ParsedExecutionReceipt::V4(r) => assert_eq!(r.signing_key_id, v4.signing_key_id),
+        other => panic!("expected V4, got {:?}", other),
+    }
+}
+
+#[test]
+fn validate_execution_receipt_tags_v4_accepts_well_formed() {
+    let vector: serde_json::Value = serde_json::from_str(EXECUTION_RECEIPT_V3_VECTOR).unwrap();
+    let v3 = execution_receipt_v3_from_json(&vector["input"]);
+    let v4 = execution_receipt_v4_from_v3(&v3);
+    assert!(validate_execution_receipt_tags_v4(&v4).is_ok());
+}
+
+#[test]
+fn validate_execution_receipt_tags_v4_rejects_wrong_schema_version() {
+    let vector: serde_json::Value = serde_json::from_str(EXECUTION_RECEIPT_V3_VECTOR).unwrap();
+    let v3 = execution_receipt_v3_from_json(&vector["input"]);
+    let mut v4 = execution_receipt_v4_from_v3(&v3);
+    v4.schema_version = "3".into();
+    let err = validate_execution_receipt_tags_v4(&v4).unwrap_err();
+    assert!(err.contains("schema_version"));
+}
+
+#[test]
+fn parse_lock_receipt_unknown_schema_message_lists_v4_and_v5() {
+    let payload = serde_json::json!({
+        "schema_version": "99",
+        "draw_id": "00000000-0000-4000-8000-000000000000"
+    })
+    .to_string();
+    let err = parse_lock_receipt(&payload).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("\"4\""), "error must list v4: {msg}");
+    assert!(msg.contains("\"5\""), "error must list v5: {msg}");
+}
+
+#[test]
+fn parse_execution_receipt_unknown_schema_message_lists_v2_v3_v4() {
+    let payload = r#"{"schema_version":"99","foo":"bar"}"#;
+    let err = parse_execution_receipt(payload).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("\"2\""), "error must list v2: {msg}");
+    assert!(msg.contains("\"3\""), "error must list v3: {msg}");
+    assert!(msg.contains("\"4\""), "error must list v4: {msg}");
 }
 
 // ── A3: weather_station charset validation ─────────────────────────────

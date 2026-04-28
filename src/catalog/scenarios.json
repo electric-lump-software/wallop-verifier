@@ -268,6 +268,58 @@
         }
       },
       "expected_catch_steps": ["weather_observation_window"]
+    },
+    {
+      "name": "lock_v5_with_inline_pubkey_rejects",
+      "category": "bundle_shape",
+      "description": "Lock receipt schema_version bumped to '5' but the bundle wrapper still carries an inline operator_public_key_hex. v5 lock receipts MUST be paired with a wrapper that omits the inline key (resolver-driven). BundleShape rejects this as a downgrade-relabel attempt.",
+      "severity": "critical",
+      "tamper": {
+        "kind": "semantic_op",
+        "op": "modify_payload_and_resign",
+        "target": "lock_receipt",
+        "keypair": "original_signer",
+        "modifications": { "schema_version": "5" }
+      },
+      "expected_catch_steps": ["bundle_shape"]
+    },
+    {
+      "name": "lock_v4_without_inline_pubkey_rejects",
+      "category": "bundle_shape",
+      "description": "Bundle wrapper for a v4 lock receipt is missing the inline operator_public_key_hex. v4 lock receipts MUST be paired with a wrapper that supplies the key. BundleShape rejects this as an upgrade-spoof attempt — accepting it would let an attacker pretend a legacy bundle is resolver-driven.",
+      "severity": "critical",
+      "tamper": {
+        "kind": "field_op",
+        "op": "remove",
+        "path": "lock_receipt.operator_public_key_hex"
+      },
+      "expected_catch_steps": ["bundle_shape"]
+    },
+    {
+      "name": "exec_v2_without_inline_pubkey_rejects",
+      "category": "bundle_shape",
+      "description": "Bundle wrapper for a v2 execution receipt is missing the inline infrastructure_public_key_hex. v2 receipts MUST carry inline keys. BundleShape rejects this as an upgrade-spoof attempt.",
+      "severity": "critical",
+      "tamper": {
+        "kind": "field_op",
+        "op": "remove",
+        "path": "execution_receipt.infrastructure_public_key_hex"
+      },
+      "expected_catch_steps": ["bundle_shape"]
+    },
+    {
+      "name": "unknown_lock_schema_version_rejects",
+      "category": "bundle_shape",
+      "description": "Lock receipt declares schema_version '99' — an unknown version. Per spec §4.2.1, verifiers MUST reject unknown schemas terminally (upgrade required, no retry). BundleShape catches this via the typed dispatcher's UnknownSchemaVersion path.",
+      "severity": "critical",
+      "tamper": {
+        "kind": "semantic_op",
+        "op": "modify_payload_and_resign",
+        "target": "lock_receipt",
+        "keypair": "original_signer",
+        "modifications": { "schema_version": "99" }
+      },
+      "expected_catch_steps": ["bundle_shape"]
     }
   ]
 }

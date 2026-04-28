@@ -12,12 +12,30 @@ pub const DRAND_SIGNATURE_ALGORITHM: &str = "bls12_381_g2";
 pub const MERKLE_ALGORITHM: &str = "sha256-pairwise-v1";
 
 // Current supported schema versions. Verifier rejects anything else.
+//
+// Lock receipt history:
+//   v4 — the long-running shape; `signing_key_id` references operator keyring;
+//        bundle's wrapper carries inline `public_key_hex` for self-consistency.
+//   v5 — coordination flag for resolver-based verification: producers MUST
+//        omit `public_key_hex` from the bundle's lock_receipt wrapper, and
+//        verifiers MUST resolve operator keys via `KeyResolver`. Field set
+//        on the signed payload is byte-identical to v4 — the schema_version
+//        difference encodes verifier behaviour, not receipt bytes.
+//
+// Execution receipt history:
+//   v2 — pre-F2 shape, no `signing_key_id` on the signed payload.
+//   v3 — adds `signing_key_id` (F2 closure).
+//   v4 — coordination flag mirroring lock v5; producers MUST omit
+//        `public_key_hex` from the bundle's execution_receipt wrapper, and
+//        verifiers MUST resolve infrastructure keys via `KeyResolver`. Field
+//        set on the signed payload is byte-identical to v3.
+//
+// All historical schemas remain verifiable for the life of 1.x.
 pub const LOCK_SCHEMA_VERSION: &str = "4";
+pub const LOCK_SCHEMA_VERSION_V5: &str = "5";
 pub const EXECUTION_SCHEMA_VERSION: &str = "2";
-// v3 adds `signing_key_id` to the signed payload (F2 closure — see
-// `spec/protocol.md` §4.2). Both v2 and v3 remain verifiable for the
-// life of 1.x; historical v2 receipts continue to verify byte-identically.
 pub const EXECUTION_SCHEMA_VERSION_V3: &str = "3";
+pub const EXECUTION_SCHEMA_VERSION_V4: &str = "4";
 
 // Allowed values for execution receipt's weather_fallback_reason.
 // A fifth value requires a receipt schema bump.
@@ -31,6 +49,35 @@ pub const VALID_WEATHER_FALLBACK_REASONS: &[Option<&str>] = &[
 #[derive(serde::Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct LockReceiptV4 {
+    pub commitment_hash: String,
+    pub draw_id: String,
+    pub drand_chain: String,
+    pub drand_round: u64,
+    pub entropy_composition: String,
+    pub entry_hash: String,
+    pub fair_pick_version: String,
+    pub jcs_version: String,
+    pub locked_at: String,
+    pub operator_id: String,
+    pub operator_slug: String,
+    pub schema_version: String,
+    pub sequence: u64,
+    pub signature_algorithm: String,
+    pub signing_key_id: String,
+    pub wallop_core_version: String,
+    pub weather_station: String,
+    pub weather_time: String,
+    pub winner_count: u64,
+}
+
+/// V5 lock receipt — byte-identical field set to V4. The schema_version
+/// is the only difference, used as a coordination flag: a v5 receipt
+/// SIGNALS that the producer omitted `public_key_hex` from the bundle's
+/// lock_receipt wrapper and the verifier MUST resolve the operator key
+/// via `KeyResolver` rather than the inline field.
+#[derive(serde::Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct LockReceiptV5 {
     pub commitment_hash: String,
     pub draw_id: String,
     pub drand_chain: String,
@@ -85,6 +132,43 @@ pub struct ExecutionReceiptV2 {
 #[derive(serde::Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionReceiptV3 {
+    pub drand_chain: String,
+    pub drand_randomness: String,
+    pub drand_round: u64,
+    pub drand_signature: String,
+    pub drand_signature_algorithm: String,
+    pub draw_id: String,
+    pub entropy_composition: String,
+    pub entry_hash: String,
+    pub executed_at: String,
+    pub fair_pick_version: String,
+    pub jcs_version: String,
+    pub lock_receipt_hash: String,
+    pub merkle_algorithm: String,
+    pub operator_id: String,
+    pub operator_slug: String,
+    pub results: Vec<String>,
+    pub schema_version: String,
+    pub seed: String,
+    pub sequence: u64,
+    pub signature_algorithm: String,
+    pub signing_key_id: String,
+    pub wallop_core_version: String,
+    pub weather_fallback_reason: Option<String>,
+    pub weather_observation_time: Option<String>,
+    pub weather_station: Option<String>,
+    pub weather_value: Option<String>,
+}
+
+/// V4 execution receipt — byte-identical field set to V3. The
+/// schema_version is the only difference, used as a coordination flag
+/// in the same shape as `LockReceiptV5`: a v4 execution receipt SIGNALS
+/// that the producer omitted `public_key_hex` from the bundle's
+/// execution_receipt wrapper and the verifier MUST resolve the
+/// infrastructure key via `KeyResolver` rather than the inline field.
+#[derive(serde::Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionReceiptV4 {
     pub drand_chain: String,
     pub drand_randomness: String,
     pub drand_round: u64,
@@ -484,6 +568,90 @@ pub fn validate_execution_receipt_tags_v3(payload: &ExecutionReceiptV3) -> Resul
     Ok(())
 }
 
+pub fn validate_lock_receipt_tags_v5(payload: &LockReceiptV5) -> Result<(), String> {
+    if payload.schema_version != LOCK_SCHEMA_VERSION_V5 {
+        return Err(format!(
+            "unknown lock receipt schema_version: {} (expected {})",
+            payload.schema_version, LOCK_SCHEMA_VERSION_V5
+        ));
+    }
+    if payload.jcs_version != JCS_VERSION {
+        return Err(format!("unknown jcs_version: {}", payload.jcs_version));
+    }
+    if payload.signature_algorithm != SIGNATURE_ALGORITHM {
+        return Err(format!(
+            "unknown signature_algorithm: {}",
+            payload.signature_algorithm
+        ));
+    }
+    if payload.entropy_composition != ENTROPY_COMPOSITION {
+        return Err(format!(
+            "unknown entropy_composition: {}",
+            payload.entropy_composition
+        ));
+    }
+    // signing_key_id is load-bearing on resolver-driven receipts: it
+    // tells the verifier which key to look up. An empty string would
+    // collapse the resolver lookup with the v2 inline-pk fallback path
+    // and is otherwise nonsensical — defence-in-depth reject.
+    if payload.signing_key_id.is_empty() {
+        return Err("signing_key_id is empty".into());
+    }
+    validate_weather_station(&payload.weather_station)?;
+    Ok(())
+}
+
+pub fn validate_execution_receipt_tags_v4(payload: &ExecutionReceiptV4) -> Result<(), String> {
+    if payload.schema_version != EXECUTION_SCHEMA_VERSION_V4 {
+        return Err(format!(
+            "unknown execution receipt schema_version: {} (expected {})",
+            payload.schema_version, EXECUTION_SCHEMA_VERSION_V4
+        ));
+    }
+    if payload.jcs_version != JCS_VERSION {
+        return Err(format!("unknown jcs_version: {}", payload.jcs_version));
+    }
+    if payload.signature_algorithm != SIGNATURE_ALGORITHM {
+        return Err(format!(
+            "unknown signature_algorithm: {}",
+            payload.signature_algorithm
+        ));
+    }
+    if payload.entropy_composition != ENTROPY_COMPOSITION {
+        return Err(format!(
+            "unknown entropy_composition: {}",
+            payload.entropy_composition
+        ));
+    }
+    if payload.drand_signature_algorithm != DRAND_SIGNATURE_ALGORITHM {
+        return Err(format!(
+            "unknown drand_signature_algorithm: {}",
+            payload.drand_signature_algorithm
+        ));
+    }
+    if payload.merkle_algorithm != MERKLE_ALGORITHM {
+        return Err(format!(
+            "unknown merkle_algorithm: {}",
+            payload.merkle_algorithm
+        ));
+    }
+    // See `validate_lock_receipt_tags_v5` for the rationale.
+    if payload.signing_key_id.is_empty() {
+        return Err("signing_key_id is empty".into());
+    }
+    let reason_ref = payload.weather_fallback_reason.as_deref();
+    if !VALID_WEATHER_FALLBACK_REASONS.contains(&reason_ref) {
+        return Err(format!(
+            "unknown weather_fallback_reason: {:?}",
+            payload.weather_fallback_reason
+        ));
+    }
+    if let Some(station) = &payload.weather_station {
+        validate_weather_station(station)?;
+    }
+    Ok(())
+}
+
 /// Maximum length (in bytes) of a `weather_station` identifier.
 ///
 /// Defence-in-depth against DoS via pathologically long station names in
@@ -498,11 +666,10 @@ pub const WEATHER_STATION_MAX_LEN: usize = 64;
 /// MUST match `^[a-z][a-z0-9-]*$` — lowercase ASCII letters, digits, and
 /// hyphens, starting with a letter. Free-form station names smuggle
 /// arbitrary strings into a signed payload and break cross-language
-/// canonicalisation parity. The charset matches the producer-side rule
-/// in wallop_core's weather station registry.
+/// canonicalisation parity. The charset matches the producer-side rule.
 ///
-/// Length-capped at `WEATHER_STATION_MAX_LEN` bytes for verifier
-/// defence-in-depth (Colin round-2 review).
+/// Length-capped at `WEATHER_STATION_MAX_LEN` bytes as verifier
+/// defence-in-depth.
 pub fn validate_weather_station(station: &str) -> Result<(), String> {
     if station.is_empty() {
         return Err("weather_station is empty".into());
@@ -529,15 +696,20 @@ pub fn validate_weather_station(station: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Parse a lock receipt JCS payload as `LockReceiptV4`, the only schema
-/// version supported in 1.x. Strict — `deny_unknown_fields` rejects any
-/// extra field, and an unknown `schema_version` returns
+/// Parse a lock receipt JCS payload and dispatch to the correct struct
+/// based on `schema_version`. Strict — each variant carries
+/// `deny_unknown_fields`, and an unknown `schema_version` returns
 /// `Err(UnknownSchemaVersion)`. **Terminal**: a verifier receiving this
 /// error MUST upgrade, MUST NOT retry. Mirrors `parse_execution_receipt`'s
-/// dispatcher pattern so future lock receipt schema bumps land cleanly.
+/// dispatcher pattern.
+///
+/// V4 and V5 carry byte-identical field sets; the discriminant exists so
+/// callers can route on whether the bundle's wrapper is expected to carry
+/// inline keys (V4) or to be resolver-driven (V5). See spec §4.2.4.
 #[derive(Debug)]
 pub enum ParsedLockReceipt {
     V4(LockReceiptV4),
+    V5(LockReceiptV5),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -555,7 +727,7 @@ impl std::fmt::Display for ParseLockReceiptError {
             Self::MissingSchemaVersion => write!(f, "missing schema_version"),
             Self::UnknownSchemaVersion(v) => write!(
                 f,
-                "unknown lock receipt schema_version: {} (expected \"4\")",
+                "unknown lock receipt schema_version: {} (expected \"4\" or \"5\")",
                 v
             ),
             Self::PayloadShapeMismatch(e) => write!(
@@ -584,6 +756,11 @@ pub fn parse_lock_receipt(payload_jcs: &str) -> Result<ParsedLockReceipt, ParseL
                 .map_err(|e| ParseLockReceiptError::PayloadShapeMismatch(e.to_string()))?;
             Ok(ParsedLockReceipt::V4(parsed))
         }
+        "5" => {
+            let parsed: LockReceiptV5 = serde_json::from_str(payload_jcs)
+                .map_err(|e| ParseLockReceiptError::PayloadShapeMismatch(e.to_string()))?;
+            Ok(ParsedLockReceipt::V5(parsed))
+        }
         other => Err(ParseLockReceiptError::UnknownSchemaVersion(
             other.to_string(),
         )),
@@ -596,10 +773,13 @@ pub fn parse_lock_receipt(payload_jcs: &str) -> Result<ParsedLockReceipt, ParseL
 /// `Err(UnknownSchemaVersion)` — this is **terminal**, not retryable.
 /// A verifier receiving this error MUST upgrade, not retry the draw
 /// (spec §4.2.1 — older-schema rejection).
+/// V4 carries a byte-identical field set to V3; the discriminant signals
+/// resolver-driven verification, mirroring `ParsedLockReceipt::V5`.
 #[derive(Debug)]
 pub enum ParsedExecutionReceipt {
     V2(ExecutionReceiptV2),
     V3(ExecutionReceiptV3),
+    V4(ExecutionReceiptV4),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -617,7 +797,7 @@ impl std::fmt::Display for ParseExecutionReceiptError {
             Self::MissingSchemaVersion => write!(f, "missing schema_version"),
             Self::UnknownSchemaVersion(v) => write!(
                 f,
-                "unknown execution receipt schema_version: {} (expected \"2\" or \"3\")",
+                "unknown execution receipt schema_version: {} (expected \"2\", \"3\", or \"4\")",
                 v
             ),
             Self::PayloadShapeMismatch(e) => write!(
@@ -652,6 +832,11 @@ pub fn parse_execution_receipt(
             let parsed: ExecutionReceiptV3 = serde_json::from_str(payload_jcs)
                 .map_err(|e| ParseExecutionReceiptError::PayloadShapeMismatch(e.to_string()))?;
             Ok(ParsedExecutionReceipt::V3(parsed))
+        }
+        "4" => {
+            let parsed: ExecutionReceiptV4 = serde_json::from_str(payload_jcs)
+                .map_err(|e| ParseExecutionReceiptError::PayloadShapeMismatch(e.to_string()))?;
+            Ok(ParsedExecutionReceipt::V4(parsed))
         }
         other => Err(ParseExecutionReceiptError::UnknownSchemaVersion(
             other.to_string(),

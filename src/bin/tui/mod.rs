@@ -29,9 +29,17 @@ pub(crate) fn run_verify_tui(path: &str, pins: &super::PinConfig) -> ExitCode {
         }
     };
 
-    // 3. Resolve pin states
-    let op_pin = resolve_pin_state(&bundle.lock_receipt.public_key_hex, &pins.operator_key);
-    let infra_pin = resolve_pin_state(&bundle.execution_receipt.public_key_hex, &pins.infra_key);
+    // 3. Resolve pin states. Inline keys are absent on resolver-driven
+    // bundles (v5 lock / v4 exec); pin flags only apply to legacy bundles
+    // that carry an inline `public_key_hex`.
+    let op_pin = match bundle.lock_receipt.public_key_hex.as_deref() {
+        Some(embedded) => resolve_pin_state(embedded, &pins.operator_key),
+        None => PinState::Unpinned,
+    };
+    let infra_pin = match bundle.execution_receipt.public_key_hex.as_deref() {
+        Some(embedded) => resolve_pin_state(embedded, &pins.infra_key),
+        None => PinState::Unpinned,
+    };
 
     // Bail on mismatch before entering TUI
     if matches!(op_pin, PinState::Mismatch { .. }) {
