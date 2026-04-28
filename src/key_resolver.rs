@@ -23,18 +23,43 @@ pub trait KeyResolver {
     fn resolve(&self, key_id: &str, key_class: KeyClass) -> Result<ResolvedKey, ResolutionError>;
 }
 
-/// Successful key resolution. `inserted_at` is the canonical RFC 3339
-/// timestamp at which the resolver's trust root first observed this key —
-/// the comparison point for V-02 temporal binding.
+/// Successful key resolution. `inserted_at` is the comparison point for
+/// the temporal-binding check in spec §4.2.4 — the moment the resolver's
+/// trust root first observed this key.
 ///
-/// Carried as a `String` rather than a typed `DateTime` to avoid pulling
-/// `chrono` into the verifier crate (which compiles to WASM); the existing
-/// `chrono_parse_canonical` in `verify_steps` is the canonical parser.
+/// Carried as a string-backed enum rather than a typed `DateTime` to
+/// avoid pulling `chrono` into the verifier crate (which compiles to
+/// WASM); the existing `chrono_parse_canonical` in `verify_steps` is the
+/// canonical parser. The two variants exist because `BundleEmbeddedResolver`
+/// has no out-of-band first-existence timestamp to return — see the
+/// `InsertedAt` doc.
 #[derive(Debug, Clone)]
 pub struct ResolvedKey {
     pub public_key: [u8; 32],
-    pub inserted_at: String,
+    pub inserted_at: InsertedAt,
     pub key_class: KeyClass,
+}
+
+/// Comparison point for the temporal-binding check.
+///
+/// - `At(timestamp)` — the resolver's trust root committed this timestamp
+///   independently of the bundle. The verifier MUST evaluate the
+///   temporal-binding rule (`inserted_at <= receipt.binding_timestamp`).
+/// - `Sentinel` — the resolver has no out-of-band first-existence
+///   timestamp to return (i.e. `BundleEmbeddedResolver`, where the keys
+///   are read directly from the bundle and the bundle does not carry
+///   such a timestamp). The verifier MUST skip the temporal-binding rule
+///   when this variant is paired with `VerifierMode::SelfConsistencyOnly`,
+///   and MUST reject when paired with any other mode (a non-bundle
+///   resolver returning `Sentinel` is itself a protocol violation).
+///
+/// Verifier-side V-02 enforcement is not yet wired in; the variant is in
+/// place so the wiring PR can dispatch on shape rather than string-compare
+/// a magic value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InsertedAt {
+    Sentinel,
+    At(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,17 +108,6 @@ impl std::fmt::Display for ResolutionError {
 }
 
 impl std::error::Error for ResolutionError {}
-
-/// Sentinel `inserted_at` value emitted by `BundleEmbeddedResolver`.
-///
-/// The bundle does not carry a first-existence timestamp for the inline
-/// keys it embeds, so the resolver returns the lowest representable
-/// canonical timestamp. V-02 temporal binding is consequently always
-/// satisfied for self-consistency mode — which is correct: V-02 is only
-/// meaningful when the trust root commits an `inserted_at` independently
-/// of the bundle, and `BundleEmbeddedResolver` is by definition
-/// bundle-self-attesting.
-pub const BUNDLE_EMBEDDED_INSERTED_AT_SENTINEL: &str = "0001-01-01T00:00:00.000000Z";
 
 /// Resolves keys from the inline `public_key_hex` fields on the bundle's
 /// receipt-block wrappers. Used for legacy v3/v4 receipts (which carry
@@ -159,7 +173,7 @@ impl<'b> KeyResolver for BundleEmbeddedResolver<'b> {
 
         Ok(ResolvedKey {
             public_key,
-            inserted_at: BUNDLE_EMBEDDED_INSERTED_AT_SENTINEL.to_string(),
+            inserted_at: InsertedAt::Sentinel,
             key_class,
         })
     }
@@ -219,7 +233,7 @@ mod tests {
             .resolve(&test_kid, KeyClass::Operator)
             .expect("resolver returns inline key");
         assert_eq!(resolved.key_class, KeyClass::Operator);
-        assert_eq!(resolved.inserted_at, BUNDLE_EMBEDDED_INSERTED_AT_SENTINEL);
+        assert_eq!(resolved.inserted_at, InsertedAt::Sentinel);
 
         // Round-trips: derived key_id matches the inline pubkey hex.
         let expected_pk: [u8; 32] =
@@ -255,6 +269,28 @@ mod tests {
             .resolve(&signing_key_id, KeyClass::Operator)
             .unwrap_err();
         assert_eq!(err, ResolutionError::KeyNotFound);
+    }
+
+    #[test]
+    fn inserted_at_sentinel_is_reserved_for_bundle_embedded_resolver() {
+        // Encoding-level guarantee: the two variants are distinct.
+        // `BundleEmbeddedResolver` returns `Sentinel`; non-bundle
+        // resolvers MUST return `At(_)`. The verifier-side V-02 wiring
+        // dispatches on this variant rather than string-comparing a
+        // magic value.
+        let json = build_valid_bundle(&entries(), Some("1013"), 2);
+        let bundle = ProofBundle::from_json(&json).unwrap();
+        let resolver = BundleEmbeddedResolver::from_bundle(&bundle);
+
+        let inline = bundle.lock_receipt.public_key_hex.as_deref().unwrap();
+        let pk: [u8; 32] = hex::decode(inline).unwrap().try_into().unwrap();
+        let kid = key_id(&pk);
+
+        let resolved = resolver
+            .resolve(&kid, KeyClass::Operator)
+            .expect("resolver returns inline key");
+        assert!(matches!(resolved.inserted_at, InsertedAt::Sentinel));
+        assert!(!matches!(resolved.inserted_at, InsertedAt::At(_)));
     }
 
     #[test]

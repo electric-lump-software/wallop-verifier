@@ -5,7 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.12.0] - unreleased
+## [0.13.0] - unreleased
+
+### Breaking
+
+- **`ResolvedKey.inserted_at` is now `InsertedAt`** (was `String`). The new enum has two variants: `At(String)` carrying a canonical RFC 3339 timestamp from a non-bundle resolver's trust root, and `Sentinel` reserved for `BundleEmbeddedResolver` (which has no out-of-band first-existence timestamp to return). Verifier-side V-02 enforcement, when wired, will dispatch on the variant rather than string-comparing a magic value: `Sentinel` skips the temporal-binding check when paired with `VerifierMode::SelfConsistencyOnly`, and rejects when paired with any other mode (a non-bundle resolver returning `Sentinel` is itself a protocol violation).
+- **The public constant `BUNDLE_EMBEDDED_INSERTED_AT_SENTINEL` is removed.** Callers that constructed `ResolvedKey` literals with this constant now use `InsertedAt::Sentinel` directly.
+
+### Migration notes
+
+External callers that constructed `ResolvedKey` literals or `KeyResolver` implementations need to update one field's type. The new shape:
+
+```rust
+ResolvedKey {
+    public_key: [u8; 32],
+    inserted_at: InsertedAt::At("2026-04-26T12:34:56.789012Z".into()),
+    // or InsertedAt::Sentinel for bundle-self-attesting resolvers
+    key_class: KeyClass::Operator,
+}
+```
+
+JS callers of `verify_bundle_with_resolved_keys_wasm` are not affected — the WASM boundary still accepts a string `inserted_at` and wraps it in `InsertedAt::At(...)` internally. The `Sentinel` variant is reachable only from inside the verifier crate.
+
+## [0.12.0] - 2026-04-28
 
 ### Breaking
 

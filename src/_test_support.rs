@@ -8,9 +8,7 @@
 //!
 //! API stability is NOT guaranteed. Contents may change in any release.
 
-use crate::key_resolver::{
-    BUNDLE_EMBEDDED_INSERTED_AT_SENTINEL, KeyClass, KeyResolver, ResolutionError, ResolvedKey,
-};
+use crate::key_resolver::{InsertedAt, KeyClass, KeyResolver, ResolutionError, ResolvedKey};
 use crate::protocol::receipts::lock_receipt_hash;
 use crate::{Entry, compute_seed, compute_seed_drand_only, draw, entry_hash};
 use ed25519_dalek::{Signer, SigningKey};
@@ -287,20 +285,20 @@ pub fn build_valid_v5_bundle(
 pub struct MockResolver {
     pub key_id: String,
     pub public_key: [u8; 32],
-    pub inserted_at: String,
+    pub inserted_at: InsertedAt,
 }
 
 impl MockResolver {
     /// Construct a resolver that returns `public_key` for `key_id` and
-    /// `KeyNotFound` for anything else. `inserted_at` defaults to the
-    /// canonical bundle-embedded sentinel so V-02 always passes (V-02
-    /// verifier-side enforcement is not yet wired in).
+    /// `KeyNotFound` for anything else. `inserted_at` defaults to a
+    /// fixed canonical timestamp — non-bundle resolvers always commit a
+    /// concrete timestamp, never the `Sentinel` variant.
     #[doc(hidden)]
     pub fn new(key_id: impl Into<String>, public_key: [u8; 32]) -> Self {
         Self {
             key_id: key_id.into(),
             public_key,
-            inserted_at: BUNDLE_EMBEDDED_INSERTED_AT_SENTINEL.to_string(),
+            inserted_at: InsertedAt::At("2026-01-01T00:00:00.000000Z".into()),
         }
     }
 }

@@ -3,7 +3,7 @@ use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
 use crate::bundle::ProofBundle;
-use crate::key_resolver::{KeyClass, KeyResolver, ResolutionError, ResolvedKey};
+use crate::key_resolver::{InsertedAt, KeyClass, KeyResolver, ResolutionError, ResolvedKey};
 use crate::protocol;
 use crate::protocol::receipts::{ExecutionReceiptV2, LockReceiptV4};
 use crate::verify_steps::{VerifierMode, verify_bundle_with};
@@ -262,6 +262,12 @@ struct ResolvedKeyJs {
 /// resolvers serialise their lookups across the WASM boundary in one
 /// shot, so this lookup is linear over `keys` — fine for the small
 /// keyring sizes we expect (<10 entries per operator).
+///
+/// Pre-resolved keys arrive from out-of-band resolution (the JS layer
+/// fetched them from `/operator/:slug/keys` or a `.well-known` pin), so
+/// every entry carries a concrete `InsertedAt::At(...)` timestamp; the
+/// `Sentinel` variant is reserved for `BundleEmbeddedResolver` in the
+/// verifier crate proper.
 struct PreResolvedResolver {
     keys: Vec<(String, KeyClass, [u8; 32], String)>,
 }
@@ -272,7 +278,7 @@ impl KeyResolver for PreResolvedResolver {
             if k_id == key_id && *k_class == key_class {
                 return Ok(ResolvedKey {
                     public_key: *pk,
-                    inserted_at: inserted_at.clone(),
+                    inserted_at: InsertedAt::At(inserted_at.clone()),
                     key_class: *k_class,
                 });
             }
