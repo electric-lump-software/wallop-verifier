@@ -2389,7 +2389,7 @@ mod tests {
         assert_eq!(report.mode, VerifierMode::SelfConsistencyOnly);
     }
 
-    // ── Temporal binding (spec §4.2.4 / PAM-1093) ─────────────────────
+    // ── Temporal binding (spec §4.2.4) ────────────────────────────────
 
     /// Resolver that returns a fixed pubkey + a caller-controlled
     /// `inserted_at`. Lets each test pin both halves of the
@@ -2621,7 +2621,7 @@ mod tests {
         assert!(matches!(lock_sig.status, StepStatus::Fail(_)));
     }
 
-    // ── PAM-1085: ResolutionError surfacing in StepDetail ─────────────
+    // ── ResolutionError surfacing in StepDetail ───────────────────────
 
     #[test]
     fn resolution_failure_surfaces_keynotfound_on_signature_step() {

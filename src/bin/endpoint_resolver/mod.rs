@@ -103,8 +103,8 @@ struct KeyEntry {
 /// server-side verifiers) MUST construct a new `EndpointResolver` per
 /// verification — otherwise a key rotation that lands mid-process
 /// remains invisible to the resolver and verdicts diverge from
-/// reality. PAM-1087's tier-1 follow-up does not address this; a
-/// future TTL-or-staleness layer is a separate piece of work.
+/// reality. The tier-1 (`PinnedResolver`) follow-up does not address
+/// this; a future TTL-or-staleness layer is a separate piece of work.
 pub struct EndpointResolver {
     base_url: String,
     operator_slug: String,

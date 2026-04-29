@@ -1,6 +1,6 @@
 [package]
 name = "wallop_verifier"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2024"
 description = "Independent verifier for the Wallop! provably fair draw protocol."
 license = "MIT"
@@ -30,10 +30,17 @@ crossterm = { version = "0.29", optional = true }
 # matches the CLI's one-shot invocation model. Behind the `cli` feature
 # so the WASM build does not pull it in.
 ureq = { version = "2.10", default-features = false, features = ["tls", "json"], optional = true }
+# `serde_jcs` is the RFC 8785 JCS canonicaliser used by `PinnedResolver`
+# to reconstruct the pin pre-image from a parsed envelope. Hand-rolling
+# the canonicaliser is a tripwire — `serde_json::to_string` does not
+# escape U+2028 / U+2029 per RFC 8785 §3.2.2.2, and number serialisation
+# diverges for non-integer floats. Behind the `cli` feature for the same
+# reason as `ureq` (WASM build stays lean).
+serde_jcs = { version = "0.2", optional = true }
 
 [features]
 default = []
-cli = ["clap", "drand-verify", "dep:ureq"]
+cli = ["clap", "drand-verify", "dep:ureq", "dep:serde_jcs"]
 tui = ["cli", "dep:ratatui", "dep:crossterm"]
 
 [[bin]]
