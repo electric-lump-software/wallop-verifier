@@ -1,6 +1,6 @@
 [package]
 name = "wallop_verifier"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2024"
 description = "Independent verifier for the Wallop! provably fair draw protocol."
 license = "MIT"
@@ -25,10 +25,15 @@ drand-verify = { version = "0.6", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 ratatui = { version = "0.30", optional = true }
 crossterm = { version = "0.29", optional = true }
+# `ureq` with `rustls` for the CLI's tier-2 / tier-1 HTTP-backed
+# resolvers. Pure-Rust TLS — no OpenSSL system deps. Sync, blocking,
+# matches the CLI's one-shot invocation model. Behind the `cli` feature
+# so the WASM build does not pull it in.
+ureq = { version = "2.10", default-features = false, features = ["tls", "json"], optional = true }
 
 [features]
 default = []
-cli = ["clap", "drand-verify"]
+cli = ["clap", "drand-verify", "dep:ureq"]
 tui = ["cli", "dep:ratatui", "dep:crossterm"]
 
 [[bin]]
@@ -39,6 +44,10 @@ required-features = ["cli"]
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
 ed25519-dalek = { version = "2", features = ["std"] }
+# Local mock HTTP server for resolver tests. Spawns an in-test TCP
+# listener and serves canned JSON responses against the shapes the
+# tier-2 / tier-1 resolvers consume.
+mockito = "1"
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false

@@ -5,11 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.13.0] - unreleased
+## [0.14.0] - unreleased
+
+### Added — `EndpointResolver` (tier-2 attestable mode)
+
+The CLI binary gains a tier-2 `KeyResolver` implementation that fetches operator and infrastructure keys from the wallop instance's HTTP endpoints documented in spec §4.2.4:
+
+- `GET <base>/operator/<slug>/keys`
+- `GET <base>/infrastructure/keys`
+
+Both return the canonical four-field row shape pinned by spec §4.2.4: `{key_id, public_key_hex, inserted_at, key_class}`. The resolver validates the response's top-level `schema_version` (exact match `"1"`, terminal rejection on anything else), enforces verifier-side keyring-row consistency (`crypto::key_id(public_key) == key_id`), and caches per `KeyClass` for the lifetime of the resolver — at most two HTTP requests per verification, regardless of how many keys the bundle references.
+
+Lives under `src/bin/endpoint_resolver/` (binary-private — `ureq` and TLS deps stay out of the verifier crate proper, which compiles to WASM).
+
+### Added — `wallop-verify --mode attestable`
+
+The CLI's `--mode attestable` option is now wired and functional. It requires a new `--wallop-base-url <URL>` flag identifying the wallop instance to resolve against; `<base>/operator/<slug>/keys` and `<base>/infrastructure/keys` are the canonical paths. The operator slug is read from the bundle's signed lock receipt — an attacker rewriting only the bundle JSON wrapper cannot redirect the resolver at a different operator's keyring without invalidating the lock signature.
+
+The CLI's report header now surfaces `Trust root` lines naming the resolver URLs alongside the existing `Mode` line, so a reader of the report knows precisely which trust root produced the verdict.
+
+`--mode attributable` (tier-1, operator-hosted `.well-known` pin) still exits with "not yet implemented in this release" — that lands in a follow-up.
+
+### Added — HTTP dependency (CLI feature only)
+
+`ureq 2.10` (with `tls` + `json` features, default-features-off) joins the dependency list behind the `cli` feature flag. Pure-Rust TLS via rustls — no OpenSSL system deps. Sync, blocking, no async runtime. The library crate's WASM build is unaffected.
+
+`mockito 1` joins dev-dependencies for the resolver's integration tests, which run a local mock HTTP server and assert the resolver's behaviour against canned canonical / malformed / inconsistent / unreachable responses.
+
+### Public API change
+
+- `KeyClass` derives `Hash` (additive — was `Debug + Clone + Copy + PartialEq + Eq`). Allows downstream callers to use it as a map key. Non-breaking.
+
+### Defence-in-depth on the resolver
+
+- **Operator-slug charset validation.** The CLI extracts `operator_slug` from the bundle's signed lock receipt JCS payload before the lock signature is verified. A malformed slug whose signature is going to fail later in the pipeline anyway must not be permitted to direct the verifier at arbitrary URLs on the wallop host. The CLI now validates the slug against the producer-side rule (`^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$`, 2-63 chars; spec §4.2.1) before any HTTP request is constructed. Path traversal, query injection, header smuggling, and similar URL-injection vectors are rejected with a clear error.
+- **`--wallop-base-url` scheme allow-list.** Tier-2 attestable mode is by definition a same-origin trust assertion; keys arriving over an unauthenticated channel collapse the trust model. The CLI requires `https://` for non-loopback hosts and accepts `http://localhost`, `http://127.0.0.1`, and `http://[::1]` for development convenience. Any other scheme rejects.
+- **Response size and shape caps.** `EndpointResolver` caps the response body at 1 MiB (read via a bounded `Read` adapter) and rejects responses with more than 10,000 keys per class. Defends the verifier against a misbehaving / hostile endpoint shipping a pathologically large body that would OOM the process.
+- **`#[serde(deny_unknown_fields)]` on the wire structs.** Both `KeysResponse` (envelope) and `KeyEntry` (per-key row) are closed-set per spec §4.2.4. A future producer that re-introduces a removed field (e.g. `valid_from`, deliberately removed in spec §4.2.4 to close the temporal-binding window) under `schema_version: "1"` is itself a wire-contract violation; the resolver rejects rather than silently ignoring.
+- **Strict lowercase-hex assertion** on `key_id` (8 chars) and `public_key_hex` (64 chars). `hex::decode` accepts mixed case; an endpoint emitting uppercase hex would still pass the row-consistency hash check (because `crypto::key_id(pk)` is lowercase too) but would violate the wire contract. Reject early so cross-implementation conformance is asserted, not implied.
+- **Verifier-side keyring-row consistency check** at row-level, mirroring the verifier crate's pipeline-level check for defence in depth: the row's claimed `key_id` MUST equal `crypto::key_id(public_key)`. Mismatches surface as `ResolutionError::InconsistentRow`.
+- **`User-Agent: wallop-verifier/<version>`** on outgoing requests. Operator-side rate limiting and abuse triage are much harder when verifiers' UA is anonymous.
+- **Resolver exposes canonicalised URLs.** `operator_keys_url()` / `infrastructure_keys_url()` accessors return the exact URL the resolver hits; the CLI's `Trust root` report header reads from these, so the audit trail names what the resolver actually used (not a re-formatted version of the user's input).
+
+### Documentation
+
+- The `InsertedAt` enum and `ResolvedKey.inserted_at` field doc comments drop the internal "V-02" rule label in favour of the spec-level "temporal-binding" phrasing. The carrier shape is unchanged. Same change applied to the `InsertedAt` paragraph in `[0.13.0]` below.
+
+## [0.13.0] - 2026-04-28
 
 ### Breaking
 
-- **`ResolvedKey.inserted_at` is now `InsertedAt`** (was `String`). The new enum has two variants: `At(String)` carrying a canonical RFC 3339 timestamp from a non-bundle resolver's trust root, and `Sentinel` reserved for `BundleEmbeddedResolver` (which has no out-of-band first-existence timestamp to return). Verifier-side V-02 enforcement, when wired, will dispatch on the variant rather than string-comparing a magic value: `Sentinel` skips the temporal-binding check when paired with `VerifierMode::SelfConsistencyOnly`, and rejects when paired with any other mode (a non-bundle resolver returning `Sentinel` is itself a protocol violation).
+- **`ResolvedKey.inserted_at` is now `InsertedAt`** (was `String`). The new enum has two variants: `At(String)` carrying a canonical RFC 3339 timestamp from a non-bundle resolver's trust root, and `Sentinel` reserved for `BundleEmbeddedResolver` (which has no out-of-band first-existence timestamp to return). Verifier-side temporal-binding enforcement, when wired, will dispatch on the variant rather than string-comparing a magic value: `Sentinel` skips the temporal-binding check when paired with `VerifierMode::SelfConsistencyOnly`, and rejects when paired with any other mode (a non-bundle resolver returning `Sentinel` is itself a protocol violation).
 - **The public constant `BUNDLE_EMBEDDED_INSERTED_AT_SENTINEL` is removed.** Callers that constructed `ResolvedKey` literals with this constant now use `InsertedAt::Sentinel` directly.
 
 ### Migration notes
@@ -40,7 +86,7 @@ JS callers of `verify_bundle_with_resolved_keys_wasm` are not affected — the W
 A new public module `key_resolver` defines the resolution surface used by `verify_bundle_with`:
 
 - `KeyResolver` trait — single `resolve(key_id, key_class)` entry point. Failure is terminal; the verifier pipeline does not fall back to inline keys.
-- `ResolvedKey { public_key, inserted_at, key_class }` — the resolved key plus the metadata required for V-02 temporal binding (verifier-side V-02 enforcement is not yet wired; the carrier is in place).
+- `ResolvedKey { public_key, inserted_at, key_class }` — the resolved key plus the metadata required for spec §4.2.4 temporal-binding (verifier-side enforcement is not yet wired; the carrier is in place).
 - `KeyClass::{Operator, Infrastructure}` — discriminator passed to the resolver.
 - `ResolutionError::{Unreachable, KeyNotFound, PinMismatch, MalformedResponse, InconsistentRow}` — closed-set failure modes.
 - `BundleEmbeddedResolver` — the only built-in implementation, used for legacy v3 / v4 bundles and for `--mode self-consistency` debug runs. Reads keys directly from the bundle's inline `public_key_hex` fields.

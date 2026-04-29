@@ -53,16 +53,16 @@ pub struct ResolvedKey {
 ///   and MUST reject when paired with any other mode (a non-bundle
 ///   resolver returning `Sentinel` is itself a protocol violation).
 ///
-/// Verifier-side V-02 enforcement is not yet wired in; the variant is in
-/// place so the wiring PR can dispatch on shape rather than string-compare
-/// a magic value.
+/// Verifier-side temporal-binding enforcement is not yet wired in; the
+/// variant is in place so the wiring PR can dispatch on shape rather
+/// than string-compare a magic value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InsertedAt {
     Sentinel,
     At(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KeyClass {
     Operator,
     Infrastructure,
@@ -275,7 +275,7 @@ mod tests {
     fn inserted_at_sentinel_is_reserved_for_bundle_embedded_resolver() {
         // Encoding-level guarantee: the two variants are distinct.
         // `BundleEmbeddedResolver` returns `Sentinel`; non-bundle
-        // resolvers MUST return `At(_)`. The verifier-side V-02 wiring
+        // resolvers MUST return `At(_)`. The verifier-side temporal-binding wiring
         // dispatches on this variant rather than string-comparing a
         // magic value.
         let json = build_valid_bundle(&entries(), Some("1013"), 2);

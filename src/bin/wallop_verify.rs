@@ -5,7 +5,10 @@ use std::process::ExitCode;
 use wallop_verifier::StepName;
 use wallop_verifier::bundle::ProofBundle;
 use wallop_verifier::catalog::runner::ScenarioOutcome;
-use wallop_verifier::verify_steps::{StepStatus, VerifierMode, verify_bundle};
+use wallop_verifier::verify_steps::{StepStatus, VerifierMode, verify_bundle, verify_bundle_with};
+
+mod endpoint_resolver;
+use endpoint_resolver::EndpointResolver;
 
 #[cfg(feature = "tui")]
 mod tui;
@@ -52,13 +55,21 @@ struct Cli {
     /// Verification trust mode. `self-consistency` (default) uses the
     /// bundle's inline keys — catches accidents and casual tampering, no
     /// defence against tampered mirrors. `attestable` resolves keys
-    /// against `/operator/:slug/keys` (same-origin). `attributable`
-    /// resolves against an operator-hosted `.well-known` pin on a domain
-    /// the operator controls independently. Tier-1 (attributable) and
-    /// tier-2 (attestable) implementations ship in a follow-up release;
-    /// use `self-consistency` for now.
+    /// against the wallop instance's `/operator/:slug/keys` and
+    /// `/infrastructure/keys` endpoints (same-origin caveat applies).
+    /// `attributable` additionally pins keys to an operator-hosted
+    /// `.well-known` document on a domain the operator controls
+    /// independently of wallop. Tier-1 (attributable) ships in a
+    /// follow-up release; use `attestable` or `self-consistency` for now.
     #[arg(long, value_enum, default_value_t = ModeFlag::SelfConsistency)]
     mode: ModeFlag,
+
+    /// Wallop base URL used by `--mode attestable`. The resolver fetches
+    /// keys from `<URL>/operator/<slug>/keys` and `<URL>/infrastructure/keys`.
+    /// Required when `--mode attestable` is selected; ignored otherwise.
+    /// Example: `--wallop-base-url https://wallop.example.com`.
+    #[arg(long, value_name = "URL")]
+    wallop_base_url: Option<String>,
 }
 
 /// CLI surface for `--mode`. Distinct from `wallop_verifier::VerifierMode`
@@ -121,45 +132,55 @@ fn main() -> ExitCode {
             }
             run_selftest()
         }
-        (None, Some(path)) => {
-            // Tier-1 / tier-2 resolver implementations are CLI-side and
-            // ship in a follow-up release. The library trait is in place;
-            // the HTTP-backed implementations (EndpointResolver,
-            // PinnedResolver) are not yet wired here. Reject explicitly
-            // so users learn what's available now.
-            match cli.mode {
-                ModeFlag::Attestable | ModeFlag::Attributable => {
+        (None, Some(path)) => match cli.mode {
+            ModeFlag::Attributable => {
+                eprintln!("error: --mode attributable is not yet implemented in this release.");
+                eprintln!(
+                    "       The library `KeyResolver` trait and the tier-2 `attestable` \
+                     mode ship in this release. Operator-hosted `.well-known` pin \
+                     verification (tier-1, attributable) lands in a follow-up."
+                );
+                ExitCode::from(2)
+            }
+            ModeFlag::Attestable => {
+                let base_url = match cli.wallop_base_url.as_deref() {
+                    Some(url) => url.to_string(),
+                    None => {
+                        eprintln!("error: --mode attestable requires --wallop-base-url <URL>.");
+                        eprintln!(
+                            "       The resolver fetches keys from \
+                             <URL>/operator/<slug>/keys and <URL>/infrastructure/keys."
+                        );
+                        return ExitCode::from(2);
+                    }
+                };
+                if let Err(reason) = validate_wallop_base_url(&base_url) {
+                    eprintln!("error: --wallop-base-url is invalid: {reason}");
                     eprintln!(
-                        "error: --mode {} is not yet implemented in this release.",
-                        match cli.mode {
-                            ModeFlag::Attestable => "attestable",
-                            ModeFlag::Attributable => "attributable",
-                            ModeFlag::SelfConsistency => unreachable!(),
-                        }
-                    );
-                    eprintln!(
-                        "       Use --mode self-consistency for now (default). The \
-                         library `KeyResolver` trait is in place; the CLI's HTTP-backed \
-                         resolver implementations land in a follow-up release."
+                        "       Tier-2 attestable mode is a same-origin trust assertion; \
+                         keys arriving over an unauthenticated channel collapse the trust \
+                         model. Use https:// (or http://localhost / 127.0.0.1 for dev)."
                     );
                     return ExitCode::from(2);
                 }
-                ModeFlag::SelfConsistency => {}
+                run_verify_attestable(path, &base_url)
             }
-            let pins = PinConfig {
-                operator_key: resolve_operator_pin(
-                    cli.pin_operator_key.as_deref(),
-                    cli.pin_operator_key_file.as_deref(),
-                    cli.pin_from_bundle.as_deref(),
-                ),
-                infra_key: cli.pin_infra_key.clone(),
-            };
-            #[cfg(feature = "tui")]
-            if cli.tui {
-                return tui::run_verify_tui(path, &pins);
+            ModeFlag::SelfConsistency => {
+                let pins = PinConfig {
+                    operator_key: resolve_operator_pin(
+                        cli.pin_operator_key.as_deref(),
+                        cli.pin_operator_key_file.as_deref(),
+                        cli.pin_from_bundle.as_deref(),
+                    ),
+                    infra_key: cli.pin_infra_key.clone(),
+                };
+                #[cfg(feature = "tui")]
+                if cli.tui {
+                    return tui::run_verify_tui(path, &pins);
+                }
+                run_verify(path, &pins, cli.mode.to_library())
             }
-            run_verify(path, &pins, cli.mode.to_library())
-        }
+        },
         (None, None) => {
             eprintln!("error: no proof bundle path provided");
             eprintln!("Usage: wallop-verify <PATH> or wallop-verify selftest");
@@ -413,6 +434,215 @@ fn run_verify(path: &str, pins: &PinConfig, mode: VerifierMode) -> ExitCode {
     }
 }
 
+fn run_verify_attestable(path: &str, base_url: &str) -> ExitCode {
+    // Read input — same shape as run_verify.
+    let json = match path {
+        "-" => {
+            let mut buf = String::new();
+            if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+                eprintln!("error reading stdin: {e}");
+                return ExitCode::from(2);
+            }
+            buf
+        }
+        path => match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error reading {path}: {e}");
+                return ExitCode::from(2);
+            }
+        },
+    };
+
+    let bundle = match ProofBundle::from_json(&json) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    // Extract the operator slug from the lock receipt's signed payload.
+    // The slug is part of the receipt's signed bytes (spec §4.2.1 lock
+    // receipt schema), so an attacker rewriting the bundle JSON wrapper
+    // cannot redirect the resolver at a different operator's keyring
+    // without invalidating the lock receipt's signature — which the
+    // verifier catches at the lock-signature step.
+    //
+    // The slug is interpolated into the resolver URL before that
+    // signature step runs, so we additionally validate it against the
+    // producer-side charset (`^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$`,
+    // 2-63 chars; spec §4.2.1) before constructing any URL. A slug
+    // containing `/`, `?`, `#`, `..`, CR/LF, or non-ASCII would
+    // otherwise let a tampered (signature-invalid) bundle direct the
+    // resolver at arbitrary URLs — bounded in outcome by the eventual
+    // signature failure, but unbounded in the request shape it could
+    // smuggle. Reject early.
+    let operator_slug = match operator_slug_from_lock(&bundle.lock_receipt.payload_jcs) {
+        Some(slug) => match validate_operator_slug(&slug) {
+            Ok(()) => slug,
+            Err(reason) => {
+                eprintln!("error: lock receipt's `operator_slug` is invalid: {reason}");
+                eprintln!(
+                    "       attestable mode rejects malformed slugs before constructing \
+                     any HTTP request. The producer-side rule is \
+                     `^[a-z0-9][a-z0-9-]{{0,61}}[a-z0-9]$` (lowercase alphanumeric with \
+                     hyphens, 2-63 chars; spec §4.2.1)."
+                );
+                return ExitCode::from(2);
+            }
+        },
+        None => {
+            eprintln!("error: could not read `operator_slug` from the lock receipt payload.");
+            eprintln!(
+                "       The bundle's lock receipt JCS payload is malformed or missing \
+                 the slug field. attestable mode cannot proceed without an operator \
+                 to look up."
+            );
+            return ExitCode::from(2);
+        }
+    };
+
+    let resolver = EndpointResolver::new(base_url, operator_slug.clone());
+    let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attestable);
+
+    // Read the canonicalised URLs from the resolver so the report
+    // surfaces what the resolver actually hit, not a re-formatted
+    // version of the user's CLI input. Tightens the audit trail.
+    let trust_root_urls = (
+        resolver.operator_keys_url(),
+        resolver.infrastructure_keys_url(),
+    );
+    print_report(&bundle, &report, Some(&trust_root_urls));
+
+    if report.passed() {
+        println!("  RESULT: PASS");
+        ExitCode::SUCCESS
+    } else {
+        println!("  RESULT: FAIL ({} errors)", report.error_count());
+        ExitCode::from(1)
+    }
+}
+
+/// Extract `operator_slug` from a signed lock-receipt JCS payload.
+/// Mirrors what the typed parsers in `wallop_verifier::protocol::receipts`
+/// do but stays at the `serde_json::Value` level — the CLI doesn't need
+/// to dispatch on `schema_version` for this one field, and an unknown
+/// schema (rejected by `BundleShape` later in the pipeline) still
+/// surfaces a usable slug here for the resolver to look up.
+fn operator_slug_from_lock(payload_jcs: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(payload_jcs).ok()?;
+    value
+        .get("operator_slug")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+/// Validate an operator slug against the producer-side charset rule
+/// pinned in spec §4.2.1: `^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$`, 2-63
+/// characters, lowercase ASCII alphanumeric with internal hyphens
+/// allowed. Manual byte check (matches `validate_weather_station`'s
+/// shape in `protocol/receipts.rs`) so the CLI does not pull `regex`
+/// for one validator.
+///
+/// Belt-and-braces against URL-injection / path-traversal / SSRF: the
+/// slug is interpolated into the resolver URL before the lock
+/// signature is verified. A malformed slug whose signature is going to
+/// fail later in the pipeline anyway should not be permitted to direct
+/// the verifier at arbitrary URLs on the wallop host. Reject early.
+fn validate_operator_slug(slug: &str) -> Result<(), String> {
+    let bytes = slug.as_bytes();
+    if !(2..=63).contains(&bytes.len()) {
+        return Err(format!(
+            "length {} is outside the 2-63 char range",
+            bytes.len()
+        ));
+    }
+    let alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    let inner = |b: u8| alnum(b) || b == b'-';
+    if !alnum(bytes[0]) {
+        return Err("must start with [a-z0-9]".into());
+    }
+    if !alnum(bytes[bytes.len() - 1]) {
+        return Err("must end with [a-z0-9]".into());
+    }
+    for &b in &bytes[1..bytes.len() - 1] {
+        if !inner(b) {
+            return Err(format!(
+                "invalid character {:?} (allowed: [a-z0-9-])",
+                b as char
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate a `--wallop-base-url`. Tier-2 attestable mode is, by name,
+/// a same-origin trust assertion: the entire trust model collapses if
+/// the keys arrive over an unauthenticated channel. Require `https://`
+/// for non-loopback hosts; allow `http://localhost`, `http://127.0.0.1`,
+/// and `http://[::1]` for development convenience.
+fn validate_wallop_base_url(url: &str) -> Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("https://") {
+        return Ok(());
+    }
+    if lower.starts_with("http://localhost")
+        || lower.starts_with("http://127.0.0.1")
+        || lower.starts_with("http://[::1]")
+    {
+        return Ok(());
+    }
+    Err(
+        "must use https:// (or http://localhost / http://127.0.0.1 / http://[::1] for local development)"
+            .into(),
+    )
+}
+
+/// Shared report-printing for both `run_verify` and
+/// `run_verify_attestable`. Header (mode, draw, key_ids), per-step
+/// breakdown, blank line. Caller appends the RESULT line.
+///
+/// `trust_root` is `Some((operator_url, infrastructure_url))` when the
+/// verification ran against a non-bundle resolver and it's worth
+/// surfacing the URLs the keys were resolved from. The caller passes
+/// canonicalised URLs read from the resolver itself, so the report
+/// names what the resolver actually hit.
+fn print_report(
+    bundle: &ProofBundle,
+    report: &wallop_verifier::verify_steps::VerificationReport,
+    trust_root: Option<&(String, String)>,
+) {
+    let version = env!("CARGO_PKG_VERSION");
+    println!("wallop-verify {version}");
+    println!();
+    println!("  Mode ................ {}", report.mode);
+    if let Some((operator_url, infra_url)) = trust_root {
+        println!("  Trust root .......... {operator_url}");
+        println!("  Trust root .......... {infra_url}");
+    }
+    println!("  Draw ................ {}", &bundle.draw_id);
+    if let Some(ref kid) = report.operator_key_id {
+        println!("  Operator key ........ {kid}");
+    }
+    if let Some(ref kid) = report.infra_key_id {
+        println!("  Infrastructure key .. {kid}");
+    }
+    println!();
+
+    for step in &report.steps {
+        let name_str = step.name.to_string();
+        let dots = ".".repeat(30_usize.saturating_sub(name_str.len()));
+        match &step.status {
+            StepStatus::Pass => println!("  {} {} PASS", name_str, dots),
+            StepStatus::Fail(reason) => println!("  {} {} FAIL ({})", name_str, dots, reason),
+            StepStatus::Skip(reason) => println!("  {} {} SKIP ({})", name_str, dots, reason),
+        }
+    }
+
+    println!();
+}
+
 fn run_verify_full_check(bundle: &ProofBundle) -> bool {
     let entries: Vec<wallop_verifier::Entry> = bundle
         .entries
@@ -472,4 +702,86 @@ fn run_verify_full_check(bundle: &ProofBundle) -> bool {
         &entries,
     )
     .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── operator_slug validation ───────────────────────────────────────
+
+    #[test]
+    fn validate_operator_slug_accepts_canonical_shapes() {
+        assert!(validate_operator_slug("acme-prizes").is_ok());
+        assert!(validate_operator_slug("ab").is_ok()); // 2-char minimum
+        assert!(validate_operator_slug("a1").is_ok());
+        assert!(validate_operator_slug("a-b").is_ok());
+        assert!(validate_operator_slug(&"a".repeat(63)).is_ok()); // 63-char maximum
+    }
+
+    #[test]
+    fn validate_operator_slug_rejects_short_or_long() {
+        assert!(validate_operator_slug("").is_err());
+        assert!(validate_operator_slug("a").is_err());
+        assert!(validate_operator_slug(&"a".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn validate_operator_slug_rejects_path_traversal_and_url_injection() {
+        // The whole point of the check: refuse anything the URL parser
+        // could interpret as path traversal, query injection, or
+        // request smuggling. Manual byte check, regex-equivalent.
+        assert!(validate_operator_slug("../infrastructure").is_err());
+        assert!(validate_operator_slug("acme/keys").is_err());
+        assert!(validate_operator_slug("acme?x=y").is_err());
+        assert!(validate_operator_slug("acme#frag").is_err());
+        assert!(validate_operator_slug("acme%20").is_err());
+        assert!(validate_operator_slug("acme\r\nX-Header: evil").is_err());
+        assert!(validate_operator_slug("AcMe").is_err());
+        assert!(validate_operator_slug("acme.prizes").is_err());
+        assert!(validate_operator_slug("acme_prizes").is_err());
+    }
+
+    #[test]
+    fn validate_operator_slug_rejects_leading_or_trailing_hyphen() {
+        assert!(validate_operator_slug("-acme").is_err());
+        assert!(validate_operator_slug("acme-").is_err());
+        assert!(validate_operator_slug("-").is_err());
+    }
+
+    // ── --wallop-base-url validation ───────────────────────────────────
+
+    #[test]
+    fn validate_wallop_base_url_accepts_https() {
+        assert!(validate_wallop_base_url("https://wallop.example.com").is_ok());
+        assert!(validate_wallop_base_url("HTTPS://CASE-INSENSITIVE.EXAMPLE.COM").is_ok());
+        assert!(validate_wallop_base_url("https://wallop.example.com/").is_ok());
+    }
+
+    #[test]
+    fn validate_wallop_base_url_accepts_http_localhost_for_dev() {
+        assert!(validate_wallop_base_url("http://localhost").is_ok());
+        assert!(validate_wallop_base_url("http://localhost:4000").is_ok());
+        assert!(validate_wallop_base_url("http://127.0.0.1").is_ok());
+        assert!(validate_wallop_base_url("http://127.0.0.1:4000").is_ok());
+        assert!(validate_wallop_base_url("http://[::1]").is_ok());
+    }
+
+    #[test]
+    fn validate_wallop_base_url_rejects_http_for_non_loopback() {
+        // Coffee-shop MITM substitution: the whole point of attestable
+        // mode is the same-origin assertion. http:// for a public host
+        // collapses the trust model.
+        assert!(validate_wallop_base_url("http://wallop.example.com").is_err());
+        assert!(validate_wallop_base_url("http://10.0.0.1").is_err());
+        assert!(validate_wallop_base_url("http://192.168.1.1").is_err());
+    }
+
+    #[test]
+    fn validate_wallop_base_url_rejects_unknown_schemes() {
+        assert!(validate_wallop_base_url("file:///etc/passwd").is_err());
+        assert!(validate_wallop_base_url("ftp://wallop.example.com").is_err());
+        assert!(validate_wallop_base_url("wallop.example.com").is_err()); // no scheme
+        assert!(validate_wallop_base_url("").is_err());
+    }
 }
