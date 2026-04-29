@@ -463,6 +463,12 @@ fn render_detail_lines(status: &StepStatus, detail: &Option<StepDetail>, lines: 
                     .style(Style::default().fg(Color::Red)),
             ));
         }
+        Some(StepDetail::ResolutionFailure { class, kind }) => {
+            lines.push(Line::from(
+                Span::from(format!("{indent}{} key: {}", class, kind.message()))
+                    .style(Style::default().fg(Color::Red)),
+            ));
+        }
         None => {
             // Show the reason from Fail status in dim
             if let StepStatus::Fail(reason) = status {

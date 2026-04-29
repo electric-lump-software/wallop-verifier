@@ -176,9 +176,18 @@ pub(crate) fn run_catalog(catalog: &Catalog) -> CatalogReport {
     // actual entry-hash comparisons happen at LockReceiptEntryHash and
     // ExecReceiptEntryHash. Requiring EntryHash to fire as a first-failure is
     // structurally impossible.
+    //
+    // TemporalBinding is also excluded: the selftest runs `verify_bundle`,
+    // which uses `BundleEmbeddedResolver` in `VerifierMode::SelfConsistencyOnly`.
+    // Under that mode the temporal-binding step always returns
+    // `StepStatus::Skip` (the comparison is vacuous against a bundle-
+    // self-attesting trust root). Triggering a `TemporalBinding` fail
+    // requires a non-bundle resolver, which the catalog runner cannot
+    // construct from the catalog JSON. Coverage of this step lives in
+    // `verify_steps`'s unit tests, not the selftest catalog.
     let coverage_complete = StepName::all()
         .iter()
-        .filter(|s| **s != StepName::EntryHash)
+        .filter(|s| **s != StepName::EntryHash && **s != StepName::TemporalBinding)
         .all(|s| covered.contains(s));
 
     CatalogReport {

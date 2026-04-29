@@ -5,7 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.14.0] - unreleased
+## [0.15.0] - unreleased
+
+### Added — `StepName::TemporalBinding`
+
+A new 13th verification step asserting `resolved.inserted_at <= receipt.binding_timestamp` per receipt class (spec §4.2.4):
+
+- operator key vs `lock.locked_at`
+- infrastructure key vs `execution.executed_at`
+
+Closes the last "no holes" gap on the verifier protocol surface. Producer side (wallop_core 0.18.0) had been enforcing the rule via a CHECK constraint and a sign-time keyring-presence assertion; the verifier-side carrier (`InsertedAt::At` / `Sentinel`) shipped in 0.13.0; the tier-2 `EndpointResolver` (0.14.0) populates the carrier with real `At(_)` data from the wallop endpoints. This release wires up the comparison.
+
+**Trust scope.** This step asserts the binding *given a trusted resolver*. A hostile tier-2 endpoint that lies about `inserted_at` in the earlier direction (e.g. backdating to any time at or before the receipt's binding timestamp, including year-0001 timestamps that aren't byte-equal to the legacy sentinel literal) can bypass the check; only tier-1 pinning closes that gap. The step's strength is bounded by the resolver's trust root, not by the step itself.
+
+The asymmetry matters: a hostile endpoint that lies in the *later* direction (claims a key was inserted *after* it actually was) is caught by the comparison. The vulnerability is one-directional, and tier-1 attributable mode is the existing answer.
+
+Step semantics:
+
+- `Pass` — `inserted_at <= binding_timestamp` for every resolved class.
+- `Fail` — at least one class violated the binding; the message names which class, both timestamps, and that the signature is otherwise cryptographically valid ("key was not live at signing time").
+- `Skip` — either no key was resolved (signature step already failed), or the resolver is `BundleEmbeddedResolver` running in `VerifierMode::SelfConsistencyOnly` (the comparison is vacuous against a bundle-self-attesting trust root).
+
+The step is appended to `StepName::all()` (preserves ordinal stability for external consumers; same rule used when `BundleShape` was added). A new unit test pins the step ordering as a snapshot — appending is non-breaking, reordering or inserting mid-list is a v2.0.0 change.
+
+The selftest catalog cannot trigger a `TemporalBinding` fail because it runs against `BundleEmbeddedResolver` in self-consistency mode (where the step skips). Coverage of this step lives in the verifier's unit tests, not the selftest catalog. The catalog's coverage check excludes `TemporalBinding` for that reason — same shape as the existing `EntryHash` exclusion.
+
+### Added — resolver call-site filter
+
+After every successful `KeyResolver::resolve`, the verification pipeline now refuses two classes of resolver result before the resolved key reaches signature verification:
+
+1. `InsertedAt::Sentinel` paired with any `VerifierMode` other than `SelfConsistencyOnly`. `BundleEmbeddedResolver` is the only intended emitter; receiving it from a tier-2 / tier-1 resolver is a protocol violation per spec §4.2.4.
+2. `InsertedAt::At(timestamp)` whose year-prefix is `0001`. The pre-0.13.0 magic-string sentinel was `"0001-01-01T00:00:00.000000Z"`; rejecting only that exact literal would let a hostile tier-2 endpoint backdate to year-0001 with a one-microsecond perturbation (e.g. `"0001-01-01T00:00:00.000001Z"`) and trivially pass any `<=` temporal-binding comparison. Reject the entire sentinel-year prefix so any year-0001 timestamp surfaces as `LegacySentinelRejected` rather than silently disabling the binding.
+
+Both rejections drop the resolved key, surfacing as a signature-step failure with a `ResolutionFailure` step detail naming the rejection kind (see below) — and consequently a `TemporalBinding` skip for "no resolved key from previous step."
+
+### Added — `ResolutionFailure` step detail (PAM-1085)
+
+The signature steps (`LockSignature` / `ExecSignature`) now distinguish resolver failures from generic signature failures. Previously every resolver failure (`KeyNotFound`, `Unreachable`, `MalformedResponse`, `InconsistentRow`, etc.) collapsed to `"Ed25519 signature invalid"`. Now they surface a typed `StepDetail::ResolutionFailure { class, kind }` with seven distinct variants:
+
+- `Unreachable` — resolver could not reach its trust root.
+- `KeyNotFound` — trust root does not list the requested `key_id`.
+- `PinMismatch` — live keyring contradicts pinned reference (tier-1 only).
+- `MalformedResponse` — trust root response did not parse.
+- `InconsistentRow` — keyring row's `key_id` does not hash to its `public_key`.
+- `SentinelRejected` — resolver returned `Sentinel` under non-self-consistency mode (protocol violation).
+- `LegacySentinelRejected` — resolver returned the legacy `0001-01-01` sentinel literal in `At(_)`.
+
+A signature failure with no resolution failure recorded (resolver succeeded but the bytes don't verify) keeps the existing `"Ed25519 signature invalid"` message. CLI and TUI output render the `ResolutionFailure` distinctly.
+
+### Public API additions
+
+- `StepName::TemporalBinding` — new variant, appended.
+- `StepDetail::ResolutionFailure { class, kind }` — new variant on the existing `StepDetail` enum.
+- `ResolutionFailureKind` — new public enum (closed-set tag for the failure variant).
+
+All additive; no breaking changes for downstream consumers that pattern-match exhaustively on the existing variants (`StepDetail` is already a closed set, so adding a variant is a minor bump under our pre-1.0 conventions).
+
+## [0.14.0] - 2026-04-29
 
 ### Added — `EndpointResolver` (tier-2 attestable mode)
 

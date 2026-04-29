@@ -381,6 +381,11 @@ fn get_target_hex_for_step(session: &VerificationSession, step_idx: usize) -> St
                     // Show expected (the correct value) truncated to 32 chars
                     expected.chars().take(32).collect()
                 }
+                Some(StepDetail::ResolutionFailure { .. }) => {
+                    // Resolution failures don't carry a hex digest;
+                    // the kind is rendered elsewhere.
+                    String::new()
+                }
                 None => {
                     // For passing steps, generate a plausible-looking hex string
                     // Use a deterministic approach based on step index

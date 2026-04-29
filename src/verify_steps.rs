@@ -1,5 +1,5 @@
 use crate::bundle::ProofBundle;
-use crate::key_resolver::{BundleEmbeddedResolver, KeyClass, KeyResolver};
+use crate::key_resolver::{BundleEmbeddedResolver, InsertedAt, KeyClass, KeyResolver, ResolvedKey};
 use crate::protocol::crypto;
 use crate::protocol::receipts::{
     ParsedExecutionReceipt, ParsedLockReceipt, lock_receipt_hash, parse_execution_receipt,
@@ -54,6 +54,28 @@ pub enum StepName {
     /// not broken; in pipeline execution order, this step runs FIRST and
     /// gates everything else.
     BundleShape,
+    /// Temporal binding — every signed artefact is bound to the moment
+    /// the signing key first appeared in the keyring (spec §4.2.4).
+    /// After signature verification has resolved a key, this step
+    /// asserts `resolved.inserted_at <= receipt.binding_timestamp`
+    /// per receipt class:
+    /// - operator key vs `lock.locked_at`
+    /// - infrastructure key vs `execution.executed_at`
+    ///
+    /// Transparency-anchor binding is deferred to 1.x.
+    ///
+    /// Failure is terminal and surfaces a binding violation on a
+    /// cryptographically-valid signature: the signature step passes
+    /// (the key is the right key for its `key_id`, the signature is
+    /// valid bytes-over-pk), but the key was not live when the
+    /// receipt was signed.
+    ///
+    /// **Trust scope.** This step asserts the binding *given a
+    /// trusted resolver*. A hostile tier-2 endpoint that lies about
+    /// `inserted_at` in the earlier direction can bypass this check;
+    /// only tier-1 pinning closes that. The step's strength is
+    /// bounded by the resolver's trust root, not by the step itself.
+    TemporalBinding,
 }
 
 impl StepName {
@@ -73,6 +95,7 @@ impl StepName {
             StepName::ReceiptFieldConsistency,
             StepName::WeatherObservationWindow,
             StepName::BundleShape,
+            StepName::TemporalBinding,
         ]
     }
 }
@@ -92,6 +115,7 @@ impl fmt::Display for StepName {
             StepName::ReceiptFieldConsistency => "Receipt field consistency",
             StepName::WeatherObservationWindow => "Weather observation window",
             StepName::BundleShape => "Bundle shape",
+            StepName::TemporalBinding => "Temporal binding",
         };
         f.write_str(s)
     }
@@ -106,7 +130,59 @@ pub enum StepStatus {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StepDetail {
-    HexMismatch { expected: String, computed: String },
+    HexMismatch {
+        expected: String,
+        computed: String,
+    },
+    /// Resolver-side failure surfaced on a downstream step
+    /// (typically `LockSignature` / `ExecSignature`). Distinguishes
+    /// `Unreachable` / `KeyNotFound` / `PinMismatch` /
+    /// `MalformedResponse` / `InconsistentRow` / `SentinelRejected` /
+    /// `LegacySentinelRejected` from the generic "Ed25519 signature
+    /// invalid" message — without this, every resolver failure
+    /// collapsed to the same opaque outcome.
+    ResolutionFailure {
+        class: KeyClass,
+        kind: ResolutionFailureKind,
+    },
+}
+
+/// Closed-set tag for a `ResolutionFailure` in a `StepDetail`. Wider
+/// than `key_resolver::ResolutionError` because the verifier can
+/// reject a syntactically-successful resolver result at the
+/// call-site filter (Sentinel under non-self-consistency, or the
+/// legacy sentinel string in `At(_)`).
+///
+/// Deliberately not `Copy` so a future variant carrying owned data
+/// (e.g. `Unreachable { url }` for tier-2 diagnostics) doesn't break
+/// every call site at once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolutionFailureKind {
+    /// The resolver could not reach its trust root (DNS, connection,
+    /// timeout). Carried verbatim from `ResolutionError::Unreachable`.
+    Unreachable,
+    /// The trust root responded but did not list the requested
+    /// `key_id`. Verbatim from `ResolutionError::KeyNotFound`.
+    KeyNotFound,
+    /// The trust root's response contradicted a pinned reference
+    /// (tier-1 only). Verbatim from `ResolutionError::PinMismatch`.
+    PinMismatch,
+    /// The trust root's response did not parse as a valid keyring
+    /// document. Verbatim from `ResolutionError::MalformedResponse`.
+    MalformedResponse,
+    /// A keyring row's `public_key_hex` did not hash to its claimed
+    /// `key_id`. Verbatim from `ResolutionError::InconsistentRow`.
+    InconsistentRow,
+    /// The resolver returned `InsertedAt::Sentinel` under a
+    /// non-self-consistency mode. `BundleEmbeddedResolver` is the
+    /// only intended emitter; receiving this from a tier-2 / tier-1
+    /// resolver is itself a protocol violation per spec §4.2.4.
+    SentinelRejected,
+    /// The resolver returned `InsertedAt::At` with the legacy
+    /// sentinel literal `"0001-01-01T00:00:00.000000Z"`. Refused
+    /// belt-and-braces — that string would silently pass any `<=`
+    /// temporal-binding comparison.
+    LegacySentinelRejected,
 }
 
 #[derive(Debug, Clone)]
@@ -233,25 +309,25 @@ pub fn verify_bundle_with<R: KeyResolver>(
     // Parse failure is captured by `BundleShape` (which runs at the end of
     // the pipeline); when it occurs here, signature steps will fail too
     // because `resolver.resolve` cannot succeed without a key_id.
-    let lock_signing_key_id = parse_lock_receipt(&bundle.lock_receipt.payload_jcs)
-        .ok()
-        .map(|p| match p {
-            ParsedLockReceipt::V4(r) => r.signing_key_id,
-            ParsedLockReceipt::V5(r) => r.signing_key_id,
-        });
-    let exec_signing_key_id = parse_execution_receipt(&bundle.execution_receipt.payload_jcs)
-        .ok()
-        .and_then(|p| match p {
+    let (lock_signing_key_id, lock_locked_at) =
+        match parse_lock_receipt(&bundle.lock_receipt.payload_jcs).ok() {
+            Some(ParsedLockReceipt::V4(r)) => (Some(r.signing_key_id), Some(r.locked_at)),
+            Some(ParsedLockReceipt::V5(r)) => (Some(r.signing_key_id), Some(r.locked_at)),
+            None => (None, None),
+        };
+    let (exec_signing_key_id, exec_executed_at) =
+        match parse_execution_receipt(&bundle.execution_receipt.payload_jcs).ok() {
             // exec v2 carries no signing_key_id on the signed payload.
             // The pipeline below derives a synthetic key_id by hashing
             // the inline pubkey, so every resolver call carries a real
             // key_id; tier-2 / tier-1 resolvers will not find it in
             // their keyring and return `KeyNotFound` — the correct
             // outcome (exec v2 has no out-of-band identity).
-            ParsedExecutionReceipt::V2(_) => None,
-            ParsedExecutionReceipt::V3(r) => Some(r.signing_key_id),
-            ParsedExecutionReceipt::V4(r) => Some(r.signing_key_id),
-        });
+            Some(ParsedExecutionReceipt::V2(r)) => (None, Some(r.executed_at)),
+            Some(ParsedExecutionReceipt::V3(r)) => (Some(r.signing_key_id), Some(r.executed_at)),
+            Some(ParsedExecutionReceipt::V4(r)) => (Some(r.signing_key_id), Some(r.executed_at)),
+            None => (None, None),
+        };
 
     // Synthesise the exec key_id for v2 bundles: hash the inline pubkey.
     // This keeps every resolver call honest — the resolver receives a
@@ -274,18 +350,31 @@ pub fn verify_bundle_with<R: KeyResolver>(
     // pass — the signature would verify against pk_Y. This is the
     // verifier-side mirror of the producer's keyring-row consistency
     // check (spec §4.2.4).
-    let op_resolved = lock_signing_key_id.as_deref().and_then(|kid| {
-        resolver
-            .resolve(kid, KeyClass::Operator)
-            .ok()
-            .filter(|r| crypto::key_id(&r.public_key) == kid)
-    });
-    let infra_resolved = exec_key_id_for_resolve.as_deref().and_then(|kid| {
-        resolver
-            .resolve(kid, KeyClass::Infrastructure)
-            .ok()
-            .filter(|r| crypto::key_id(&r.public_key) == kid)
-    });
+    // Resolve each class. Failures surface in two places:
+    //   1. The signature step (LockSignature / ExecSignature) reports
+    //      Fail with a `ResolutionFailure` detail naming the kind, so
+    //      a `PinMismatch` / `Unreachable` is distinguishable from
+    //      "Ed25519 signature invalid" in the report.
+    //   2. The temporal-binding step skips with "no resolved key from
+    //      previous step" because there's nothing to compare.
+    let (op_resolved, op_resolution_err) = match resolve_with_filter(
+        resolver,
+        lock_signing_key_id.as_deref(),
+        KeyClass::Operator,
+        mode,
+    ) {
+        Ok(r) => (Some(r), None),
+        Err(k) => (None, Some(k)),
+    };
+    let (infra_resolved, infra_resolution_err) = match resolve_with_filter(
+        resolver,
+        exec_key_id_for_resolve.as_deref(),
+        KeyClass::Infrastructure,
+        mode,
+    ) {
+        Ok(r) => (Some(r), None),
+        Err(k) => (None, Some(k)),
+    };
 
     let op_pk = op_resolved.as_ref().map(|r| r.public_key);
     let infra_pk = infra_resolved.as_ref().map(|r| r.public_key);
@@ -323,14 +412,12 @@ pub fn verify_bundle_with<R: KeyResolver>(
         }
         _ => false,
     };
+    let (lock_sig_status, lock_sig_detail) =
+        signature_step_outcome(step2_pass, op_resolution_err.clone(), KeyClass::Operator);
     steps.push(StepResult {
         name: StepName::LockSignature,
-        status: if step2_pass {
-            StepStatus::Pass
-        } else {
-            StepStatus::Fail("Ed25519 signature invalid".into())
-        },
-        detail: None,
+        status: lock_sig_status,
+        detail: lock_sig_detail,
     });
 
     // === Step 3: Exec receipt signature ===
@@ -343,14 +430,15 @@ pub fn verify_bundle_with<R: KeyResolver>(
         }
         _ => false,
     };
+    let (exec_sig_status, exec_sig_detail) = signature_step_outcome(
+        step3_pass,
+        infra_resolution_err.clone(),
+        KeyClass::Infrastructure,
+    );
     steps.push(StepResult {
         name: StepName::ExecSignature,
-        status: if step3_pass {
-            StepStatus::Pass
-        } else {
-            StepStatus::Fail("Ed25519 signature invalid".into())
-        },
-        detail: None,
+        status: exec_sig_status,
+        detail: exec_sig_detail,
     });
 
     // === Step 4: Receipt linkage ===
@@ -636,6 +724,32 @@ pub fn verify_bundle_with<R: KeyResolver>(
     // resilient (they Skip on dependency failure or use unwrap_or_default).
     steps.push(check_bundle_shape(bundle));
 
+    // === Step 13: Temporal binding ===
+    //
+    // After signature verification has resolved a key, assert that the
+    // key was live when the receipt was signed:
+    //   operator key:        resolved.inserted_at <= lock.locked_at
+    //   infrastructure key:  resolved.inserted_at <= execution.executed_at
+    //
+    // No verifier-side skew tolerance per spec §4.2.4 — both timestamps
+    // are operator-produced and committed before the verifier sees them.
+    // Failure surfaces a binding violation on a cryptographically-valid
+    // signature: the signature step passed, but the key was not yet
+    // live when the receipt was signed.
+    //
+    // Skipped when there is no resolved key (signature step already
+    // failed for an unrelated reason), and also skipped when the
+    // resolver is `BundleEmbeddedResolver` running in
+    // `VerifierMode::SelfConsistencyOnly` — the comparison is vacuous
+    // there because the bundle is self-attesting (the trust root has
+    // no out-of-band first-existence timestamp to compare against).
+    steps.push(check_temporal_binding(
+        op_resolved.as_ref(),
+        infra_resolved.as_ref(),
+        lock_locked_at.as_deref(),
+        exec_executed_at.as_deref(),
+    ));
+
     VerificationReport {
         steps,
         operator_key_id,
@@ -656,6 +770,164 @@ pub fn verify_bundle_with<R: KeyResolver>(
 /// A bundle that passes this step is well-shaped per spec §4.2.1: closed
 /// field set on receipts, recognised `schema_version`, pinned algorithm
 /// tags, charset-conforming `weather_station`, canonical signed timestamps.
+/// Resolver call-site filter (spec §4.2.4): defines when a resolved
+/// key's `inserted_at` is permitted to flow into the verification
+/// pipeline.
+///
+/// - `Sentinel` is permitted **only** under `VerifierMode::SelfConsistencyOnly`.
+///   `BundleEmbeddedResolver` is the only intended emitter; receiving
+///   it from any other mode is a resolver-contract violation. Drop the
+///   resolved key here so the signature step fails terminally rather
+///   than letting `Sentinel` leak into the temporal-binding comparison.
+/// - `At(timestamp)` is permitted unless the timestamp falls in the
+///   sentinel year `0001`. The pre-0.13.0 magic-string sentinel was
+///   `"0001-01-01T00:00:00.000000Z"`; rejecting only that exact literal
+///   would let a hostile tier-2 endpoint backdate to year-0001 with a
+///   one-microsecond perturbation (e.g.
+///   `"0001-01-01T00:00:00.000001Z"`) and trivially pass any `<=`
+///   comparison. Reject the entire sentinel-year prefix so any
+///   year-0001 timestamp surfaces as `LegacySentinelRejected` rather
+///   than silently disabling temporal binding.
+///
+/// Returns `Ok(())` if the resolved key may be used; `Err(kind)` to
+/// drop it (which surfaces as a signature-step failure downstream
+/// with the kind in `StepDetail`, and a temporal-binding skip).
+fn accept_inserted_at_for_mode(
+    inserted_at: &InsertedAt,
+    mode: VerifierMode,
+) -> Result<(), ResolutionFailureKind> {
+    match inserted_at {
+        InsertedAt::Sentinel => {
+            if matches!(mode, VerifierMode::SelfConsistencyOnly) {
+                Ok(())
+            } else {
+                Err(ResolutionFailureKind::SentinelRejected)
+            }
+        }
+        InsertedAt::At(ts) => {
+            if is_sentinel_year_timestamp(ts) {
+                Err(ResolutionFailureKind::LegacySentinelRejected)
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Refuse any timestamp whose year-prefix is the sentinel year `0001`.
+/// Matches the canonical RFC 3339 form (year occupies bytes 0..4 in
+/// `YYYY-MM-DDTHH:MM:SS.ffffffZ`); a non-canonical timestamp slips
+/// through here but `chrono_parse_canonical` rejects it later in the
+/// step. Catches the perturbation surface a byte-equal check on the
+/// pre-0.13.0 legacy literal misses — see `accept_inserted_at_for_mode`'s
+/// doc for the threat model.
+fn is_sentinel_year_timestamp(ts: &str) -> bool {
+    ts.starts_with("0001-")
+}
+
+/// Resolve one key class, applying the keyring-row consistency check
+/// (`crypto::key_id(resolved.public_key) == requested_key_id`) and the
+/// `inserted_at` call-site filter. Captures the failure kind so the
+/// downstream signature step can surface it as a `ResolutionFailure`
+/// step detail rather than collapsing every failure into the generic
+/// "Ed25519 signature invalid."
+///
+/// Returns `Ok(ResolvedKey)` for a usable resolution, `Err(kind)`
+/// otherwise. `Err` cases:
+///
+/// - No `key_id` to look up (`requested_key_id` is `None`) → treated
+///   as `KeyNotFound`. This happens when the receipt parse failed,
+///   which `BundleShape` will already have caught — the verifier
+///   reports both in the same run.
+/// - `resolver.resolve` returned an error → the variant maps directly.
+/// - Returned `public_key`'s key_id does not match the requested one
+///   → `InconsistentRow` (the verifier-side mirror of the producer's
+///   keyring-row consistency check; spec §4.2.4).
+/// - Returned `inserted_at` was rejected by the call-site filter →
+///   the corresponding `Sentinel` / `LegacySentinel` rejection kind.
+fn resolve_with_filter<R: KeyResolver>(
+    resolver: &R,
+    requested_key_id: Option<&str>,
+    class: KeyClass,
+    mode: VerifierMode,
+) -> Result<ResolvedKey, ResolutionFailureKind> {
+    let kid = requested_key_id.ok_or(ResolutionFailureKind::KeyNotFound)?;
+    let resolved = resolver
+        .resolve(kid, class)
+        .map_err(map_resolution_error_kind)?;
+    if crypto::key_id(&resolved.public_key) != kid {
+        return Err(ResolutionFailureKind::InconsistentRow);
+    }
+    accept_inserted_at_for_mode(&resolved.inserted_at, mode)?;
+    Ok(resolved)
+}
+
+fn map_resolution_error_kind(err: crate::key_resolver::ResolutionError) -> ResolutionFailureKind {
+    use crate::key_resolver::ResolutionError;
+    match err {
+        ResolutionError::Unreachable => ResolutionFailureKind::Unreachable,
+        ResolutionError::KeyNotFound => ResolutionFailureKind::KeyNotFound,
+        ResolutionError::PinMismatch => ResolutionFailureKind::PinMismatch,
+        ResolutionError::MalformedResponse => ResolutionFailureKind::MalformedResponse,
+        ResolutionError::InconsistentRow => ResolutionFailureKind::InconsistentRow,
+    }
+}
+
+/// Compute the `(status, detail)` for a signature step (`LockSignature`
+/// or `ExecSignature`).
+///
+/// Three outcomes:
+/// - Signature passed: `(Pass, None)`.
+/// - Signature failed AND a resolution failure kind is known
+///   (resolver failed before signature verification could run, or
+///   the call-site filter dropped the resolved key): `(Fail(kind.message), Some(ResolutionFailure))`.
+/// - Signature failed with no known resolution failure (resolver
+///   succeeded but the bytes don't verify): `(Fail("Ed25519 signature invalid"), None)`.
+fn signature_step_outcome(
+    sig_pass: bool,
+    resolution_err: Option<ResolutionFailureKind>,
+    class: KeyClass,
+) -> (StepStatus, Option<StepDetail>) {
+    if sig_pass {
+        return (StepStatus::Pass, None);
+    }
+    match resolution_err {
+        Some(kind) => (
+            StepStatus::Fail(format!(
+                "{} key resolution failed: {}",
+                class,
+                kind.message()
+            )),
+            Some(StepDetail::ResolutionFailure { class, kind }),
+        ),
+        None => (StepStatus::Fail("Ed25519 signature invalid".into()), None),
+    }
+}
+
+impl ResolutionFailureKind {
+    /// Human-readable rendering for `StepStatus::Fail` messages.
+    /// Distinct strings per variant so a reader of the report can
+    /// tell which failure mode produced the rejection.
+    pub fn message(&self) -> &'static str {
+        match self {
+            ResolutionFailureKind::Unreachable => "resolver could not reach its trust root",
+            ResolutionFailureKind::KeyNotFound => "trust root does not list the requested key_id",
+            ResolutionFailureKind::PinMismatch => "live keyring contradicts pinned reference",
+            ResolutionFailureKind::MalformedResponse => "trust root response did not parse",
+            ResolutionFailureKind::InconsistentRow => {
+                "keyring row's key_id does not hash to its public_key"
+            }
+            ResolutionFailureKind::SentinelRejected => {
+                "resolver returned Sentinel inserted_at under a non-self-consistency mode \
+                 (protocol violation per spec §4.2.4)"
+            }
+            ResolutionFailureKind::LegacySentinelRejected => {
+                "resolver returned the legacy 0001-01-01 sentinel literal in inserted_at"
+            }
+        }
+    }
+}
+
 fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
     // Lock receipt — typed parse via dispatcher (deny_unknown_fields,
     // schema_version dispatch). V4 and V5 carry byte-identical field sets;
@@ -1025,6 +1297,164 @@ fn check_weather_observation_window(bundle: &ProofBundle) -> StepResult {
         name: StepName::WeatherObservationWindow,
         status: StepStatus::Pass,
         detail: None,
+    }
+}
+
+/// Step 13 — Temporal binding (spec §4.2.4).
+///
+/// Asserts `resolved.inserted_at <= receipt.binding_timestamp` per
+/// receipt class. Three exits per class — `Pass`, `Fail(comparison)`,
+/// `Fail(parse)` — and a fourth path that skips the whole step when
+/// no key resolved.
+///
+/// The resolver call-site filter (`accept_inserted_at_for_mode`) has
+/// already dropped `Sentinel`-from-non-self-consistency; by the time
+/// we get here, an `op_resolved`/`infra_resolved` of `Some` paired
+/// with `InsertedAt::Sentinel` can only mean self-consistency mode
+/// (where the comparison is vacuous and we skip), and an `At(_)` is
+/// guaranteed not to be the legacy sentinel literal. The
+/// destructuring below relies on those invariants.
+///
+/// **Trust scope.** This check asserts the binding *given a trusted
+/// resolver*. A hostile tier-2 endpoint that lies about `inserted_at`
+/// in the earlier direction can bypass it; only tier-1 pinning closes
+/// that gap. The step's strength is bounded by the resolver's trust
+/// root.
+fn check_temporal_binding(
+    op_resolved: Option<&ResolvedKey>,
+    infra_resolved: Option<&ResolvedKey>,
+    lock_locked_at: Option<&str>,
+    exec_executed_at: Option<&str>,
+) -> StepResult {
+    // No resolved keys at all — nothing to check, signature step has
+    // already failed for an unrelated reason.
+    if op_resolved.is_none() && infra_resolved.is_none() {
+        return StepResult {
+            name: StepName::TemporalBinding,
+            status: StepStatus::Skip("no resolved key from previous step".into()),
+            detail: None,
+        };
+    }
+
+    // Per-class checks. Either class returning Sentinel means
+    // self-consistency mode by the call-site filter's invariant — the
+    // comparison is vacuous there. We track that explicitly so a
+    // mixed bundle (e.g. one class resolved via a tier-2 path, the
+    // other via the bundle) reports honestly.
+    let mut any_evaluated = false;
+    let op_outcome = check_one_class(
+        op_resolved,
+        lock_locked_at,
+        "operator key",
+        "lock.locked_at",
+        &mut any_evaluated,
+    );
+    if let Err(reason) = op_outcome {
+        return StepResult {
+            name: StepName::TemporalBinding,
+            status: StepStatus::Fail(reason),
+            detail: None,
+        };
+    }
+    let infra_outcome = check_one_class(
+        infra_resolved,
+        exec_executed_at,
+        "infrastructure key",
+        "execution.executed_at",
+        &mut any_evaluated,
+    );
+    if let Err(reason) = infra_outcome {
+        return StepResult {
+            name: StepName::TemporalBinding,
+            status: StepStatus::Fail(reason),
+            detail: None,
+        };
+    }
+
+    if any_evaluated {
+        StepResult {
+            name: StepName::TemporalBinding,
+            status: StepStatus::Pass,
+            detail: None,
+        }
+    } else {
+        // Every resolved key was Sentinel — i.e. self-consistency
+        // mode end-to-end. The comparison is vacuous; surface it
+        // honestly as a Skip rather than a Pass that overstates the
+        // guarantee.
+        StepResult {
+            name: StepName::TemporalBinding,
+            status: StepStatus::Skip(
+                "self-consistency mode; binding check is vacuous against bundle-embedded keys"
+                    .into(),
+            ),
+            detail: None,
+        }
+    }
+}
+
+/// Per-class temporal-binding check. Returns `Ok(())` for pass-or-skip,
+/// `Err(reason)` for fail. Sets `any_evaluated` to `true` when an
+/// `At(_)` actually got compared, so the caller can distinguish "all
+/// classes were Sentinel-skipped" from "at least one class genuinely
+/// passed."
+///
+/// Three exits per class:
+/// - `Ok(())` — `Pass` (real comparison succeeded), or skip-equivalent
+///   (no resolved key, or `Sentinel`).
+/// - `Err(_)` — `Fail` from binding-comparison failure or from a
+///   timestamp-parse failure.
+fn check_one_class(
+    resolved: Option<&ResolvedKey>,
+    binding_timestamp: Option<&str>,
+    class_label: &str,
+    binding_label: &str,
+    any_evaluated: &mut bool,
+) -> Result<(), String> {
+    let resolved = match resolved {
+        Some(r) => r,
+        // No resolved key for this class — either the receipt didn't
+        // need one or the signature step failed. Skip this class
+        // silently; the overall step's "no resolved key" branch
+        // already reported when neither class resolved.
+        None => return Ok(()),
+    };
+
+    let resolved_ts_str = match &resolved.inserted_at {
+        InsertedAt::Sentinel => return Ok(()),
+        InsertedAt::At(ts) => ts,
+    };
+
+    let binding_str = match binding_timestamp {
+        Some(s) => s,
+        // BundleShape gates this — an unparseable receipt cannot
+        // reach here in a well-formed bundle. Defence-in-depth: if
+        // somehow we do reach here without a binding timestamp, fail
+        // loudly rather than silently skipping.
+        None => {
+            return Err(format!(
+                "{class_label}: receipt is missing {binding_label}; \
+                 BundleShape should already have rejected this bundle"
+            ));
+        }
+    };
+
+    let resolved_ts = chrono_parse_canonical(resolved_ts_str).map_err(|e| {
+        format!("{class_label}: resolver-side inserted_at ({resolved_ts_str}) is malformed: {e}")
+    })?;
+    let binding_ts = chrono_parse_canonical(binding_str).map_err(|e| {
+        format!("{class_label}: receipt-side {binding_label} ({binding_str}) is malformed: {e}")
+    })?;
+
+    *any_evaluated = true;
+
+    if resolved_ts.timestamp() <= binding_ts.timestamp() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{class_label}: inserted_at {resolved_ts_str} is after {binding_label} \
+             {binding_str}; key was not live at signing time"
+        ))
     }
 }
 
@@ -1546,14 +1976,72 @@ mod tests {
         let all = StepName::all();
         assert_eq!(
             all.len(),
-            12,
-            "all() should return all 12 StepName variants"
+            13,
+            "all() should return all 13 StepName variants"
         );
         assert!(all.contains(&StepName::EntryHash));
         assert!(all.contains(&StepName::DrandBlsSignature));
         assert!(all.contains(&StepName::ReceiptFieldConsistency));
         assert!(all.contains(&StepName::WeatherObservationWindow));
         assert!(all.contains(&StepName::BundleShape));
+        assert!(all.contains(&StepName::TemporalBinding));
+    }
+
+    /// Ordinal-stability snapshot for `StepName::all()`. Step ordinals
+    /// are part of the verifier's wire contract — external consumers
+    /// pin them, vector files reference them, and the
+    /// `expected_catch_steps` machinery dispatches on them. Append-only
+    /// is the rule. Reordering or inserting mid-list is a v2.0.0
+    /// change. This test fails loud if anyone tries.
+    ///
+    /// The match arms below mirror every variant by Rust identifier,
+    /// not by `Display` string — so this test ALSO catches a rename
+    /// (e.g. `StepName::Foo → StepName::Bar` keeping the ordinal
+    /// stable would still break external string-pinned consumers; the
+    /// match arm would no longer compile until the test was updated).
+    #[test]
+    fn step_name_all_ordinal_snapshot() {
+        let actual: Vec<&'static str> = StepName::all()
+            .iter()
+            .map(|s| match s {
+                StepName::EntryHash => "EntryHash",
+                StepName::LockSignature => "LockSignature",
+                StepName::ExecSignature => "ExecSignature",
+                StepName::ReceiptLinkage => "ReceiptLinkage",
+                StepName::LockReceiptEntryHash => "LockReceiptEntryHash",
+                StepName::ExecReceiptEntryHash => "ExecReceiptEntryHash",
+                StepName::SeedRecomputation => "SeedRecomputation",
+                StepName::WinnerSelection => "WinnerSelection",
+                StepName::DrandBlsSignature => "DrandBlsSignature",
+                StepName::ReceiptFieldConsistency => "ReceiptFieldConsistency",
+                StepName::WeatherObservationWindow => "WeatherObservationWindow",
+                StepName::BundleShape => "BundleShape",
+                StepName::TemporalBinding => "TemporalBinding",
+            })
+            .collect();
+
+        let expected = vec![
+            "EntryHash",
+            "LockSignature",
+            "ExecSignature",
+            "ReceiptLinkage",
+            "LockReceiptEntryHash",
+            "ExecReceiptEntryHash",
+            "SeedRecomputation",
+            "WinnerSelection",
+            "DrandBlsSignature",
+            "ReceiptFieldConsistency",
+            "WeatherObservationWindow",
+            "BundleShape",
+            "TemporalBinding",
+        ];
+
+        assert_eq!(
+            actual, expected,
+            "StepName::all() ordering changed. Append-only is the rule; \
+             reordering or inserting mid-list is a v2.0.0 change. If you \
+             added a new variant, append it here too."
+        );
     }
 
     #[test]
@@ -1899,5 +2387,367 @@ mod tests {
         let report = verify_bundle_with(&bundle, &resolver, VerifierMode::SelfConsistencyOnly);
         assert!(!report.passed());
         assert_eq!(report.mode, VerifierMode::SelfConsistencyOnly);
+    }
+
+    // ── Temporal binding (spec §4.2.4 / PAM-1093) ─────────────────────
+
+    /// Resolver that returns a fixed pubkey + a caller-controlled
+    /// `inserted_at`. Lets each test pin both halves of the
+    /// temporal-binding comparison without conflating them with the
+    /// row-consistency check.
+    struct TimedResolver {
+        signing_key_id: String,
+        public_key: [u8; 32],
+        inserted_at: InsertedAt,
+    }
+
+    impl crate::key_resolver::KeyResolver for TimedResolver {
+        fn resolve(
+            &self,
+            key_id: &str,
+            key_class: KeyClass,
+        ) -> Result<crate::key_resolver::ResolvedKey, crate::key_resolver::ResolutionError>
+        {
+            if key_id != self.signing_key_id {
+                return Err(crate::key_resolver::ResolutionError::KeyNotFound);
+            }
+            Ok(crate::key_resolver::ResolvedKey {
+                public_key: self.public_key,
+                inserted_at: self.inserted_at.clone(),
+                key_class,
+            })
+        }
+    }
+
+    fn temporal_binding_step(report: &VerificationReport) -> &StepResult {
+        report
+            .steps
+            .iter()
+            .find(|s| s.name == StepName::TemporalBinding)
+            .expect("TemporalBinding step present in every report")
+    }
+
+    #[test]
+    fn temporal_binding_passes_when_inserted_at_predates_locked_at() {
+        let (json, pk_hex, signing_key_id) =
+            build_valid_v5_bundle(&three_uuid_entries(), Some("1013"), 2);
+        let bundle = ProofBundle::from_json(&json).unwrap();
+        let pk: [u8; 32] = hex::decode(&pk_hex).unwrap().try_into().unwrap();
+
+        // build_valid_v5_bundle's lock.locked_at = 2026-04-09T12:00:00.000000Z.
+        // Inserted_at well before that.
+        let resolver = TimedResolver {
+            signing_key_id,
+            public_key: pk,
+            inserted_at: InsertedAt::At("2026-04-01T00:00:00.000000Z".into()),
+        };
+        let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attestable);
+        let step = temporal_binding_step(&report);
+        assert!(
+            matches!(step.status, StepStatus::Pass),
+            "expected Pass, got {:?}",
+            step.status
+        );
+    }
+
+    #[test]
+    fn temporal_binding_passes_when_inserted_at_equals_locked_at() {
+        // Inclusive `<=`: equal timestamps pass. Spec says the key
+        // existed at or before the moment of signing.
+        let (json, pk_hex, signing_key_id) =
+            build_valid_v5_bundle(&three_uuid_entries(), Some("1013"), 2);
+        let bundle = ProofBundle::from_json(&json).unwrap();
+        let pk: [u8; 32] = hex::decode(&pk_hex).unwrap().try_into().unwrap();
+
+        let resolver = TimedResolver {
+            signing_key_id,
+            public_key: pk,
+            inserted_at: InsertedAt::At("2026-04-09T12:00:00.000000Z".into()),
+        };
+        let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attestable);
+        let step = temporal_binding_step(&report);
+        assert!(
+            matches!(step.status, StepStatus::Pass),
+            "expected Pass on equal timestamps, got {:?}",
+            step.status
+        );
+    }
+
+    #[test]
+    fn temporal_binding_fails_when_inserted_at_after_locked_at() {
+        let (json, pk_hex, signing_key_id) =
+            build_valid_v5_bundle(&three_uuid_entries(), Some("1013"), 2);
+        let bundle = ProofBundle::from_json(&json).unwrap();
+        let pk: [u8; 32] = hex::decode(&pk_hex).unwrap().try_into().unwrap();
+
+        // Inserted_at one second after locked_at — backdating attempt.
+        let resolver = TimedResolver {
+            signing_key_id,
+            public_key: pk,
+            inserted_at: InsertedAt::At("2026-04-09T12:00:01.000000Z".into()),
+        };
+        let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attestable);
+        let step = temporal_binding_step(&report);
+        assert!(
+            matches!(&step.status, StepStatus::Fail(reason) if reason.contains("not live at signing time")),
+            "expected backdating Fail, got {:?}",
+            step.status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn temporal_binding_skips_under_self_consistency_with_sentinel() {
+        // BundleEmbeddedResolver always returns Sentinel; under
+        // SelfConsistencyOnly the comparison is vacuous — the bundle
+        // is self-attesting and there's no out-of-band timestamp.
+        let (json, _) = valid_signed_bundle();
+        let bundle = ProofBundle::from_json(&json).unwrap();
+        let report = verify_bundle(&bundle);
+        let step = temporal_binding_step(&report);
+        assert!(
+            matches!(&step.status, StepStatus::Skip(reason) if reason.contains("self-consistency")),
+            "expected Skip under self-consistency, got {:?}",
+            step.status
+        );
+    }
+
+    #[test]
+    fn temporal_binding_skips_when_no_resolved_key() {
+        // v5 bundle + BundleEmbeddedResolver = both classes resolve
+        // to None (KeyNotFound, since the wrapper has no inline key).
+        // Temporal binding has nothing to compare; skip.
+        let (json, _, _) = build_valid_v5_bundle(&three_uuid_entries(), Some("1013"), 2);
+        let bundle = ProofBundle::from_json(&json).unwrap();
+        let report = verify_bundle(&bundle);
+        let step = temporal_binding_step(&report);
+        assert!(
+            matches!(&step.status, StepStatus::Skip(_)),
+            "expected Skip with no resolved key, got {:?}",
+            step.status
+        );
+    }
+
+    #[test]
+    fn resolver_callsite_drops_sentinel_under_attestable_mode() {
+        // A resolver returning Sentinel under non-self-consistency
+        // mode is itself a protocol violation. The call-site filter
+        // drops the resolved key; signature step fails downstream;
+        // temporal binding skips with "no resolved key."
+        let (json, pk_hex, signing_key_id) =
+            build_valid_v5_bundle(&three_uuid_entries(), Some("1013"), 2);
+        let bundle = ProofBundle::from_json(&json).unwrap();
+        let pk: [u8; 32] = hex::decode(&pk_hex).unwrap().try_into().unwrap();
+
+        let resolver = TimedResolver {
+            signing_key_id,
+            public_key: pk,
+            inserted_at: InsertedAt::Sentinel,
+        };
+        let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attestable);
+        assert!(
+            !report.passed(),
+            "Sentinel-from-non-self-consistency must reject"
+        );
+        let lock_sig = report
+            .steps
+            .iter()
+            .find(|s| s.name == StepName::LockSignature)
+            .unwrap();
+        assert!(
+            matches!(lock_sig.status, StepStatus::Fail(_)),
+            "lock signature step should fail when resolver Sentinel was rejected"
+        );
+    }
+
+    #[test]
+    fn resolver_callsite_drops_year_0001_perturbation_not_just_exact_legacy_literal() {
+        // Defence-in-depth: a hostile tier-2 endpoint emitting a
+        // year-0001 timestamp that isn't byte-equal to the pre-0.13.0
+        // legacy literal (e.g. one microsecond off, or a different
+        // sub-second / time component) MUST still reject. A byte-equal
+        // check against the literal alone would let any year-0001
+        // timestamp pass and trivially backdate the binding comparison.
+        let (json, pk_hex, signing_key_id) =
+            build_valid_v5_bundle(&three_uuid_entries(), Some("1013"), 2);
+        let bundle = ProofBundle::from_json(&json).unwrap();
+        let pk: [u8; 32] = hex::decode(&pk_hex).unwrap().try_into().unwrap();
+
+        // One microsecond off the legacy literal — same year-0001
+        // sentinel domain, different bytes.
+        let resolver = TimedResolver {
+            signing_key_id,
+            public_key: pk,
+            inserted_at: InsertedAt::At("0001-01-01T00:00:00.000001Z".into()),
+        };
+        let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attestable);
+
+        let lock_sig = report
+            .steps
+            .iter()
+            .find(|s| s.name == StepName::LockSignature)
+            .unwrap();
+        assert!(matches!(
+            lock_sig.detail,
+            Some(StepDetail::ResolutionFailure {
+                kind: ResolutionFailureKind::LegacySentinelRejected,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn resolver_callsite_drops_legacy_sentinel_string_in_at_variant() {
+        // Belt-and-braces (Colin Q5(b)): an upstream bug putting the
+        // legacy "0001-01-01..." string into At(_) would silently
+        // pass any <= comparison. The call-site filter refuses it.
+        let (json, pk_hex, signing_key_id) =
+            build_valid_v5_bundle(&three_uuid_entries(), Some("1013"), 2);
+        let bundle = ProofBundle::from_json(&json).unwrap();
+        let pk: [u8; 32] = hex::decode(&pk_hex).unwrap().try_into().unwrap();
+
+        let resolver = TimedResolver {
+            signing_key_id,
+            public_key: pk,
+            inserted_at: InsertedAt::At("0001-01-01T00:00:00.000000Z".into()),
+        };
+        let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attestable);
+        assert!(!report.passed());
+        let lock_sig = report
+            .steps
+            .iter()
+            .find(|s| s.name == StepName::LockSignature)
+            .unwrap();
+        assert!(matches!(lock_sig.status, StepStatus::Fail(_)));
+    }
+
+    // ── PAM-1085: ResolutionError surfacing in StepDetail ─────────────
+
+    #[test]
+    fn resolution_failure_surfaces_keynotfound_on_signature_step() {
+        let (json, _, _) = build_valid_v5_bundle(&three_uuid_entries(), Some("1013"), 2);
+        let bundle = ProofBundle::from_json(&json).unwrap();
+
+        // MockResolver with a different signing_key_id → KeyNotFound.
+        let resolver = MockResolver::new("not-the-right-kid", [0u8; 32]);
+        let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attestable);
+
+        let lock_sig = report
+            .steps
+            .iter()
+            .find(|s| s.name == StepName::LockSignature)
+            .unwrap();
+        assert!(matches!(
+            lock_sig.detail,
+            Some(StepDetail::ResolutionFailure {
+                class: KeyClass::Operator,
+                kind: ResolutionFailureKind::KeyNotFound,
+            })
+        ));
+        assert!(matches!(&lock_sig.status, StepStatus::Fail(reason)
+                if reason.contains("operator") && reason.contains("key_id")));
+    }
+
+    #[test]
+    fn resolution_failure_surfaces_sentinel_rejection_distinctly() {
+        let (json, pk_hex, signing_key_id) =
+            build_valid_v5_bundle(&three_uuid_entries(), Some("1013"), 2);
+        let bundle = ProofBundle::from_json(&json).unwrap();
+        let pk: [u8; 32] = hex::decode(&pk_hex).unwrap().try_into().unwrap();
+
+        let resolver = TimedResolver {
+            signing_key_id,
+            public_key: pk,
+            inserted_at: InsertedAt::Sentinel,
+        };
+        let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attestable);
+
+        let lock_sig = report
+            .steps
+            .iter()
+            .find(|s| s.name == StepName::LockSignature)
+            .unwrap();
+        assert!(matches!(
+            lock_sig.detail,
+            Some(StepDetail::ResolutionFailure {
+                kind: ResolutionFailureKind::SentinelRejected,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn resolution_failure_surfaces_legacy_sentinel_distinctly() {
+        let (json, pk_hex, signing_key_id) =
+            build_valid_v5_bundle(&three_uuid_entries(), Some("1013"), 2);
+        let bundle = ProofBundle::from_json(&json).unwrap();
+        let pk: [u8; 32] = hex::decode(&pk_hex).unwrap().try_into().unwrap();
+
+        let resolver = TimedResolver {
+            signing_key_id,
+            public_key: pk,
+            inserted_at: InsertedAt::At("0001-01-01T00:00:00.000000Z".into()),
+        };
+        let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attestable);
+
+        let lock_sig = report
+            .steps
+            .iter()
+            .find(|s| s.name == StepName::LockSignature)
+            .unwrap();
+        assert!(matches!(
+            lock_sig.detail,
+            Some(StepDetail::ResolutionFailure {
+                kind: ResolutionFailureKind::LegacySentinelRejected,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn signature_failure_without_resolution_error_keeps_old_message() {
+        // Tampered signature on a legacy v4-lock bundle: resolver
+        // succeeds (inline pk found), but the signature bytes don't
+        // verify. Should still report the generic message — no
+        // resolution failure to surface.
+        let (json, _) = valid_signed_bundle();
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        val["lock_receipt"]["signature_hex"] = serde_json::json!("ff".repeat(64));
+        let bundle = ProofBundle::from_json(&val.to_string()).unwrap();
+        let report = verify_bundle(&bundle);
+
+        let lock_sig = report
+            .steps
+            .iter()
+            .find(|s| s.name == StepName::LockSignature)
+            .unwrap();
+        assert!(
+            matches!(&lock_sig.status, StepStatus::Fail(msg) if msg == "Ed25519 signature invalid")
+        );
+        assert!(lock_sig.detail.is_none());
+    }
+
+    #[test]
+    fn temporal_binding_fails_on_malformed_resolver_timestamp() {
+        // Resolver hands back an inserted_at that doesn't match the
+        // canonical RFC 3339 form. Distinguished from a comparison
+        // failure in the error message.
+        let (json, pk_hex, signing_key_id) =
+            build_valid_v5_bundle(&three_uuid_entries(), Some("1013"), 2);
+        let bundle = ProofBundle::from_json(&json).unwrap();
+        let pk: [u8; 32] = hex::decode(&pk_hex).unwrap().try_into().unwrap();
+
+        let resolver = TimedResolver {
+            signing_key_id,
+            public_key: pk,
+            inserted_at: InsertedAt::At("2026-04-01T00:00:00Z".into()), // missing microseconds
+        };
+        let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attestable);
+        let step = temporal_binding_step(&report);
+        assert!(
+            matches!(&step.status, StepStatus::Fail(reason) if reason.contains("malformed")),
+            "expected malformed-timestamp Fail, got {:?}",
+            step.status
+        );
     }
 }
