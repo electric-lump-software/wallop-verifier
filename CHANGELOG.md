@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - unreleased
+
+### Added — tier-1 attributable mode (`PinnedResolver`)
+
+Closes the last "no holes" gap from the 0.15.0 release notes — the trust scope of `TemporalBinding` is no longer bounded by the resolver alone, because the resolver itself now anchors against compile-time-bundled wallop infrastructure public keys.
+
+- `wallop_verifier::anchors` — bundled trust anchor for tier-1 attributable verification. Holds the wallop production infrastructure public keys plus their `inserted_at` timestamps; sourced via `mix wallop.export_infra_anchor` against production. N=2 cadence per spec §4.2.4 (current + previous within a 90-day grace window). `revoked_at` is `None` for currently-active anchors.
+- `PinnedResolver` (binary-side) — wraps `EndpointResolver` and adds: pin envelope fetch + structural validation, JCS pre-image reconstruction, Ed25519 signature verification against the bundled (or override-supplied) anchor set with a `"wallop-pin-v1\n"` 14-byte domain separator, temporal-window check on the verifying anchor, freshness check (60s future-skew → `PinPublishedInFuture`), strict per-resolution equality between live `EndpointResolver` keys and pin keys (operator-class only), and direct anchor lookup for infrastructure-class signatures.
+- CLI flags: `--mode attributable` no longer hard-errors; `--pin-from-url <URL>` (required); `--infra-key-pin <JSON>` (repeatable, REPLACES the bundled set, never extends); `--no-stale-warn` opt-out for archival re-verification (advisory side of the freshness rule, currently passthrough — wired so future activation does not break the CLI surface).
+- Cross-language conformance: `vendor/wallop` submodule pinned at the wallop repo's keyring-pin-producer commit. Vector at `spec/vectors/pin/v1/valid.json` ships 1 valid + 5 negatives (preimage mutation, signature mutation, wrong key, domain-separator-omitted, reversed-input key sort) and is exercised by the new `pinned_resolver::tests` module.
+
+### Changed
+
+- `Cargo.toml` version bump 0.15.0 → 0.16.0.
+- Bundled vendor/wallop submodule pin advances to include the new pin vector. No existing vector content changes.
+
+### What this means for the proof page mode badge
+
+Tier-1 attributable verification is now *constructable* in the CLI. The proof-page WASM build does not yet support it (no HTTP fetch in WASM, no bundled anchor under the WASM feature flag) — that remains a 1.x fast-follow. The CLI is the canonical way for an auditor to obtain a "this was signed by wallop's infrastructure under a key whose fingerprint is compiled into the verifier you are running" guarantee today.
+
 ## [0.15.0] - unreleased
 
 ### Added — `StepName::TemporalBinding`

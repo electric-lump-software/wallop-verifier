@@ -8,6 +8,7 @@ use wallop_verifier::catalog::runner::ScenarioOutcome;
 use wallop_verifier::verify_steps::{StepStatus, VerifierMode, verify_bundle, verify_bundle_with};
 
 mod endpoint_resolver;
+mod pinned_resolver;
 use endpoint_resolver::EndpointResolver;
 
 #[cfg(feature = "tui")]
@@ -64,12 +65,42 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = ModeFlag::SelfConsistency)]
     mode: ModeFlag,
 
-    /// Wallop base URL used by `--mode attestable`. The resolver fetches
-    /// keys from `<URL>/operator/<slug>/keys` and `<URL>/infrastructure/keys`.
-    /// Required when `--mode attestable` is selected; ignored otherwise.
-    /// Example: `--wallop-base-url https://wallop.example.com`.
+    /// Wallop base URL used by `--mode attestable` and `--mode attributable`.
+    /// The resolver fetches keys from `<URL>/operator/<slug>/keys` and
+    /// `<URL>/infrastructure/keys`. Required for tier-2 / tier-1; ignored
+    /// otherwise. Example: `--wallop-base-url https://wallop.example.com`.
     #[arg(long, value_name = "URL")]
     wallop_base_url: Option<String>,
+
+    /// Operator-hosted (or wallop-hosted) URL of the signed keyring pin.
+    /// Required when `--mode attributable` is selected; ignored otherwise.
+    /// The verifier fetches the JSON envelope from this URL and verifies
+    /// its signature against the bundled trust anchor (or the override set
+    /// supplied via `--infra-key-pin`).
+    #[arg(long, value_name = "URL")]
+    pin_from_url: Option<String>,
+
+    /// Override the bundled wallop infrastructure trust anchor with a
+    /// caller-supplied anchor record (JSON). Repeatable. The override
+    /// REPLACES the bundled set; it does not extend it. Used for
+    /// historical re-verification beyond a yanked or unavailable
+    /// `wallop_verifier` crate version.
+    ///
+    /// Each value MUST be a complete anchor record:
+    /// `{"key_id":"...", "public_key_hex":"...", "inserted_at":"...", "revoked_at": null | "..."}`.
+    ///
+    /// Hex-only override is intentionally not accepted — the temporal-
+    /// binding check (spec §4.2.4) requires `inserted_at` and the
+    /// override path cannot bypass it.
+    #[arg(long, value_name = "JSON")]
+    infra_key_pin: Vec<String>,
+
+    /// Suppress the SHOULD-warn message when the pin's `published_at` is
+    /// more than 24 hours behind the verifier's clock. Useful for
+    /// archival re-verification of historical bundles where a stale pin
+    /// is expected.
+    #[arg(long)]
+    no_stale_warn: bool,
 }
 
 /// CLI surface for `--mode`. Distinct from `wallop_verifier::VerifierMode`
@@ -134,13 +165,40 @@ fn main() -> ExitCode {
         }
         (None, Some(path)) => match cli.mode {
             ModeFlag::Attributable => {
-                eprintln!("error: --mode attributable is not yet implemented in this release.");
-                eprintln!(
-                    "       The library `KeyResolver` trait and the tier-2 `attestable` \
-                     mode ship in this release. Operator-hosted `.well-known` pin \
-                     verification (tier-1, attributable) lands in a follow-up."
-                );
-                ExitCode::from(2)
+                let base_url = match cli.wallop_base_url.as_deref() {
+                    Some(url) => url.to_string(),
+                    None => {
+                        eprintln!("error: --mode attributable requires --wallop-base-url <URL>.");
+                        eprintln!(
+                            "       The verifier needs the live wallop instance to look up \
+                             operator keys (cross-checked against the signed pin)."
+                        );
+                        return ExitCode::from(2);
+                    }
+                };
+                if let Err(reason) = validate_wallop_base_url(&base_url) {
+                    eprintln!("error: --wallop-base-url is invalid: {reason}");
+                    return ExitCode::from(2);
+                }
+                let pin_url = match cli.pin_from_url.as_deref() {
+                    Some(url) => url.to_string(),
+                    None => {
+                        eprintln!("error: --mode attributable requires --pin-from-url <URL>.");
+                        eprintln!(
+                            "       The pin URL hosts the signed keyring envelope wallop's \
+                             infrastructure key has committed to. Verifier-side bundled \
+                             anchors verify the signature."
+                        );
+                        return ExitCode::from(2);
+                    }
+                };
+                run_verify_attributable(
+                    path,
+                    &base_url,
+                    &pin_url,
+                    &cli.infra_key_pin,
+                    cli.no_stale_warn,
+                )
             }
             ModeFlag::Attestable => {
                 let base_url = match cli.wallop_base_url.as_deref() {
@@ -522,6 +580,174 @@ fn run_verify_attestable(path: &str, base_url: &str) -> ExitCode {
         println!("  RESULT: FAIL ({} errors)", report.error_count());
         ExitCode::from(1)
     }
+}
+
+fn run_verify_attributable(
+    path: &str,
+    base_url: &str,
+    pin_url: &str,
+    infra_key_pin_overrides: &[String],
+    no_stale_warn: bool,
+) -> ExitCode {
+    use pinned_resolver::{AnchorRecord, PinError, PinnedResolver};
+    use wallop_verifier::anchors::ANCHORS as BUNDLED_ANCHORS;
+
+    let json = match path {
+        "-" => {
+            let mut buf = String::new();
+            if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+                eprintln!("error reading stdin: {e}");
+                return ExitCode::from(2);
+            }
+            buf
+        }
+        path => match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error reading {path}: {e}");
+                return ExitCode::from(2);
+            }
+        },
+    };
+
+    let bundle = match ProofBundle::from_json(&json) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let operator_slug = match operator_slug_from_lock(&bundle.lock_receipt.payload_jcs) {
+        Some(slug) => match validate_operator_slug(&slug) {
+            Ok(()) => slug,
+            Err(reason) => {
+                eprintln!("error: lock receipt's `operator_slug` is invalid: {reason}");
+                return ExitCode::from(2);
+            }
+        },
+        None => {
+            eprintln!("error: could not read `operator_slug` from the lock receipt payload.");
+            return ExitCode::from(2);
+        }
+    };
+
+    // Anchor set: bundled by default, override if --infra-key-pin given.
+    // The override REPLACES the bundled set per spec §4.2.4 — never extends.
+    let anchors: Vec<AnchorRecord> = if infra_key_pin_overrides.is_empty() {
+        BUNDLED_ANCHORS.iter().map(AnchorRecord::from).collect()
+    } else {
+        let mut parsed = Vec::with_capacity(infra_key_pin_overrides.len());
+        for (i, raw) in infra_key_pin_overrides.iter().enumerate() {
+            match parse_infra_key_pin_override(raw) {
+                Ok(record) => parsed.push(record),
+                Err(reason) => {
+                    eprintln!("error: --infra-key-pin #{} is invalid: {reason}", i + 1);
+                    eprintln!(
+                        "       Expected JSON: \
+                         {{\"key_id\":\"...\",\"public_key_hex\":\"...\",\
+                         \"inserted_at\":\"...\",\"revoked_at\":null|\"...\"}}"
+                    );
+                    return ExitCode::from(2);
+                }
+            }
+        }
+        parsed
+    };
+
+    let endpoint = EndpointResolver::new(base_url, operator_slug.clone());
+    let resolver = match PinnedResolver::fetch(pin_url, anchors, endpoint) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: pin verification failed: {e}");
+            match e {
+                PinError::Unreachable => {
+                    eprintln!("       Could not reach {pin_url}.");
+                }
+                PinError::PublishedInFuture => {
+                    eprintln!(
+                        "       The pin's published_at is more than 60s ahead of \
+                         this machine's clock. Check NTP on either side."
+                    );
+                }
+                PinError::AnchorNotFound => {
+                    eprintln!(
+                        "       No bundled or override anchor verifies this pin's \
+                         signature. If you're verifying a historical bundle whose \
+                         signing anchor has aged out of this crate version, supply \
+                         the historical anchor record via --infra-key-pin."
+                    );
+                }
+                PinError::SignatureInvalid(_) | PinError::SchemaMismatch(_) => {}
+            }
+            return ExitCode::from(1);
+        }
+    };
+
+    // Verifier obligation 5 (spec §4.2.4): the pin's operator_slug MUST
+    // match the bundle's. Cross-checked here at the CLI level, since
+    // PinnedResolver doesn't see the bundle.
+    if resolver.pin_operator_slug() != operator_slug {
+        eprintln!(
+            "error: pin commits to operator_slug {:?} but the bundle's lock receipt \
+             commits to {:?}.",
+            resolver.pin_operator_slug(),
+            operator_slug
+        );
+        return ExitCode::from(1);
+    }
+
+    // SHOULD-warn for stale pins (spec §4.2.4 freshness rule, advisory side).
+    // Implementation pending — current build does not emit a stale warning;
+    // the flag is wired so future activation does not break the CLI surface.
+    let _ = no_stale_warn;
+
+    let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attributable);
+    print_report(&bundle, &report, None);
+
+    if report.passed() {
+        println!("  RESULT: PASS");
+        ExitCode::SUCCESS
+    } else {
+        println!("  RESULT: FAIL ({} errors)", report.error_count());
+        ExitCode::from(1)
+    }
+}
+
+/// Parse a `--infra-key-pin` JSON value into a verifier-side
+/// `AnchorRecord`. Per spec §4.2.4 "Override carries a full record"
+/// the override MUST supply the full anchor schema; hex-only is
+/// rejected at the CLI surface.
+fn parse_infra_key_pin_override(raw: &str) -> Result<pinned_resolver::AnchorRecord, String> {
+    #[derive(serde::Deserialize)]
+    struct Wire {
+        key_id: String,
+        public_key_hex: String,
+        inserted_at: String,
+        #[serde(default)]
+        revoked_at: Option<String>,
+    }
+
+    let parsed: Wire = serde_json::from_str(raw).map_err(|e| format!("not JSON: {e}"))?;
+    let pk_bytes =
+        hex::decode(&parsed.public_key_hex).map_err(|e| format!("public_key_hex not hex: {e}"))?;
+    let public_key: [u8; 32] = pk_bytes
+        .try_into()
+        .map_err(|_| "public_key_hex must decode to 32 bytes".to_string())?;
+
+    if wallop_verifier::key_id(&public_key) != parsed.key_id {
+        return Err(format!(
+            "key_id {:?} does not hash from public_key_hex (overrides MUST be self-consistent)",
+            parsed.key_id
+        ));
+    }
+
+    Ok(pinned_resolver::AnchorRecord {
+        key_id: parsed.key_id,
+        public_key,
+        inserted_at: parsed.inserted_at,
+        revoked_at: parsed.revoked_at,
+    })
 }
 
 /// Extract `operator_slug` from a signed lock-receipt JCS payload.
