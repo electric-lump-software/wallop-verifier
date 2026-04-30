@@ -18,3 +18,7 @@ pub fn key_id(public_key: &[u8; 32]) -> String {
 #[cfg(test)]
 #[path = "crypto_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "key_rotation_tests.rs"]
+mod key_rotation_tests;
