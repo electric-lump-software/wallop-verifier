@@ -320,6 +320,19 @@
         "modifications": { "schema_version": "99" }
       },
       "expected_catch_steps": ["bundle_shape"]
+    },
+    {
+      "name": "lock_wrapper_pubkey_swapped_to_unknown",
+      "category": "key_resolution",
+      "description": "Bundle wrapper's operator_public_key_hex is swapped to a different valid Ed25519 public key while the lock receipt's signed signing_key_id is unchanged. The bundle-embedded resolver derives a key_id from the wrapper hex, finds it does not match the receipt's claimed signing_key_id, and surfaces the failure as a ResolutionFailure on the lock_signature step rather than collapsing to a generic Ed25519 verify failure. Exercises the resolver-error end-to-end path documented in spec §4.2.4 and ensures the diagnostic distinguishes 'key not found in trust root' from 'signature does not verify'.",
+      "severity": "critical",
+      "tamper": {
+        "kind": "field_op",
+        "op": "set_value",
+        "path": "lock_receipt.operator_public_key_hex",
+        "value": "ac2fadf21618e2239391105d9862145eb3ac48ed9fefe7fe96d744136da9e129"
+      },
+      "expected_catch_steps": ["lock_signature"]
     }
   ]
 }

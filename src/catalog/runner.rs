@@ -492,6 +492,79 @@ mod tests {
     }
 
     #[test]
+    fn resolver_failure_surfaces_resolution_failure_detail() {
+        // Mutating the bundle wrapper's operator public key while leaving
+        // the receipt's signed signing_key_id unchanged drives the bundle-
+        // embedded resolver into a `ResolutionFailure` outcome (the
+        // resolved row's pubkey hashes to a key_id that disagrees with
+        // the receipt's claimed key_id — `InconsistentRow`). The
+        // signature step MUST surface that as a `ResolutionFailure` step
+        // detail rather than collapsing to a generic Ed25519 verify
+        // failure. Closes the resolver-failure-path coverage gap.
+        let json = r#"{
+            "catalog_schema_version": "1",
+            "protocol_version": "1",
+            "defaults": { "entry_count": 3, "weather": "1013", "winner_count": 2 },
+            "test_keypairs": {},
+            "fixture_bundles": {},
+            "scenarios": [
+                {
+                    "name": "lock_wrapper_pubkey_swapped_to_unknown",
+                    "category": "key_resolution",
+                    "description": "wrapper pub swap forces a resolver failure",
+                    "severity": "critical",
+                    "tamper": {
+                        "kind": "field_op",
+                        "op": "set_value",
+                        "path": "lock_receipt.operator_public_key_hex",
+                        "value": "ac2fadf21618e2239391105d9862145eb3ac48ed9fefe7fe96d744136da9e129"
+                    },
+                    "expected_catch_steps": ["lock_signature"]
+                }
+            ]
+        }"#;
+
+        let (catalog_report, reports) = run_catalog_from_str_with_reports(json).unwrap();
+        assert_eq!(
+            catalog_report.passed, 1,
+            "scenario should catch at lock_signature"
+        );
+
+        let report = reports[0]
+            .as_ref()
+            .expect("scenario produced a verification report");
+
+        let lock_sig_step = report
+            .steps
+            .iter()
+            .find(|s| s.name == StepName::LockSignature)
+            .expect("lock_signature step is present");
+
+        match &lock_sig_step.detail {
+            Some(crate::verify_steps::StepDetail::ResolutionFailure { kind, .. }) => {
+                // Any ResolutionFailureKind variant satisfies the
+                // diagnostic-distinguishability intent — the step now
+                // distinguishes resolver-error from "Ed25519 signature
+                // invalid". The specific variant depends on which check
+                // the bundle-embedded resolver hits first; today this
+                // scenario surfaces InconsistentRow (resolved key's
+                // key_id disagrees with the receipt's claimed key_id).
+                assert!(
+                    matches!(
+                        kind,
+                        crate::verify_steps::ResolutionFailureKind::KeyNotFound
+                            | crate::verify_steps::ResolutionFailureKind::InconsistentRow
+                    ),
+                    "expected KeyNotFound or InconsistentRow, got {kind:?}"
+                );
+            }
+            other => {
+                panic!("expected lock_signature.detail = Some(ResolutionFailure), got {other:?}")
+            }
+        }
+    }
+
+    #[test]
     fn drand_only_scenario_runs() {
         let json = r#"{
             "catalog_schema_version": "1",
