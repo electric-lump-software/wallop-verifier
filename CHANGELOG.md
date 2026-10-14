@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.1] - unreleased
+
+### Added — make `--infra-key-pin` overrides visible
+
+`--infra-key-pin` replaces the trust anchors compiled into the binary, so a command copied from somewhere else (a proof page, a chat message) could swap whom the verifier trusts without saying so. Now it says so.
+
+- **Stderr notice.** Whenever at least one valid `--infra-key-pin` is in effect, the CLI prints a notice before verification runs: the built-in anchors are replaced, the run trusts only the N keys supplied (for execution receipts and the operator keyring pin), and a PASS shows every signature traces back to those keys, not that they are wallop's. The winner recomputation and drand signature checks don't depend on them. If the keys came from the instance being verified, the run is a consistency check, not attribution.
+- **Report lines.** `--mode attributable` reports gain a `Trust root` line: `infrastructure anchors built into this binary`, or `N infrastructure keys from --infra-key-pin (built-in anchors replaced)`. Under an override the RESULT line also ends `(trust root overridden: --infra-key-pin)`, since stderr is often discarded and RESULT is the line people quote. `--mode attestable` reports are unchanged.
+- **Stricter flag handling.** `--infra-key-pin` is rejected (exit 2) outside `--mode attributable`, where it was previously ignored without a word, and a repeated `key_id` across overrides is rejected (exit 2). An invalid override still fails with its existing error and no notice.
+
+No change to what is verified, and no change to exit codes for any command that was previously accepted.
+
+### Changed
+
+- `Cargo.toml` version bump 0.16.0 → 0.16.1.
+
+### Security
+
+- Bump `h2` 0.4.13 → 0.4.20 (RUSTSEC-2026-0258) and `rustls` 0.23.40 → 0.23.46 (RUSTSEC-2026-0285), with `rustls-webpki` 0.103.13 → 0.103.15 alongside. Both reach the verifier only through the CLI's HTTP client; patch-level, no API change.
+
 ## [0.16.0] - unreleased
 
 ### Added — tier-1 attributable mode (`PinnedResolver`)

@@ -84,7 +84,12 @@ struct Cli {
     /// caller-supplied anchor record (JSON). Repeatable. The override
     /// REPLACES the bundled set; it does not extend it. Used for
     /// historical re-verification beyond a yanked or unavailable
-    /// `wallop_verifier` crate version.
+    /// `wallop_verifier` crate version. When it is in effect the CLI
+    /// prints a notice on stderr and names the override in the report's
+    /// trust-root and RESULT lines: a PASS then shows every signature
+    /// traces back to the supplied keys, not that they are wallop's.
+    /// Rejected outside `--mode attributable`, and a repeated `key_id`
+    /// is rejected.
     ///
     /// Each value MUST be a complete anchor record:
     /// `{"key_id":"...", "public_key_hex":"...", "inserted_at":"...", "revoked_at": null | "..."}`.
@@ -155,6 +160,15 @@ fn main() -> ExitCode {
                 return tui::run_selftest_tui(demo, record);
             }
             run_selftest()
+        }
+        (None, Some(_))
+            if !cli.infra_key_pin.is_empty() && !matches!(cli.mode, ModeFlag::Attributable) =>
+        {
+            // Only attributable mode resolves against infrastructure
+            // anchors. Silently ignoring the flag elsewhere would let a
+            // user believe their override took effect.
+            eprintln!("error: --infra-key-pin is only used by --mode attributable.");
+            ExitCode::from(2)
         }
         (None, Some(path)) => match cli.mode {
             ModeFlag::Attributable => {
@@ -554,10 +568,10 @@ fn run_verify_attestable(path: &str, base_url: &str) -> ExitCode {
     // Read the canonicalised URLs from the resolver so the report
     // surfaces what the resolver actually hit, not a re-formatted
     // version of the user's CLI input. Tightens the audit trail.
-    let trust_root_urls = (
+    let trust_root_urls = [
         resolver.operator_keys_url(),
         resolver.infrastructure_keys_url(),
-    );
+    ];
     print_report(&bundle, &report, Some(&trust_root_urls));
 
     if report.passed() {
@@ -626,6 +640,18 @@ fn run_verify_attributable(
         let mut parsed = Vec::with_capacity(infra_key_pin_overrides.len());
         for (i, raw) in infra_key_pin_overrides.iter().enumerate() {
             match parse_infra_key_pin_override(raw) {
+                Ok(record)
+                    if parsed
+                        .iter()
+                        .any(|p: &AnchorRecord| p.key_id == record.key_id) =>
+                {
+                    eprintln!(
+                        "error: --infra-key-pin #{} repeats key_id {:?}.",
+                        i + 1,
+                        record.key_id
+                    );
+                    return ExitCode::from(2);
+                }
                 Ok(record) => parsed.push(record),
                 Err(reason) => {
                     eprintln!("error: --infra-key-pin #{} is invalid: {reason}", i + 1);
@@ -638,6 +664,7 @@ fn run_verify_attributable(
                 }
             }
         }
+        eprintln!("{}", infra_key_pin_notice(parsed.len()));
         parsed
     };
 
@@ -691,14 +718,53 @@ fn run_verify_attributable(
     // deliberately absent until the warning ships.
 
     let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attributable);
-    print_report(&bundle, &report, None);
+    let trust_root = [attributable_trust_root(infra_key_pin_overrides.len())];
+    print_report(&bundle, &report, Some(&trust_root));
 
+    // The RESULT line is what gets quoted, and stderr is often thrown
+    // away, so the override is named here too.
+    let qualifier = if infra_key_pin_overrides.is_empty() {
+        ""
+    } else {
+        " (trust root overridden: --infra-key-pin)"
+    };
     if report.passed() {
-        println!("  RESULT: PASS");
+        println!("  RESULT: PASS{qualifier}");
         ExitCode::SUCCESS
     } else {
-        println!("  RESULT: FAIL ({} errors)", report.error_count());
+        println!(
+            "  RESULT: FAIL ({} errors){qualifier}",
+            report.error_count()
+        );
         ExitCode::from(1)
+    }
+}
+
+/// Stderr notice printed whenever `--infra-key-pin` is in effect. The
+/// override replaces the compiled-in anchors, so a command copied from
+/// somewhere else (a proof page, a chat message) can quietly swap whom
+/// the verifier trusts. Say so before anything else is printed.
+fn infra_key_pin_notice(count: usize) -> String {
+    let keys = if count == 1 { "key" } else { "keys" };
+    format!(
+        "notice: --infra-key-pin replaces the trust anchors built into this binary.\n\
+         \x20       This run trusts only the {count} {keys} you supplied, for execution receipts\n\
+         \x20       and for the operator keyring pin. A PASS shows every signature traces\n\
+         \x20       back to those keys, not that they are wallop's. The winner recomputation\n\
+         \x20       and drand signature checks do not depend on them.\n\
+         \x20       If these keys came from the instance being verified (for example its\n\
+         \x20       proof page), this run is a consistency check, not attribution."
+    )
+}
+
+/// Report line naming the infrastructure anchors attributable mode
+/// trusted, so the override is visible in the report as well as on
+/// stderr.
+fn attributable_trust_root(override_count: usize) -> String {
+    match override_count {
+        0 => "infrastructure anchors built into this binary".to_string(),
+        1 => "1 infrastructure key from --infra-key-pin (built-in anchors replaced)".to_string(),
+        n => format!("{n} infrastructure keys from --infra-key-pin (built-in anchors replaced)"),
     }
 }
 
@@ -817,23 +883,21 @@ fn validate_wallop_base_url(url: &str) -> Result<(), String> {
 /// `run_verify_attestable`. Header (mode, draw, key_ids), per-step
 /// breakdown, blank line. Caller appends the RESULT line.
 ///
-/// `trust_root` is `Some((operator_url, infrastructure_url))` when the
-/// verification ran against a non-bundle resolver and it's worth
-/// surfacing the URLs the keys were resolved from. The caller passes
-/// canonicalised URLs read from the resolver itself, so the report
-/// names what the resolver actually hit.
+/// `trust_root` is `Some(lines)` when it's worth surfacing where the
+/// keys were resolved from: the URLs a non-bundle resolver hit (read
+/// from the resolver itself, so the report names what it actually
+/// hit), or which infrastructure anchors attributable mode trusted.
 fn print_report(
     bundle: &ProofBundle,
     report: &wallop_verifier::verify_steps::VerificationReport,
-    trust_root: Option<&(String, String)>,
+    trust_root: Option<&[String]>,
 ) {
     let version = env!("CARGO_PKG_VERSION");
     println!("wallop-verify {version}");
     println!();
     println!("  Mode ................ {}", report.mode);
-    if let Some((operator_url, infra_url)) = trust_root {
-        println!("  Trust root .......... {operator_url}");
-        println!("  Trust root .......... {infra_url}");
+    for line in trust_root.unwrap_or_default() {
+        println!("  Trust root .......... {line}");
     }
     println!("  Draw ................ {}", &bundle.draw_id);
     if let Some(ref kid) = report.operator_key_id {
@@ -921,6 +985,39 @@ fn run_verify_full_check(bundle: &ProofBundle) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── --infra-key-pin notice and report line ─────────────────────────
+
+    #[test]
+    fn infra_key_pin_notice_text() {
+        assert_eq!(
+            infra_key_pin_notice(2),
+            "notice: --infra-key-pin replaces the trust anchors built into this binary.\n        \
+             This run trusts only the 2 keys you supplied, for execution receipts\n        \
+             and for the operator keyring pin. A PASS shows every signature traces\n        \
+             back to those keys, not that they are wallop's. The winner recomputation\n        \
+             and drand signature checks do not depend on them.\n        \
+             If these keys came from the instance being verified (for example its\n        \
+             proof page), this run is a consistency check, not attribution."
+        );
+        assert!(infra_key_pin_notice(1).contains("only the 1 key you supplied"));
+    }
+
+    #[test]
+    fn attributable_trust_root_names_the_anchor_source() {
+        assert_eq!(
+            attributable_trust_root(0),
+            "infrastructure anchors built into this binary"
+        );
+        assert_eq!(
+            attributable_trust_root(1),
+            "1 infrastructure key from --infra-key-pin (built-in anchors replaced)"
+        );
+        assert_eq!(
+            attributable_trust_root(3),
+            "3 infrastructure keys from --infra-key-pin (built-in anchors replaced)"
+        );
+    }
 
     // ── operator_slug validation ───────────────────────────────────────
 
