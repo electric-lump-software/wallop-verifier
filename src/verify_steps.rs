@@ -671,9 +671,10 @@ pub fn verify_bundle_with<R: KeyResolver>(
     //
     // The beacon is read from the SIGNED execution receipt — the same
     // payload whose drand_randomness feeds the seed — and the bundle's
-    // unsigned `entropy` block must match it field for field. Verifying
-    // `entropy` alone would let a genuine beacon for any round vouch for
-    // whatever randomness the receipt claims.
+    // unsigned `entropy` block (weather_value included) must match it
+    // field for field. Verifying `entropy` alone would let a genuine
+    // beacon for any round vouch for whatever randomness the receipt
+    // claims.
     if !step3_pass {
         steps.push(StepResult {
             name: StepName::DrandBlsSignature,
@@ -740,7 +741,7 @@ pub fn verify_bundle_with<R: KeyResolver>(
     // live when the receipt was signed.
     //
     // Skipped when there is no resolved key (signature step already
-    // failed for an unrelated reason), and also skipped when the
+    // failed for an unrelated reason), and NotApplicable when the
     // resolver is `BundleEmbeddedResolver` running in
     // `VerifierMode::SelfConsistencyOnly` — the comparison is vacuous
     // there because the bundle is self-attesting (the trust root has
@@ -1120,9 +1121,12 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
     }
 }
 
-/// Step 8 body: take the drand beacon from the signed execution receipt,
-/// require the bundle's `entropy` block to match it exactly, then verify
-/// the BLS signature (and `sha256(signature) == randomness`).
+/// Step 8 body (`DrandBlsSignature`). This step also owns the entropy
+/// binding: take the drand beacon from the signed execution receipt,
+/// require every field of the bundle's unsigned `entropy` block
+/// (`drand_chain_hash`, `drand_round`, `drand_signature`,
+/// `drand_randomness`, `weather_value`) to match the receipt exactly, then
+/// verify the BLS signature (and `sha256(signature) == randomness`).
 fn check_drand_beacon(bundle: &ProofBundle, exec: &serde_json::Value) -> Result<(), String> {
     let exec_str = |field: &str| -> Result<&str, String> {
         exec.get(field)
@@ -1167,6 +1171,23 @@ fn check_drand_beacon(bundle: &ProofBundle, exec: &serde_json::Value) -> Result<
             "drand_randomness",
             &entropy.drand_randomness,
             &randomness,
+        ));
+    }
+
+    // weather_value also feeds the seed. Bind the unsigned entropy copy to
+    // the signed one (absent or null on both sides counts as equal), so
+    // nothing shown from `entropy` can differ from what was verified.
+    let exec_weather = match exec.get("weather_value").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => Some(
+            v.as_str()
+                .ok_or_else(|| "execution receipt weather_value is not a string".to_string())?,
+        ),
+    };
+    if entropy.weather_value.as_deref() != exec_weather {
+        return Err(format!(
+            "entropy.weather_value ({:?}) does not match the signed execution receipt ({:?})",
+            entropy.weather_value, exec_weather
         ));
     }
 
@@ -1272,30 +1293,65 @@ fn check_weather_observation_window(bundle: &ProofBundle) -> StepResult {
         }
     };
 
-    // Both fields may be absent on drand-only bundles. In that case the
-    // window check is vacuous (there is no observation to window-bound);
-    // pass.
+    // The exec receipt's weather_value and weather_observation_time travel
+    // together. Neither present: weather fell back (drand-only), there is
+    // no observation to window-bound, and the check is NotApplicable.
+    // Exactly one present, or weather present without a locked
+    // weather_time: the receipt is inconsistent, and since weather_value
+    // feeds the seed the window cannot be waived, so it fails.
+    let exec_field = |field: &str| exec.get(field).filter(|v| !v.is_null());
+    let exec_weather_value = exec_field("weather_value");
+    let exec_observation = exec_field("weather_observation_time");
+
+    let exec_observation_time = match (exec_weather_value, exec_observation) {
+        (None, None) => {
+            return StepResult {
+                name: StepName::WeatherObservationWindow,
+                status: StepStatus::NotApplicable(
+                    "exec receipt has no weather_value or weather_observation_time".into(),
+                ),
+                detail: None,
+            };
+        }
+        (Some(_), None) => {
+            return StepResult {
+                name: StepName::WeatherObservationWindow,
+                status: StepStatus::Fail(
+                    "exec receipt has weather_value but no weather_observation_time".into(),
+                ),
+                detail: None,
+            };
+        }
+        (None, Some(_)) => {
+            return StepResult {
+                name: StepName::WeatherObservationWindow,
+                status: StepStatus::Fail(
+                    "exec receipt has weather_observation_time but no weather_value".into(),
+                ),
+                detail: None,
+            };
+        }
+        (Some(_), Some(obs)) => match obs.as_str() {
+            Some(s) => s,
+            None => {
+                return StepResult {
+                    name: StepName::WeatherObservationWindow,
+                    status: StepStatus::Fail(
+                        "exec receipt weather_observation_time is not a string".into(),
+                    ),
+                    detail: None,
+                };
+            }
+        },
+    };
+
     let lock_weather_time = match lock.get("weather_time").and_then(|v| v.as_str()) {
         Some(s) => s,
         None => {
             return StepResult {
                 name: StepName::WeatherObservationWindow,
-                status: StepStatus::NotApplicable("lock receipt has no weather_time".into()),
-                detail: None,
-            };
-        }
-    };
-
-    let exec_observation_time = match exec
-        .get("weather_observation_time")
-        .and_then(|v| v.as_str())
-    {
-        Some(s) => s,
-        None => {
-            return StepResult {
-                name: StepName::WeatherObservationWindow,
-                status: StepStatus::NotApplicable(
-                    "exec receipt has no weather_observation_time".into(),
+                status: StepStatus::Fail(
+                    "exec receipt has weather_value but lock receipt has no weather_time".into(),
                 ),
                 detail: None,
             };
@@ -1368,7 +1424,7 @@ fn check_weather_observation_window(bundle: &ProofBundle) -> StepResult {
 /// already dropped `Sentinel`-from-non-self-consistency; by the time
 /// we get here, an `op_resolved`/`infra_resolved` of `Some` paired
 /// with `InsertedAt::Sentinel` can only mean self-consistency mode
-/// (where the comparison is vacuous and we skip), and an `At(_)` is
+/// (where the comparison is vacuous and the step is NotApplicable), and an `At(_)` is
 /// guaranteed not to be the legacy sentinel literal. The
 /// destructuring below relies on those invariants.
 ///
@@ -3069,5 +3125,127 @@ mod tests {
             step.status
         );
         assert!(report.passed(), "steps: {:?}", report.steps);
+    }
+
+    // ── Weather window and weather binding ───────────────────────────────
+
+    fn window_step(report: &VerificationReport) -> &StepResult {
+        step_named(report, StepName::WeatherObservationWindow)
+    }
+
+    #[test]
+    fn weather_value_without_observation_time_fails_window() {
+        let (json, _) = valid_signed_bundle();
+        let val = resign_exec(&json, |exec| {
+            exec["weather_observation_time"] = serde_json::Value::Null;
+        });
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert_eq!(
+            step_named(&report, StepName::ExecSignature).status,
+            StepStatus::Pass
+        );
+        assert!(
+            matches!(&window_step(&report).status,
+                StepStatus::Fail(r) if r.contains("weather_value") && r.contains("weather_observation_time")),
+            "got {:?}",
+            window_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn observation_time_without_weather_value_fails_window() {
+        let (json, _) = crate::_test_support::build_valid_drand_only_bundle();
+        let val = resign_exec(&json, |exec| {
+            exec["weather_observation_time"] = serde_json::json!("2026-04-09T12:10:00.000000Z");
+        });
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert_eq!(
+            step_named(&report, StepName::ExecSignature).status,
+            StepStatus::Pass
+        );
+        assert!(
+            matches!(&window_step(&report).status,
+                StepStatus::Fail(r) if r.contains("weather_value") && r.contains("weather_observation_time")),
+            "got {:?}",
+            window_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn exec_weather_without_lock_weather_time_fails_window() {
+        // LockReceiptV4/V5 require weather_time, so a well-signed bundle
+        // cannot reach this; exercise the step function directly.
+        let (json, _) = valid_signed_bundle();
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let mut lock: serde_json::Value =
+            serde_json::from_str(val["lock_receipt"]["payload_jcs"].as_str().unwrap()).unwrap();
+        lock.as_object_mut().unwrap().remove("weather_time");
+        val["lock_receipt"]["payload_jcs"] = serde_json::json!(lock.to_string());
+        let bundle = ProofBundle::from_json(&val.to_string()).unwrap();
+        let step = check_weather_observation_window(&bundle);
+        assert!(
+            matches!(&step.status,
+                StepStatus::Fail(r) if r.contains("weather_value") && r.contains("weather_time")),
+            "got {:?}",
+            step.status
+        );
+    }
+
+    #[test]
+    fn entropy_weather_value_swap_fails() {
+        let (json, _) = valid_signed_bundle();
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(val["entropy"]["weather_value"], "1013");
+        val["entropy"]["weather_value"] = serde_json::json!("1014");
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(&drand_step(&report).status,
+                StepStatus::Fail(r) if r.contains("entropy.weather_value")),
+            "got {:?}",
+            drand_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn entropy_weather_value_removed_fails() {
+        let (json, _) = valid_signed_bundle();
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        val["entropy"]
+            .as_object_mut()
+            .unwrap()
+            .remove("weather_value");
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(&drand_step(&report).status,
+                StepStatus::Fail(r) if r.contains("entropy.weather_value")),
+            "got {:?}",
+            drand_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn lock_exec_drand_chain_mismatch_fails() {
+        let other_chain = "dbd506d6ef76e5f386f41c651dcb808c5bcbd75471cc4eafa3f4df7ad4e4c493";
+        let (json, _) = valid_signed_bundle();
+        let mut val = resign_exec(&json, |exec| {
+            exec["drand_chain"] = serde_json::json!(other_chain);
+        });
+        val["entropy"]["drand_chain_hash"] = serde_json::json!(other_chain);
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert_eq!(
+            step_named(&report, StepName::ExecSignature).status,
+            StepStatus::Pass
+        );
+        assert!(
+            matches!(&step_named(&report, StepName::ReceiptFieldConsistency).status,
+                StepStatus::Fail(r) if r.contains("drand_chain")),
+            "got {:?}",
+            step_named(&report, StepName::ReceiptFieldConsistency).status
+        );
+        assert!(!report.passed());
     }
 }
