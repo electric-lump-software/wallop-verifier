@@ -31,6 +31,11 @@ pub const BEACON_2_SIGNATURE: &str = "b33bf3667cbd5a82de3a24b4e0e9fe5513cc1a0e84
 pub const BEACON_2_RANDOMNESS: &str =
     "b0a591ad1b9002cfc372ac6e30abd3da8d3088d4caae026961743474fb94235f";
 
+/// `inserted_at` for the test key as a resolver reports it: before every
+/// fixture's `locked_at` and `executed_at`, so temporal binding passes.
+#[doc(hidden)]
+pub const KEY_INSERTED_AT: &str = "2026-01-01T00:00:00.000000Z";
+
 /// Fixed test signing key used by all generated bundles. Deterministic so
 /// bundles are reproducible across runs.
 #[doc(hidden)]
@@ -385,7 +390,7 @@ impl MockResolver {
         Self {
             key_id: key_id.into(),
             public_key,
-            inserted_at: InsertedAt::At("2026-01-01T00:00:00.000000Z".into()),
+            inserted_at: InsertedAt::At(KEY_INSERTED_AT.into()),
         }
     }
 }

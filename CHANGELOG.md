@@ -23,7 +23,6 @@ The drand step was compiled only into the CLI build, so the WASM verifier on the
 
 ### Added
 
-- `verify_bundle_wasm(bundle_json) -> bool`: verifies a whole proof bundle in the browser, running the full step pipeline in self-consistency mode with the bundle's embedded keys. These are the same checks as the CLI's default mode, drand included. It is the gate the proof page should use for its green result. A bundle that fails to parse is an error.
 - `verify_drand_wasm(chain_hash, round, signature_hex, randomness_hex) -> bool`: the drand check on its own, so the proof page can show it as a separate line. True only if the chain is the pinned quicknet chain, the BLS signature is valid for `round`, and `sha256(signature) == randomness`. `round` is a `u64`, so JavaScript passes a `BigInt`. Pass the values from the signed execution receipt, never from unsigned page data, and pass hex in lower case: an upper-case chain hash or randomness is rejected.
 - `Cargo.toml` version bump 0.16.1 → 0.17.0.
 

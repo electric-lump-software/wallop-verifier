@@ -6,7 +6,7 @@ use crate::bundle::ProofBundle;
 use crate::key_resolver::{InsertedAt, KeyClass, KeyResolver, ResolutionError, ResolvedKey};
 use crate::protocol;
 use crate::protocol::receipts::{ExecutionReceiptV2, LockReceiptV4};
-use crate::verify_steps::{VerifierMode, verify_bundle, verify_bundle_with};
+use crate::verify_steps::{VerifierMode, verify_bundle_with};
 
 /// WASM entry point for draw.
 #[wasm_bindgen]
@@ -216,21 +216,6 @@ pub fn verify_drand_wasm(
     crate::drand::verify_drand_round(chain_hash, round, signature_hex, randomness_hex).is_ok()
 }
 
-/// Verify a whole proof bundle in the browser: the full step pipeline in
-/// self-consistency mode, using the keys embedded in the bundle. These are
-/// the same checks as the CLI's default mode, including the drand BLS
-/// signature and the entropy binding.
-///
-/// This is the gate the proof page should use for its green result.
-/// Returns `true` iff the report passes (every step `Pass` or
-/// `NotApplicable`, at least one `Pass`). A bundle that fails to parse is
-/// an `Err`.
-#[wasm_bindgen]
-pub fn verify_bundle_wasm(bundle_json: &str) -> Result<bool, JsError> {
-    let bundle = ProofBundle::from_json(bundle_json).map_err(|e| JsError::new(&e))?;
-    Ok(verify_bundle(&bundle).passed())
-}
-
 /// WASM entry point for verify_full.
 ///
 /// `winner_count` is extracted from the signed lock receipt, not passed externally.
@@ -349,20 +334,34 @@ fn parse_verifier_mode(s: &str) -> Result<VerifierMode, JsError> {
     }
 }
 
-/// Verify a v5/v4 (resolver-driven) bundle in the browser. The JS side
-/// resolves keys out of band — from `/operator/:slug/keys` (attestable
-/// mode) or from a pinned `.well-known` document (attributable mode) —
-/// and passes them in as `resolved_keys_js`. The WASM verifier then runs
-/// `verify_bundle_with` against a synthetic resolver wrapping that array.
+/// Verify a whole v5/v4 (resolver-driven) proof bundle in the browser.
 ///
-/// The `mode` argument is recorded on the returned report and MUST match
-/// the trust root the JS side actually consulted. The verifier crate does
-/// not police this association — see `verify_bundle_with` doc.
+/// **This is the browser gate.** The proof page's green result must come
+/// from this function returning `true` in attestable mode, and from
+/// nothing else: not from `verify_drand_wasm`, not from
+/// `verify_full_wasm`, not from the per-line checks the page shows
+/// alongside it.
 ///
-/// Returns `true` iff the bundle passes every reachable verification step
-/// under the supplied resolver and mode. Per-step diagnostics are not
-/// surfaced from this entry point yet — the WASM caller already runs its
-/// own UI; full report serialisation is a follow-up.
+/// It runs the full step pipeline (`verify_bundle_with`): the same checks
+/// as the CLI, including the drand BLS signature, the entropy binding and
+/// temporal binding.
+///
+/// Keys: the JS side fetches them out of band and passes them in as
+/// `resolved_keys_js`, an array of
+/// `{key_id, public_key_hex, key_class, inserted_at}`. For the attestable
+/// gate (`mode = "attestable"`) they must come from wallop's
+/// `/operator/:slug/keys` endpoint, never from the bundle or other page
+/// data: keys taken from the bundle being verified prove only that the
+/// bundle agrees with itself. `"attributable"` is for keys checked against
+/// a pinned `.well-known` document.
+///
+/// The `mode` argument is recorded on the report and MUST match the trust
+/// root the JS side actually consulted. The verifier crate does not police
+/// this association — see `verify_bundle_with`.
+///
+/// Returns `true` iff the report passes (`VerificationReport::passed`).
+/// A bundle that fails to parse, an unknown mode or a malformed key is an
+/// `Err`. Per-step diagnostics are not surfaced from this entry point yet.
 #[wasm_bindgen]
 pub fn verify_bundle_with_resolved_keys_wasm(
     bundle_json: &str,
@@ -424,26 +423,51 @@ mod wasm_drand_export_tests {
 }
 
 #[cfg(all(test, target_arch = "wasm32"))]
-mod wasm_bundle_export_tests {
-    use super::verify_bundle_wasm;
-    use crate::_test_support::{BEACON_SIGNATURE, build_valid_bundle, resign_exec};
+mod wasm_resolved_keys_gate_tests {
+    use super::verify_bundle_with_resolved_keys_wasm;
+    use crate::_test_support::{BEACON_SIGNATURE, build_valid_v5_bundle, resign_exec};
     use crate::Entry;
+    use serde::Serialize;
+    use wasm_bindgen::JsValue;
     use wasm_bindgen_test::*;
 
     fn entries() -> Vec<Entry> {
-        ["a", "b", "c"]
-            .iter()
-            .map(|id| Entry {
-                id: (*id).into(),
-                weight: 1,
-            })
-            .collect()
+        [
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        ]
+        .iter()
+        .map(|id| Entry {
+            id: (*id).into(),
+            weight: 1,
+        })
+        .collect()
+    }
+
+    /// The test key as the keys endpoint would list it, once per class.
+    fn resolved_keys(pk_hex: &str, key_id: &str) -> JsValue {
+        let keys = serde_json::json!([
+            {"key_id": key_id, "public_key_hex": pk_hex, "key_class": "operator",
+             "inserted_at": crate::_test_support::KEY_INSERTED_AT},
+            {"key_id": key_id, "public_key_hex": pk_hex, "key_class": "infrastructure",
+             "inserted_at": crate::_test_support::KEY_INSERTED_AT},
+        ]);
+        keys.serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+            .unwrap()
     }
 
     #[wasm_bindgen_test]
-    fn valid_bundle_passes() {
-        let json = build_valid_bundle(&entries(), Some("1013"), 2);
-        assert!(verify_bundle_wasm(&json).unwrap());
+    fn valid_v5_bundle_with_correct_keys_passes() {
+        let (json, pk_hex, kid) = build_valid_v5_bundle(&entries(), Some("1013"), 2);
+        assert!(
+            verify_bundle_with_resolved_keys_wasm(
+                &json,
+                resolved_keys(&pk_hex, &kid),
+                "attestable"
+            )
+            .unwrap()
+        );
     }
 
     #[wasm_bindgen_test]
@@ -451,12 +475,19 @@ mod wasm_bundle_export_tests {
         // Zero signature in both the re-signed execution receipt and the
         // entropy block, so only the BLS check itself can reject it.
         let zero = "00".repeat(48);
-        let json = build_valid_bundle(&entries(), Some("1013"), 2);
+        let (json, pk_hex, kid) = build_valid_v5_bundle(&entries(), Some("1013"), 2);
         let mut val = resign_exec(&json, |exec| {
             assert_eq!(exec["drand_signature"], BEACON_SIGNATURE);
             exec["drand_signature"] = serde_json::json!(zero.clone());
         });
         val["entropy"]["drand_signature"] = serde_json::json!(zero);
-        assert!(!verify_bundle_wasm(&val.to_string()).unwrap());
+        assert!(
+            !verify_bundle_with_resolved_keys_wasm(
+                &val.to_string(),
+                resolved_keys(&pk_hex, &kid),
+                "attestable"
+            )
+            .unwrap()
+        );
     }
 }
