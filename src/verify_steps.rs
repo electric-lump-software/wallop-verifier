@@ -668,22 +668,27 @@ pub fn verify_bundle_with<R: KeyResolver>(
     }
 
     // === Step 8: BLS drand verification (every build, including WASM) ===
-    match crate::drand::verify_drand_round(
-        &bundle.entropy.drand_chain_hash,
-        bundle.entropy.drand_round,
-        &bundle.entropy.drand_signature,
-        &bundle.entropy.drand_randomness,
-    ) {
-        Ok(()) => steps.push(StepResult {
+    //
+    // The beacon is read from the SIGNED execution receipt — the same
+    // payload whose drand_randomness feeds the seed — and the bundle's
+    // unsigned `entropy` block must match it field for field. Verifying
+    // `entropy` alone would let a genuine beacon for any round vouch for
+    // whatever randomness the receipt claims.
+    if !step3_pass {
+        steps.push(StepResult {
             name: StepName::DrandBlsSignature,
-            status: StepStatus::Pass,
+            status: StepStatus::Skip("exec signature failed".into()),
             detail: None,
-        }),
-        Err(e) => steps.push(StepResult {
+        });
+    } else {
+        steps.push(StepResult {
             name: StepName::DrandBlsSignature,
-            status: StepStatus::Fail(e.to_string()),
+            status: match check_drand_beacon(bundle, &exec_parsed) {
+                Ok(()) => StepStatus::Pass,
+                Err(reason) => StepStatus::Fail(reason),
+            },
             detail: None,
-        }),
+        });
     }
 
     // === Step 10: Cross-receipt field consistency ===
@@ -1113,6 +1118,59 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
         status: StepStatus::Pass,
         detail: None,
     }
+}
+
+/// Step 8 body: take the drand beacon from the signed execution receipt,
+/// require the bundle's `entropy` block to match it exactly, then verify
+/// the BLS signature (and `sha256(signature) == randomness`).
+fn check_drand_beacon(bundle: &ProofBundle, exec: &serde_json::Value) -> Result<(), String> {
+    let exec_str = |field: &str| -> Result<&str, String> {
+        exec.get(field)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("execution receipt {field} is missing or not a string"))
+    };
+    let chain = exec_str("drand_chain")?;
+    let round = exec
+        .get("drand_round")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| "execution receipt drand_round is missing or not an integer".to_string())?;
+    let signature = exec_str("drand_signature")?;
+    let randomness = exec_str("drand_randomness")?;
+
+    let entropy = &bundle.entropy;
+    let mismatch = |field: &str,
+                    bundle_val: &dyn std::fmt::Display,
+                    exec_val: &dyn std::fmt::Display| {
+        format!(
+            "entropy.{field} ({bundle_val}) does not match the signed execution receipt ({exec_val})"
+        )
+    };
+    if entropy.drand_chain_hash != chain {
+        return Err(mismatch(
+            "drand_chain_hash",
+            &entropy.drand_chain_hash,
+            &chain,
+        ));
+    }
+    if entropy.drand_round != round {
+        return Err(mismatch("drand_round", &entropy.drand_round, &round));
+    }
+    if entropy.drand_signature != signature {
+        return Err(mismatch(
+            "drand_signature",
+            &entropy.drand_signature,
+            &signature,
+        ));
+    }
+    if entropy.drand_randomness != randomness {
+        return Err(mismatch(
+            "drand_randomness",
+            &entropy.drand_randomness,
+            &randomness,
+        ));
+    }
+
+    crate::drand::verify_drand_round(chain, round, signature, randomness).map_err(|e| e.to_string())
 }
 
 // Fields that MUST be byte-identical between lock and exec receipts per
@@ -2802,23 +2860,196 @@ mod tests {
         assert_eq!(drand_step(&report).status, StepStatus::Pass);
     }
 
+    /// Apply `edit` to the signed execution receipt payload of `json` and
+    /// re-sign it with the test infrastructure key, so the exec signature
+    /// still verifies.
+    fn resign_exec(json: &str, edit: impl FnOnce(&mut serde_json::Value)) -> serde_json::Value {
+        let mut bundle: serde_json::Value = serde_json::from_str(json).unwrap();
+        let mut exec: serde_json::Value =
+            serde_json::from_str(bundle["execution_receipt"]["payload_jcs"].as_str().unwrap())
+                .unwrap();
+        edit(&mut exec);
+        let exec_jcs = exec.to_string();
+        let sig_hex = hex::encode(test_signing_key().sign(exec_jcs.as_bytes()).to_bytes());
+        bundle["execution_receipt"]["payload_jcs"] = serde_json::json!(exec_jcs);
+        bundle["execution_receipt"]["signature_hex"] = serde_json::json!(sig_hex);
+        bundle
+    }
+
+    fn step_named(report: &VerificationReport, name: StepName) -> &StepResult {
+        report.steps.iter().find(|s| s.name == name).unwrap()
+    }
+
+    fn failing_steps(report: &VerificationReport) -> Vec<StepName> {
+        report
+            .steps
+            .iter()
+            .filter(|s| matches!(s.status, StepStatus::Fail(_)))
+            .map(|s| s.name)
+            .collect()
+    }
+
     #[test]
     fn zero_signature_fails_drand_step_and_report() {
-        // Tamper only the bundle's entropy.drand_signature. A plain string
-        // replace would also hit the signed execution receipt and break its
-        // Ed25519 signature, so the report would fail for the wrong reason.
+        // The zero signature goes into BOTH the signed execution receipt
+        // (re-signed, so the exec signature still verifies) and the
+        // entropy block, so the entropy binding holds and the only thing
+        // that can reject it is the BLS check itself.
+        use crate::_test_support::BEACON_SIGNATURE;
+        let zero = "00".repeat(48);
         let (json, _) = valid_signed_bundle();
-        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            val["entropy"]["drand_signature"],
-            crate::_test_support::BEACON_SIGNATURE
-        );
-        val["entropy"]["drand_signature"] = serde_json::json!("00".repeat(48));
+        let mut val = resign_exec(&json, |exec| {
+            assert_eq!(exec["drand_signature"], BEACON_SIGNATURE);
+            exec["drand_signature"] = serde_json::json!(zero.clone());
+        });
+        assert_eq!(val["entropy"]["drand_signature"], BEACON_SIGNATURE);
+        val["entropy"]["drand_signature"] = serde_json::json!(zero);
         let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert_eq!(
+            step_named(&report, StepName::ExecSignature).status,
+            StepStatus::Pass
+        );
         assert!(
-            matches!(drand_step(&report).status, StepStatus::Fail(_)),
+            matches!(&drand_step(&report).status, StepStatus::Fail(r) if r.contains("BLS")),
             "got {:?}",
             drand_step(&report).status
+        );
+        assert_eq!(failing_steps(&report), vec![StepName::DrandBlsSignature]);
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn entropy_swapped_to_another_genuine_beacon_fails() {
+        // Only the unsigned entropy block changes; the signed exec receipt
+        // still carries round 1000. A genuine beacon in entropy must not
+        // vouch for the receipt's randomness.
+        use crate::_test_support::{BEACON_2_RANDOMNESS, BEACON_2_ROUND, BEACON_2_SIGNATURE};
+        let (json, _) = valid_signed_bundle();
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        val["entropy"]["drand_round"] = serde_json::json!(BEACON_2_ROUND);
+        val["entropy"]["drand_signature"] = serde_json::json!(BEACON_2_SIGNATURE);
+        val["entropy"]["drand_randomness"] = serde_json::json!(BEACON_2_RANDOMNESS);
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(&drand_step(&report).status,
+                StepStatus::Fail(r) if r.contains("entropy.drand_round")),
+            "got {:?}",
+            drand_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn receipt_swapped_to_another_genuine_beacon_fails() {
+        // The signed exec receipt carries BEACON_2 (re-signed); entropy
+        // keeps BEACON. The mismatch must fail the drand step.
+        use crate::_test_support::{BEACON_2_RANDOMNESS, BEACON_2_ROUND, BEACON_2_SIGNATURE};
+        let (json, _) = valid_signed_bundle();
+        let val = resign_exec(&json, |exec| {
+            exec["drand_round"] = serde_json::json!(BEACON_2_ROUND);
+            exec["drand_signature"] = serde_json::json!(BEACON_2_SIGNATURE);
+            exec["drand_randomness"] = serde_json::json!(BEACON_2_RANDOMNESS);
+        });
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert_eq!(
+            step_named(&report, StepName::ExecSignature).status,
+            StepStatus::Pass
+        );
+        assert!(
+            matches!(&drand_step(&report).status,
+                StepStatus::Fail(r) if r.contains("entropy.drand_round")),
+            "got {:?}",
+            drand_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn exec_receipt_missing_drand_signature_fails_drand_step() {
+        let (json, _) = valid_signed_bundle();
+        let val = resign_exec(&json, |exec| {
+            exec.as_object_mut().unwrap().remove("drand_signature");
+        });
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(&drand_step(&report).status,
+                StepStatus::Fail(r) if r.contains("drand_signature")),
+            "got {:?}",
+            drand_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn exec_receipt_drand_round_wrong_type_fails_drand_step() {
+        let (json, _) = valid_signed_bundle();
+        let val = resign_exec(&json, |exec| {
+            exec["drand_round"] = serde_json::json!("1000");
+        });
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(&drand_step(&report).status,
+                StepStatus::Fail(r) if r.contains("drand_round")),
+            "got {:?}",
+            drand_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn genuine_beacon_for_a_round_other_than_locked_fails() {
+        // A fully self-consistent execution (exec receipt, entropy, seed
+        // and winners all built from BEACON_2, round 1001) against a lock
+        // receipt that committed to round 1000. The BLS check passes; the
+        // lock/exec drand_round consistency check must still fail it.
+        use crate::_test_support::{BEACON_2_RANDOMNESS, BEACON_2_ROUND, BEACON_2_SIGNATURE};
+        let (json, _) = valid_signed_bundle();
+        let entries: Vec<Entry> = [
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        ]
+        .iter()
+        .map(|id| Entry {
+            id: (*id).into(),
+            weight: 1,
+        })
+        .collect();
+        let (ehash, _) = entry_hash("22222222-2222-2222-2222-222222222222", &entries);
+        let (seed, _) = compute_seed(&ehash, BEACON_2_RANDOMNESS, "1013");
+        let winners = draw(&entries, &seed, 2).unwrap();
+        let mut val = resign_exec(&json, |exec| {
+            exec["drand_round"] = serde_json::json!(BEACON_2_ROUND);
+            exec["drand_signature"] = serde_json::json!(BEACON_2_SIGNATURE);
+            exec["drand_randomness"] = serde_json::json!(BEACON_2_RANDOMNESS);
+            exec["seed"] = serde_json::json!(hex::encode(seed));
+            exec["results"] = serde_json::json!(
+                winners
+                    .iter()
+                    .map(|w| w.entry_id.clone())
+                    .collect::<Vec<_>>()
+            );
+        });
+        val["entropy"]["drand_round"] = serde_json::json!(BEACON_2_ROUND);
+        val["entropy"]["drand_signature"] = serde_json::json!(BEACON_2_SIGNATURE);
+        val["entropy"]["drand_randomness"] = serde_json::json!(BEACON_2_RANDOMNESS);
+        val["results"] = serde_json::json!(
+            winners
+                .iter()
+                .map(|w| serde_json::json!({"entry_id": &w.entry_id, "position": w.position}))
+                .collect::<Vec<_>>()
+        );
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert_eq!(drand_step(&report).status, StepStatus::Pass);
+        assert!(
+            matches!(&step_named(&report, StepName::ReceiptFieldConsistency).status,
+                StepStatus::Fail(r) if r.contains("drand_round")),
+            "got {:?}",
+            step_named(&report, StepName::ReceiptFieldConsistency).status
+        );
+        assert_eq!(
+            failing_steps(&report),
+            vec![StepName::ReceiptFieldConsistency]
         );
         assert!(!report.passed());
     }
