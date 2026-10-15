@@ -41,7 +41,11 @@ pub enum StepName {
     /// lock and execution receipts MUST be byte-identical. Bundle-envelope
     /// `draw_id` MUST also match. Closes splice-attack class per spec
     /// §4.2.5. Appended rather than inserted mid-list so external
-    /// consumers pinning step ordinals are not broken.
+    /// consumers pinning step ordinals are not broken. Under lock v6 /
+    /// execution v5, `weather_station` is checked against the tag's
+    /// station list instead: the lock names the primary station, the
+    /// execution receipt names a listed station, and a fallback names the
+    /// primary.
     ReceiptFieldConsistency,
     /// Weather observation window. Lock v4/v5: the execution receipt's
     /// `weather_observation_time` falls in
@@ -1428,6 +1432,46 @@ const CROSS_CHECKED_FIELDS: &[&str] = &[
     "weather_station",
 ];
 
+// Under lock v6 / execution v5, `weather_station` is not compared for
+// equality: the lock names the primary station and the execution receipt
+// names the station actually used (see `check_landobs_stations`).
+const CROSS_CHECKED_FIELDS_LANDOBS: &[&str] = &[
+    "draw_id",
+    "operator_id",
+    "sequence",
+    "drand_chain",
+    "drand_round",
+];
+
+fn check_landobs_stations(
+    lock: &serde_json::Value,
+    exec: &serde_json::Value,
+) -> Result<(), String> {
+    use crate::protocol::landobs_v1::{PRIMARY_STATION, STATIONS};
+    let lock_station = lock.get("weather_station").and_then(|v| v.as_str());
+    if lock_station != Some(PRIMARY_STATION) {
+        return Err(format!(
+            "lock weather_station {lock_station:?} is not the primary station {PRIMARY_STATION}"
+        ));
+    }
+    let exec_station = exec
+        .get("weather_station")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "exec weather_station is missing or not a string".to_string())?;
+    if !STATIONS.contains(&exec_station) {
+        return Err(format!(
+            "exec weather_station {exec_station:?} is not one of {STATIONS:?}"
+        ));
+    }
+    let fallback = exec.get("weather_value").is_none_or(|v| v.is_null());
+    if fallback && exec_station != PRIMARY_STATION {
+        return Err(format!(
+            "a fallback execution receipt must name the primary station {PRIMARY_STATION}, not {exec_station}"
+        ));
+    }
+    Ok(())
+}
+
 fn check_receipt_field_consistency(bundle: &ProofBundle) -> StepResult {
     let lock: serde_json::Value = match serde_json::from_str(&bundle.lock_receipt.payload_jcs) {
         Ok(v) => v,
@@ -1469,8 +1513,22 @@ fn check_receipt_field_consistency(bundle: &ProofBundle) -> StepResult {
         };
     }
 
+    let rules = weather_rules(&lock, &exec);
+    if rules == WeatherRules::Mismatched {
+        return StepResult {
+            name: StepName::ReceiptFieldConsistency,
+            status: StepStatus::Fail(SCHEMA_PAIRING_ERROR.into()),
+            detail: None,
+        };
+    }
+    let fields = if rules == WeatherRules::LandObs {
+        CROSS_CHECKED_FIELDS_LANDOBS
+    } else {
+        CROSS_CHECKED_FIELDS
+    };
+
     // Every cross-checked field must match byte-identically.
-    for field in CROSS_CHECKED_FIELDS {
+    for field in fields {
         let lock_val = lock.get(field);
         let exec_val = exec.get(field);
         if lock_val != exec_val {
@@ -1483,6 +1541,16 @@ fn check_receipt_field_consistency(bundle: &ProofBundle) -> StepResult {
                 detail: None,
             };
         }
+    }
+
+    if rules == WeatherRules::LandObs
+        && let Err(reason) = check_landobs_stations(&lock, &exec)
+    {
+        return StepResult {
+            name: StepName::ReceiptFieldConsistency,
+            status: StepStatus::Fail(reason),
+            detail: None,
+        };
     }
 
     StepResult {

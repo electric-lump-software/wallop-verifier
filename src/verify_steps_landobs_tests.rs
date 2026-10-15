@@ -437,3 +437,82 @@ fn legacy_v5_observation_an_hour_early_still_passes_the_window() {
         &StepStatus::Pass
     );
 }
+
+#[test]
+fn v6_backup_station_passes_end_to_end() {
+    let report = run(&V6Params::backup());
+    assert_eq!(
+        status(&report, StepName::ReceiptFieldConsistency),
+        &StepStatus::Pass
+    );
+    assert!(report.passed(), "{:?}", report.steps);
+}
+
+#[test]
+fn fallback_naming_the_backup_fails_field_consistency() {
+    let p = V6Params {
+        exec_station: Some("wmo-03462".into()),
+        ..V6Params::fallback()
+    };
+    assert_step_fails(
+        &run(&p),
+        StepName::ReceiptFieldConsistency,
+        "primary station",
+    );
+}
+
+#[test]
+fn v6_exec_station_outside_the_list_fails_field_consistency() {
+    let p = V6Params {
+        exec_station: Some("wmo-03772".into()),
+        ..V6Params::weather()
+    };
+    assert_step_fails(
+        &run(&p),
+        StepName::ReceiptFieldConsistency,
+        "weather_station",
+    );
+}
+
+#[test]
+fn v6_lock_station_not_primary_fails_field_consistency() {
+    let p = V6Params {
+        lock_station: "wmo-03462".into(),
+        ..V6Params::backup()
+    };
+    assert_step_fails(
+        &run(&p),
+        StepName::ReceiptFieldConsistency,
+        "weather_station",
+    );
+}
+
+#[test]
+fn mismatched_schemas_fail_field_consistency() {
+    let p = V6Params {
+        lock_schema: "5".into(),
+        lock_entropy_composition: crate::protocol::receipts::ENTROPY_COMPOSITION.into(),
+        ..V6Params::weather()
+    };
+    assert_eq!(
+        status(&run(&p), StepName::ReceiptFieldConsistency),
+        &StepStatus::Fail(SCHEMA_PAIRING_ERROR.into())
+    );
+}
+
+#[test]
+fn legacy_v5_station_difference_still_fails_field_consistency() {
+    let (json, pk_hex, kid) = crate::_test_support::build_valid_v5_bundle(
+        &crate::_test_support::v6_entries(),
+        Some("1013"),
+        2,
+    );
+    let edited = crate::_test_support::resign_exec(&json, |exec| {
+        exec["weather_station"] = serde_json::json!("wmo-03462");
+    });
+    assert_step_fails(
+        &run_json(&edited.to_string(), &pk_hex, &kid),
+        StepName::ReceiptFieldConsistency,
+        "weather_station",
+    );
+}
