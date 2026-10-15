@@ -476,6 +476,7 @@ fn run_verify(path: &str, pins: &PinConfig, mode: VerifierMode) -> ExitCode {
             StepStatus::NotApplicable(reason) => {
                 println!("  {} {} N/A ({})", name_str, dots, reason)
             }
+            other => println!("  {} {} UNKNOWN ({:?})", name_str, dots, other),
         }
     }
 
@@ -921,6 +922,7 @@ fn print_report(
             StepStatus::NotApplicable(reason) => {
                 println!("  {} {} N/A ({})", name_str, dots, reason)
             }
+            other => println!("  {} {} UNKNOWN ({:?})", name_str, dots, other),
         }
     }
 

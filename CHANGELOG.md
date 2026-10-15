@@ -19,6 +19,7 @@ The drand step was compiled only into the CLI build, so the WASM verifier on the
 ### Changed — **breaking:** a skipped check never counts as a pass
 
 - New `StepStatus::NotApplicable(String)`, for checks that genuinely do not apply (no weather on a drand-only draw; temporal binding in self-consistency mode). Exhaustive `match`es on `StepStatus` need a new arm.
+- `StepStatus` is now `#[non_exhaustive]`. A `match` on it outside this crate needs a wildcard arm; treat a status you do not recognise as a failure. Future statuses can then be added without another breaking change.
 - `VerificationReport::passed()` accepts only `Pass` and `NotApplicable`, with at least one `Pass`. `Skip` means a check could not run, and now always fails the report.
 - `NotApplicable` is accepted only on `WeatherObservationWindow` and `TemporalBinding`, the two steps that can genuinely not apply. On any other step it fails the report, so a future change cannot waive a core check by marking it not applicable.
 

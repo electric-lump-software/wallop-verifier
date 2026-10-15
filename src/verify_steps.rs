@@ -121,7 +121,26 @@ impl fmt::Display for StepName {
     }
 }
 
+/// Outcome of one verification step.
+///
+/// Non-exhaustive: a `match` outside this crate needs a wildcard arm, so a
+/// new status can be added without a breaking change. Treat any status you
+/// do not recognise as a failure, and use `VerificationReport::passed()`
+/// for the overall verdict.
+///
+/// ```compile_fail
+/// use wallop_verifier::verify_steps::StepStatus;
+/// fn code(s: &StepStatus) -> u8 {
+///     match s {
+///         StepStatus::Pass => 0,
+///         StepStatus::Fail(_) => 1,
+///         StepStatus::Skip(_) => 2,
+///         StepStatus::NotApplicable(_) => 3,
+///     }
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum StepStatus {
     Pass,
     Fail(String),
