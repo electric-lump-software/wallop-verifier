@@ -9,7 +9,9 @@
 //! API stability is NOT guaranteed. Contents may change in any release.
 
 use crate::key_resolver::{InsertedAt, KeyClass, KeyResolver, ResolutionError, ResolvedKey};
+use crate::protocol::landobs_v1;
 use crate::protocol::receipts::lock_receipt_hash;
+use crate::verify_steps::format_canonical;
 use crate::{Entry, compute_seed, compute_seed_drand_only, draw, entry_hash};
 use ed25519_dalek::{Signer, SigningKey};
 
@@ -341,6 +343,216 @@ pub fn build_valid_v5_bundle(
     (bundle, pk_hex, signing_key_id)
 }
 
+/// A real quicknet beacon published 2026-10-01T20:00:00Z, from
+/// https://api.drand.sh/52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971/public/32693812.
+/// Lock v6 fixtures derive their weather time and lock time from it.
+#[doc(hidden)]
+pub const BEACON_V6_ROUND: u64 = 32_693_812;
+#[doc(hidden)]
+pub const BEACON_V6_SIGNATURE: &str = "995ffde0adb77c55a684f709ece0f4cb1effd6284584df0a60a4d16c1a186ce882ba602dfc28acf8139385dfbfe4e637";
+#[doc(hidden)]
+pub const BEACON_V6_RANDOMNESS: &str =
+    "63f5ac51561140f314891a16e6239142924611c313ff4cbf1aeb4dbb3c3ae135";
+
+/// A grammar-valid weather value (t 18.4 C, 1021 hPa, 51 %, 41.14 km).
+#[doc(hidden)]
+pub const V6_WEATHER_VALUE: &str = "184;1021;51;4114";
+
+/// Every signed field a lock v6 / execution v5 fixture varies. Start from
+/// `weather()`, `fallback()` or `backup()` and change fields to build
+/// negative cases; `build_v6_bundle` signs whatever it is given.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct V6Params {
+    pub lock_schema: String,
+    pub exec_schema: String,
+    pub lock_entropy_composition: String,
+    pub exec_entropy_composition: String,
+    pub drand_round: u64,
+    pub drand_signature: String,
+    pub drand_randomness: String,
+    pub locked_at: String,
+    pub weather_time: String,
+    pub executed_at: String,
+    pub lock_station: String,
+    pub exec_station: Option<String>,
+    pub weather_value: Option<String>,
+    pub weather_observation_time: Option<String>,
+    pub weather_fallback_reason: Option<String>,
+}
+
+impl V6Params {
+    /// A valid draw that used the primary station's observation. The lock
+    /// is one minute before the latest permitted lock time, and execution
+    /// is five seconds after the round published.
+    #[doc(hidden)]
+    pub fn weather() -> Self {
+        let wt = landobs_v1::weather_time_for_round(BEACON_V6_ROUND)
+            .expect("fixture round has a weather time");
+        let latest_lock =
+            landobs_v1::latest_lock_at(wt).expect("fixture weather time has a lock time");
+        let published = crate::drand::quicknet_round_time(BEACON_V6_ROUND)
+            .expect("fixture round has a publish time");
+        let weather_time = format_canonical(wt, 0);
+        Self {
+            lock_schema: "6".into(),
+            exec_schema: "5".into(),
+            lock_entropy_composition: landobs_v1::ENTROPY_COMPOSITION.into(),
+            exec_entropy_composition: landobs_v1::ENTROPY_COMPOSITION.into(),
+            drand_round: BEACON_V6_ROUND,
+            drand_signature: BEACON_V6_SIGNATURE.into(),
+            drand_randomness: BEACON_V6_RANDOMNESS.into(),
+            locked_at: format_canonical(latest_lock - 60, 0),
+            weather_time: weather_time.clone(),
+            executed_at: format_canonical(published + 5, 0),
+            lock_station: landobs_v1::PRIMARY_STATION.into(),
+            exec_station: Some(landobs_v1::PRIMARY_STATION.into()),
+            weather_value: Some(V6_WEATHER_VALUE.into()),
+            weather_observation_time: Some(weather_time),
+            weather_fallback_reason: None,
+        }
+    }
+
+    /// A valid draw with no observation by the deadline: drand only.
+    #[doc(hidden)]
+    pub fn fallback() -> Self {
+        Self {
+            weather_value: None,
+            weather_observation_time: None,
+            weather_fallback_reason: Some(landobs_v1::FALLBACK_NO_OBSERVATION.into()),
+            ..Self::weather()
+        }
+    }
+
+    /// A valid draw that used the backup station's observation.
+    #[doc(hidden)]
+    pub fn backup() -> Self {
+        Self {
+            exec_station: Some(landobs_v1::STATIONS[1].into()),
+            ..Self::weather()
+        }
+    }
+}
+
+/// The three entries every v6 fixture uses.
+#[doc(hidden)]
+pub fn v6_entries() -> Vec<Entry> {
+    [
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    ]
+    .iter()
+    .map(|id| Entry {
+        id: (*id).into(),
+        weight: 1,
+    })
+    .collect()
+}
+
+/// Build and sign a resolver-driven bundle (no inline keys) from `p`. The
+/// seed and winners are recomputed from `p`, so they always agree with
+/// the receipt. Returns `(bundle_json, public_key_hex, signing_key_id)`.
+#[doc(hidden)]
+pub fn build_v6_bundle(p: &V6Params) -> (String, String, String) {
+    let sk = test_signing_key();
+    let pk_bytes: [u8; 32] = sk.verifying_key().to_bytes();
+    let pk_hex = hex::encode(pk_bytes);
+    let kid = crate::protocol::crypto::key_id(&pk_bytes);
+    let entries = v6_entries();
+    let draw_id = "22222222-2222-2222-2222-222222222222";
+    let (ehash, _) = entry_hash(draw_id, &entries);
+    let (seed_bytes, _) = match p.weather_value.as_deref() {
+        Some(w) => compute_seed(&ehash, &p.drand_randomness, w),
+        None => compute_seed_drand_only(&ehash, &p.drand_randomness),
+    };
+    let winners = draw(&entries, &seed_bytes, 2).unwrap();
+    let results: Vec<String> = winners.iter().map(|w| w.entry_id.clone()).collect();
+    let chain = crate::drand::QUICKNET_CHAIN_HASH;
+
+    let lock_jcs = serde_json::json!({
+        "commitment_hash": "00".repeat(32),
+        "drand_chain": chain,
+        "drand_round": p.drand_round,
+        "draw_id": draw_id,
+        "entropy_composition": &p.lock_entropy_composition,
+        "entry_hash": &ehash,
+        "fair_pick_version": "0.1.0",
+        "jcs_version": "sha256-jcs-v1",
+        "locked_at": &p.locked_at,
+        "operator_id": "11111111-1111-1111-1111-111111111111",
+        "operator_slug": "acme-prizes",
+        "schema_version": &p.lock_schema,
+        "sequence": 1,
+        "signature_algorithm": "ed25519",
+        "signing_key_id": &kid,
+        "wallop_core_version": "0.29.0",
+        "weather_station": &p.lock_station,
+        "weather_time": &p.weather_time,
+        "winner_count": 2
+    })
+    .to_string();
+    let lock_sig_hex = hex::encode(sk.sign(lock_jcs.as_bytes()).to_bytes());
+
+    let exec_jcs = serde_json::json!({
+        "drand_chain": chain,
+        "drand_randomness": &p.drand_randomness,
+        "drand_round": p.drand_round,
+        "drand_signature": &p.drand_signature,
+        "drand_signature_algorithm": "bls12_381_g2",
+        "draw_id": draw_id,
+        "entropy_composition": &p.exec_entropy_composition,
+        "entry_hash": &ehash,
+        "executed_at": &p.executed_at,
+        "fair_pick_version": "0.1.0",
+        "jcs_version": "sha256-jcs-v1",
+        "lock_receipt_hash": lock_receipt_hash(&lock_jcs),
+        "merkle_algorithm": "sha256-pairwise-v1",
+        "operator_id": "11111111-1111-1111-1111-111111111111",
+        "operator_slug": "acme-prizes",
+        "results": &results,
+        "schema_version": &p.exec_schema,
+        "seed": hex::encode(seed_bytes),
+        "sequence": 1,
+        "signature_algorithm": "ed25519",
+        "signing_key_id": &kid,
+        "wallop_core_version": "0.29.0",
+        "weather_fallback_reason": &p.weather_fallback_reason,
+        "weather_observation_time": &p.weather_observation_time,
+        "weather_station": &p.exec_station,
+        "weather_value": &p.weather_value
+    })
+    .to_string();
+    let exec_sig_hex = hex::encode(sk.sign(exec_jcs.as_bytes()).to_bytes());
+
+    let mut entropy = serde_json::Map::new();
+    entropy.insert("drand_round".into(), serde_json::json!(p.drand_round));
+    entropy.insert(
+        "drand_randomness".into(),
+        serde_json::json!(&p.drand_randomness),
+    );
+    entropy.insert(
+        "drand_signature".into(),
+        serde_json::json!(&p.drand_signature),
+    );
+    entropy.insert("drand_chain_hash".into(), serde_json::json!(chain));
+    if let Some(w) = &p.weather_value {
+        entropy.insert("weather_value".into(), serde_json::json!(w));
+    }
+
+    let bundle = serde_json::json!({
+        "version": 1,
+        "draw_id": draw_id,
+        "entries": entries.iter().map(|e| serde_json::json!({"uuid": &e.id, "weight": e.weight})).collect::<Vec<_>>(),
+        "results": winners.iter().map(|w| serde_json::json!({"entry_id": &w.entry_id, "position": w.position})).collect::<Vec<_>>(),
+        "entropy": entropy,
+        "lock_receipt": { "payload_jcs": &lock_jcs, "signature_hex": &lock_sig_hex },
+        "execution_receipt": { "payload_jcs": &exec_jcs, "signature_hex": &exec_sig_hex }
+    })
+    .to_string();
+    (bundle, pk_hex, kid)
+}
+
 /// Apply `edit` to the signed execution receipt payload of bundle `json`
 /// and re-sign it with the test signing key, so the execution signature
 /// still verifies. Returns the whole bundle as a JSON value.
@@ -428,6 +640,7 @@ mod beacon_tests {
 mod fixture_tests {
     use super::*;
     use crate::bundle::ProofBundle;
+    use crate::protocol::landobs_v1;
     use crate::verify_steps::{VerifierMode, verify_bundle, verify_bundle_with};
 
     fn entries() -> Vec<Entry> {
@@ -458,5 +671,80 @@ mod fixture_tests {
             VerifierMode::Attestable,
         );
         assert!(report.passed(), "steps: {:?}", report.steps);
+    }
+
+    #[test]
+    fn v6_fixture_beacon_is_genuine() {
+        assert!(
+            crate::drand::verify_drand_round(
+                crate::drand::QUICKNET_CHAIN_HASH,
+                BEACON_V6_ROUND,
+                BEACON_V6_SIGNATURE,
+                BEACON_V6_RANDOMNESS
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn v6_fixture_timestamps_follow_the_schedule() {
+        use crate::verify_steps::chrono_parse_canonical;
+        let p = V6Params::weather();
+        let published = crate::drand::quicknet_round_time(p.drand_round).unwrap();
+        let wt = landobs_v1::parse_weather_time(&p.weather_time).unwrap();
+        assert_eq!(Some(wt), landobs_v1::weather_time_for_round(p.drand_round));
+        let locked = chrono_parse_canonical(&p.locked_at).unwrap().timestamp();
+        assert!(locked <= landobs_v1::latest_lock_at(wt).unwrap());
+        assert!(locked < published, "the round must publish after the lock");
+        let executed = chrono_parse_canonical(&p.executed_at).unwrap().timestamp();
+        assert!(executed >= published);
+        assert_eq!(
+            p.weather_observation_time.as_deref(),
+            Some(p.weather_time.as_str())
+        );
+    }
+
+    #[test]
+    fn v6_fixture_receipts_are_signed_and_resolver_driven() {
+        let (json, pk_hex, kid) = build_v6_bundle(&V6Params::weather());
+        let bundle: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let pk: [u8; 32] = hex::decode(&pk_hex).unwrap().try_into().unwrap();
+        assert_eq!(crate::protocol::crypto::key_id(&pk), kid);
+        for wrapper in ["lock_receipt", "execution_receipt"] {
+            let w = &bundle[wrapper];
+            assert!(w.get("operator_public_key_hex").is_none());
+            assert!(w.get("infrastructure_public_key_hex").is_none());
+            let sig: [u8; 64] = hex::decode(w["signature_hex"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap();
+            assert!(crate::protocol::crypto::verify_receipt(
+                w["payload_jcs"].as_str().unwrap().as_bytes(),
+                &sig,
+                &pk
+            ));
+        }
+        let lock: serde_json::Value =
+            serde_json::from_str(bundle["lock_receipt"]["payload_jcs"].as_str().unwrap()).unwrap();
+        assert_eq!(lock["schema_version"], "6");
+        assert_eq!(lock["entropy_composition"], landobs_v1::ENTROPY_COMPOSITION);
+        assert_eq!(lock["weather_station"], "wmo-03749");
+    }
+
+    #[test]
+    fn v6_fallback_fixture_has_no_weather() {
+        let (json, _, _) = build_v6_bundle(&V6Params::fallback());
+        let bundle: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let exec: serde_json::Value =
+            serde_json::from_str(bundle["execution_receipt"]["payload_jcs"].as_str().unwrap())
+                .unwrap();
+        assert!(exec["weather_value"].is_null());
+        assert!(exec["weather_observation_time"].is_null());
+        assert_eq!(
+            exec["weather_fallback_reason"],
+            "no_observation_by_deadline"
+        );
+        assert_eq!(exec["weather_station"], "wmo-03749");
+        assert!(bundle["entropy"].get("weather_value").is_none());
     }
 }
