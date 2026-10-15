@@ -2018,9 +2018,15 @@ mod tests {
 
     #[test]
     fn verify_bundle_bad_drand_chain() {
+        // The unknown chain goes into BOTH the signed execution receipt
+        // (re-signed) and the entropy block, so the entropy binding holds
+        // and the drand step rejects the chain itself.
+        let bad_chain = "00".repeat(32);
         let (json, _) = valid_signed_bundle();
-        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
-        val["entropy"]["drand_chain_hash"] = serde_json::json!("00".repeat(32));
+        let mut val = resign_exec(&json, |exec| {
+            exec["drand_chain"] = serde_json::json!(bad_chain.clone());
+        });
+        val["entropy"]["drand_chain_hash"] = serde_json::json!(bad_chain);
         let bundle = ProofBundle::from_json(&val.to_string()).unwrap();
         let report = verify_bundle(&bundle);
         let bls_step = report
@@ -2029,7 +2035,7 @@ mod tests {
             .find(|s| matches!(s.name, StepName::DrandBlsSignature))
             .unwrap();
         assert!(
-            matches!(bls_step.status, StepStatus::Fail(_)),
+            matches!(&bls_step.status, StepStatus::Fail(r) if r.contains("unknown drand chain")),
             "BLS step should fail for unknown chain, got {:?}",
             bls_step.status
         );
@@ -2910,27 +2916,13 @@ mod tests {
     }
 
     #[test]
-    fn genuine_beacon_passes_drand_step_without_cli_feature() {
+    fn genuine_beacon_passes_drand_step() {
         let (json, _) = valid_signed_bundle();
         let report = verify_bundle(&ProofBundle::from_json(&json).unwrap());
         assert_eq!(drand_step(&report).status, StepStatus::Pass);
     }
 
-    /// Apply `edit` to the signed execution receipt payload of `json` and
-    /// re-sign it with the test infrastructure key, so the exec signature
-    /// still verifies.
-    fn resign_exec(json: &str, edit: impl FnOnce(&mut serde_json::Value)) -> serde_json::Value {
-        let mut bundle: serde_json::Value = serde_json::from_str(json).unwrap();
-        let mut exec: serde_json::Value =
-            serde_json::from_str(bundle["execution_receipt"]["payload_jcs"].as_str().unwrap())
-                .unwrap();
-        edit(&mut exec);
-        let exec_jcs = exec.to_string();
-        let sig_hex = hex::encode(test_signing_key().sign(exec_jcs.as_bytes()).to_bytes());
-        bundle["execution_receipt"]["payload_jcs"] = serde_json::json!(exec_jcs);
-        bundle["execution_receipt"]["signature_hex"] = serde_json::json!(sig_hex);
-        bundle
-    }
+    use crate::_test_support::resign_exec;
 
     fn step_named(report: &VerificationReport, name: StepName) -> &StepResult {
         report.steps.iter().find(|s| s.name == name).unwrap()
@@ -3228,6 +3220,39 @@ mod tests {
     }
 
     #[test]
+    fn entropy_weather_value_added_when_receipt_has_none_fails() {
+        // Drand-only draw: the signed exec receipt's weather_value is null
+        // and entropy has none. Adding a weather_value to the unsigned
+        // entropy block alone must fail the drand step.
+        let entries = vec![
+            Entry {
+                id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+                weight: 1,
+            },
+            Entry {
+                id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
+                weight: 1,
+            },
+        ];
+        let json = crate::_test_support::build_valid_bundle(&entries, None, 1);
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let exec: serde_json::Value =
+            serde_json::from_str(val["execution_receipt"]["payload_jcs"].as_str().unwrap())
+                .unwrap();
+        assert!(exec["weather_value"].is_null());
+        assert!(val["entropy"].get("weather_value").is_none());
+        val["entropy"]["weather_value"] = serde_json::json!("1013");
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(&drand_step(&report).status,
+                StepStatus::Fail(r) if r.contains("entropy.weather_value")),
+            "got {:?}",
+            drand_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
     fn lock_exec_drand_chain_mismatch_fails() {
         let other_chain = "dbd506d6ef76e5f386f41c651dcb808c5bcbd75471cc4eafa3f4df7ad4e4c493";
         let (json, _) = valid_signed_bundle();
@@ -3245,6 +3270,12 @@ mod tests {
                 StepStatus::Fail(r) if r.contains("drand_chain")),
             "got {:?}",
             step_named(&report, StepName::ReceiptFieldConsistency).status
+        );
+        assert!(
+            matches!(&drand_step(&report).status,
+                StepStatus::Fail(r) if r.contains("unknown drand chain")),
+            "got {:?}",
+            drand_step(&report).status
         );
         assert!(!report.passed());
     }

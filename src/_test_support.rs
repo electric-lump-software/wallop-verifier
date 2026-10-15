@@ -349,6 +349,22 @@ pub fn build_valid_v5_bundle(
     (bundle, pk_hex, signing_key_id)
 }
 
+/// Apply `edit` to the signed execution receipt payload of bundle `json`
+/// and re-sign it with the test signing key, so the execution signature
+/// still verifies. Returns the whole bundle as a JSON value.
+#[doc(hidden)]
+pub fn resign_exec(json: &str, edit: impl FnOnce(&mut serde_json::Value)) -> serde_json::Value {
+    let mut bundle: serde_json::Value = serde_json::from_str(json).unwrap();
+    let mut exec: serde_json::Value =
+        serde_json::from_str(bundle["execution_receipt"]["payload_jcs"].as_str().unwrap()).unwrap();
+    edit(&mut exec);
+    let exec_jcs = exec.to_string();
+    let sig_hex = hex::encode(test_signing_key().sign(exec_jcs.as_bytes()).to_bytes());
+    bundle["execution_receipt"]["payload_jcs"] = serde_json::json!(exec_jcs);
+    bundle["execution_receipt"]["signature_hex"] = serde_json::json!(sig_hex);
+    bundle
+}
+
 /// Test-only resolver that maps a fixed `signing_key_id` to a fixed public
 /// key, regardless of `KeyClass`. Used by tests asserting the
 /// resolver-driven verification path on v5/v4 bundles.
