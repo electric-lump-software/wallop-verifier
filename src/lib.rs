@@ -41,7 +41,8 @@ pub use fair_pick_rs::{Entry, Winner, draw};
 
 /// Full v2 verification pipeline.
 ///
-/// Chains: sig checks → lock receipt parse → linkage → entry_hash → seed → draw → compare.
+/// Chains: sig checks → lock receipt parse → linkage → entry_hash → seed → draw → compare
+/// → drand (exec round/chain match the lock's, BLS signature and randomness verify).
 /// `winner_count` is extracted from the signed lock receipt, not passed externally.
 /// Returns Ok(true) if all checks pass, Ok(false) if any check fails,
 /// Err with reason if inputs are structurally invalid (unparseable JSON).
@@ -167,6 +168,38 @@ pub fn verify_full(
         .collect();
 
     if computed_ids != expected_ids {
+        return Ok(false);
+    }
+
+    // Step 9: drand. The randomness must be the genuine quicknet beacon
+    // for the round the lock receipt committed to.
+    let lock_round = lock_parsed
+        .get("drand_round")
+        .and_then(|v| v.as_u64())
+        .ok_or("missing drand_round in lock receipt")?;
+    let lock_chain = lock_parsed
+        .get("drand_chain")
+        .and_then(|v| v.as_str())
+        .ok_or("missing drand_chain in lock receipt")?;
+    let exec_round = exec_parsed
+        .get("drand_round")
+        .and_then(|v| v.as_u64())
+        .ok_or("missing drand_round in execution receipt")?;
+    let exec_chain = exec_parsed
+        .get("drand_chain")
+        .and_then(|v| v.as_str())
+        .ok_or("missing drand_chain in execution receipt")?;
+    let drand_signature = exec_parsed
+        .get("drand_signature")
+        .and_then(|v| v.as_str())
+        .ok_or("missing drand_signature in execution receipt")?;
+
+    if exec_round != lock_round || exec_chain != lock_chain {
+        return Ok(false);
+    }
+    if crate::drand::verify_drand_round(exec_chain, exec_round, drand_signature, drand_randomness)
+        .is_err()
+    {
         return Ok(false);
     }
 
@@ -312,6 +345,138 @@ mod tests {
                 .try_into()
                 .unwrap();
         SigningKey::from_bytes(&secret_bytes)
+    }
+
+    struct SignedPair {
+        lock: String,
+        lock_sig: [u8; 64],
+        exec: String,
+        exec_sig: [u8; 64],
+        pk: [u8; 32],
+        entries: Vec<Entry>,
+    }
+
+    impl SignedPair {
+        fn run(&self) -> Result<bool, String> {
+            verify_full(
+                &self.lock,
+                &self.lock_sig,
+                &self.pk,
+                &self.exec,
+                &self.exec_sig,
+                &self.pk,
+                &self.entries,
+            )
+        }
+    }
+
+    fn signed_pair_with_randomness(
+        randomness: &str,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> SignedPair {
+        use crate::_test_support::{BEACON_ROUND, BEACON_SIGNATURE};
+        let sk = test_signing_key();
+        let pk = sk.verifying_key().to_bytes();
+        let draw_id = "22222222-2222-2222-2222-222222222222";
+        let entries = vec![
+            Entry {
+                id: "11111111-1111-1111-1111-111111111111".into(),
+                weight: 1,
+            },
+            Entry {
+                id: "33333333-3333-3333-3333-333333333333".into(),
+                weight: 1,
+            },
+            Entry {
+                id: "44444444-4444-4444-4444-444444444444".into(),
+                weight: 1,
+            },
+        ];
+        let (ehash, _) = entry_hash(draw_id, &entries);
+        let (seed, _) = compute_seed(&ehash, randomness, "1013");
+        let winners: Vec<String> = draw(&entries, &seed, 1)
+            .unwrap()
+            .into_iter()
+            .map(|w| w.entry_id)
+            .collect();
+
+        let lock = serde_json::json!({
+            "draw_id": draw_id,
+            "winner_count": 1,
+            "entry_hash": ehash,
+            "drand_chain": crate::drand::QUICKNET_CHAIN_HASH,
+            "drand_round": BEACON_ROUND,
+        })
+        .to_string();
+        let lock_sig = sk.sign(lock.as_bytes()).to_bytes();
+
+        let mut exec = serde_json::json!({
+            "lock_receipt_hash": protocol::receipts::lock_receipt_hash(&lock),
+            "entry_hash": ehash,
+            "drand_chain": crate::drand::QUICKNET_CHAIN_HASH,
+            "drand_round": BEACON_ROUND,
+            "drand_signature": BEACON_SIGNATURE,
+            "drand_randomness": randomness,
+            "weather_value": "1013",
+            "seed": hex::encode(seed),
+            "results": winners,
+        });
+        edit(&mut exec);
+        let exec = exec.to_string();
+        let exec_sig = sk.sign(exec.as_bytes()).to_bytes();
+
+        SignedPair {
+            lock,
+            lock_sig,
+            exec,
+            exec_sig,
+            pk,
+            entries,
+        }
+    }
+
+    fn signed_pair_with(edit: impl FnOnce(&mut serde_json::Value)) -> SignedPair {
+        signed_pair_with_randomness(crate::_test_support::BEACON_RANDOMNESS, edit)
+    }
+
+    #[test]
+    fn verify_full_rejects_fake_drand_signature() {
+        let args = signed_pair_with(|exec| {
+            exec["drand_signature"] = serde_json::json!("00".repeat(48));
+        });
+        assert_eq!(args.run(), Ok(false));
+    }
+
+    #[test]
+    fn verify_full_rejects_randomness_not_from_signature() {
+        // Genuine signature for round 1000, but randomness from round 1001,
+        // with seed and winners recomputed from that randomness, so only
+        // the drand check can catch it.
+        let args = signed_pair_with_randomness(crate::_test_support::BEACON_2_RANDOMNESS, |_| {});
+        assert_eq!(args.run(), Ok(false));
+    }
+
+    #[test]
+    fn verify_full_rejects_exec_round_different_from_lock() {
+        // Exec carries the genuine round-1001 beacon, but lock committed round 1000.
+        let args = signed_pair_with_randomness(crate::_test_support::BEACON_2_RANDOMNESS, |exec| {
+            exec["drand_round"] = serde_json::json!(crate::_test_support::BEACON_2_ROUND);
+            exec["drand_signature"] = serde_json::json!(crate::_test_support::BEACON_2_SIGNATURE);
+        });
+        assert_eq!(args.run(), Ok(false));
+    }
+
+    #[test]
+    fn verify_full_rejects_exec_chain_different_from_lock() {
+        let args = signed_pair_with(|exec| {
+            exec["drand_chain"] = serde_json::json!("00".repeat(32));
+        });
+        assert_eq!(args.run(), Ok(false));
+    }
+
+    #[test]
+    fn verify_full_accepts_genuine_beacon() {
+        assert_eq!(signed_pair_with(|_| {}).run(), Ok(true));
     }
 
     #[test]
