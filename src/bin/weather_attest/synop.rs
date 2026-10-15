@@ -11,6 +11,7 @@ pub(crate) fn block_for(station: &str) -> Result<&str, String> {
 }
 
 /// `2026-10-01T19:00:00.000000Z` -> `202610011900`.
+/// Requires a `weather_time` that has passed `landobs_v1::parse_weather_time`.
 pub(crate) fn ogimet_hour(weather_time: &str) -> String {
     format!(
         "{}{}{}{}{}",
@@ -32,6 +33,7 @@ pub(crate) struct SynopReading {
     pub nil: bool,
 }
 
+/// Requires a `weather_time` that has passed `landobs_v1::parse_weather_time`.
 fn find_report<'a>(body: &'a str, block: &str, weather_time: &str) -> Option<&'a str> {
     let prefix = format!(
         "{block},{},{},{},{},{},",
@@ -47,7 +49,7 @@ fn find_report<'a>(body: &'a str, block: &str, weather_time: &str) -> Option<&'a
 
 /// Read the temperature and pressure groups from section 1 of a land
 /// SYNOP (`AAXX YYGGi IIiii iRixhVV Nddff [00fff] 1snTTT … 4PPPP …`),
-/// stopping at section 3 (`333`) or 5 (`555`).
+/// stopping at section 2 (`222Dv`), 3 (`333`), 4 (`444`) or 5 (`555`).
 pub(crate) fn parse_section1(report: &str, block: &str) -> Result<SynopReading, String> {
     let groups: Vec<&str> = report
         .trim()
@@ -76,7 +78,8 @@ pub(crate) fn parse_section1(report: &str, block: &str) -> Result<SynopReading, 
     }
     let mut reading = SynopReading::default();
     for g in groups.iter().skip(start) {
-        if *g == "333" || *g == "555" {
+        let section_2 = g.len() == 5 && g.starts_with("222");
+        if section_2 || *g == "333" || *g == "444" || *g == "555" {
             break;
         }
         if g.len() != 5 || !g.is_ascii() {
@@ -111,9 +114,13 @@ fn pressure(g: &str) -> Option<i64> {
     }
     let v: i64 = digits.parse().ok()?;
     // The thousands digit is omitted: 0203 is 1020.3 hPa, 9987 is 998.7.
-    Some(if v < 5000 { 10_000 + v } else { v })
+    let tenths = if v < 5000 { 10_000 + v } else { v };
+    // Anything outside 850.0..=1100.0 hPa is not a sea-level pressure
+    // (for example a high-altitude station's 4a3hhh height group).
+    (8_500..=11_000).contains(&tenths).then_some(tenths)
 }
 
+/// Requires a `weather_time` that has passed `landobs_v1::parse_weather_time`.
 fn reading_for(
     body: &str,
     station: &str,
@@ -126,6 +133,7 @@ fn reading_for(
     }
 }
 
+/// Requires a `weather_time` that has passed `landobs_v1::parse_weather_time`.
 pub(crate) fn check(body: Option<&str>, station: &str, weather_time: &str, value: &str) -> Outcome {
     let Some(body) = body else {
         return Outcome::Unavailable("no SYNOP for this hour".into());
@@ -154,6 +162,7 @@ pub(crate) fn check(body: Option<&str>, station: &str, weather_time: &str, value
     }
 }
 
+/// Requires a `weather_time` that has passed `landobs_v1::parse_weather_time`.
 pub(crate) fn presence(body: Option<&str>, station: &str, weather_time: &str) -> Outcome {
     let Some(body) = body else {
         return Outcome::Absent("no SYNOP for this hour".into());
@@ -221,6 +230,32 @@ mod tests {
         );
         let r = parse_section1("AAXX 01194 03749 25481 82109 1//// 4////=", "03749").unwrap();
         assert_eq!((r.t_tenths, r.mslp_tenths), (None, None));
+    }
+
+    #[test]
+    fn stops_at_section_2() {
+        let r = parse_section1("AAXX 01194 03749 25481 82109 22200 10184 40210=", "03749").unwrap();
+        assert_eq!((r.t_tenths, r.mslp_tenths), (None, None));
+    }
+
+    #[test]
+    fn stops_at_section_4() {
+        let r = parse_section1("AAXX 01194 03749 25481 82109 444 10184 40210=", "03749").unwrap();
+        assert_eq!((r.t_tenths, r.mslp_tenths), (None, None));
+    }
+
+    #[test]
+    fn pressure_outside_850_to_1100_hpa_is_none() {
+        // A high-altitude station reports 4a3hhh (geopotential height),
+        // which would otherwise decode as an implausible pressure.
+        let r = parse_section1("AAXX 01194 03749 25481 82109 10184 48499=", "03749").unwrap();
+        assert_eq!(r.mslp_tenths, None);
+        let r = parse_section1("AAXX 01194 03749 25481 82109 10184 41010=", "03749").unwrap();
+        assert_eq!(r.mslp_tenths, None);
+        let r = parse_section1("AAXX 01194 03749 25481 82109 10184 48500=", "03749").unwrap();
+        assert_eq!(r.mslp_tenths, Some(8500));
+        let r = parse_section1("AAXX 01194 03749 25481 82109 10184 41000=", "03749").unwrap();
+        assert_eq!(r.mslp_tenths, Some(11000));
     }
 
     #[test]

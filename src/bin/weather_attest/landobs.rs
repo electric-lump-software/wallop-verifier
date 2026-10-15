@@ -98,6 +98,7 @@ pub(crate) fn row_to_value(row: &Row) -> Result<String, String> {
     Ok(value)
 }
 
+/// Requires a `weather_time` that has passed `landobs_v1::parse_weather_time`.
 fn row_for<'a>(rows: &'a [Row], weather_time: &str) -> Option<&'a Row> {
     // Rows are stamped "YYYY-MM-DDTHH:MM:SSZ".
     let want = format!("\"{}Z\"", &weather_time[..19]);
@@ -105,6 +106,7 @@ fn row_for<'a>(rows: &'a [Row], weather_time: &str) -> Option<&'a Row> {
         .find(|r| r.get("datetime").map(|d| d.get()) == Some(want.as_str()))
 }
 
+/// Requires a `weather_time` that has passed `landobs_v1::parse_weather_time`.
 pub(crate) fn check(rows: &[Row], weather_time: &str, value: &str) -> Outcome {
     match row_for(rows, weather_time) {
         None => Outcome::Unavailable(format!("no row for {}", &weather_time[..16])),
@@ -118,6 +120,7 @@ pub(crate) fn check(rows: &[Row], weather_time: &str, value: &str) -> Outcome {
     }
 }
 
+/// Requires a `weather_time` that has passed `landobs_v1::parse_weather_time`.
 pub(crate) fn presence(rows: &[Row], weather_time: &str) -> Outcome {
     match row_for(rows, weather_time) {
         None => Outcome::Absent(format!("no row for {}", &weather_time[..16])),
@@ -185,7 +188,18 @@ mod tests {
     #[test]
     fn scale_decimal_rejects_non_plain_decimals() {
         for bad in [
-            "1e2", "1.0E2", "NaN", "", "-", ".5", "5.", "\"18.3\"", "null", "+1", "1021.5",
+            "1e2",
+            "1.0E2",
+            "NaN",
+            "",
+            "-",
+            ".5",
+            "5.",
+            "\"18.3\"",
+            "null",
+            "+1",
+            "1021.5",
+            "1234567890123456",
         ] {
             assert!(scale_decimal(bad, 0, true).is_err(), "accepted {bad:?}");
         }
