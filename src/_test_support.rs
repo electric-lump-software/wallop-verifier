@@ -13,6 +13,24 @@ use crate::protocol::receipts::lock_receipt_hash;
 use crate::{Entry, compute_seed, compute_seed_drand_only, draw, entry_hash};
 use ed25519_dalek::{Signer, SigningKey};
 
+/// Real quicknet beacons, from
+/// https://api.drand.sh/52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971/public/<round>.
+/// Fixtures use these because every build now verifies the BLS signature.
+#[doc(hidden)]
+pub const BEACON_ROUND: u64 = 1000;
+#[doc(hidden)]
+pub const BEACON_SIGNATURE: &str = "b44679b9a59af2ec876b1a6b1ad52ea9b1615fc3982b19576350f93447cb1125e342b73a8dd2bacbe47e4b6b63ed5e39";
+#[doc(hidden)]
+pub const BEACON_RANDOMNESS: &str =
+    "fe290beca10872ef2fb164d2aa4442de4566183ec51c56ff3cd603d930e54fdd";
+#[doc(hidden)]
+pub const BEACON_2_ROUND: u64 = 1001;
+#[doc(hidden)]
+pub const BEACON_2_SIGNATURE: &str = "b33bf3667cbd5a82de3a24b4e0e9fe5513cc1a0e840368c6e31f5fcfa79bea03f73896b25883abf2853d10337fb8fa41";
+#[doc(hidden)]
+pub const BEACON_2_RANDOMNESS: &str =
+    "b0a591ad1b9002cfc372ac6e30abd3da8d3088d4caae026961743474fb94235f";
+
 /// Fixed test signing key used by all generated bundles. Deterministic so
 /// bundles are reproducible across runs.
 #[doc(hidden)]
@@ -45,7 +63,7 @@ pub fn build_valid_bundle(entries: &[Entry], weather: Option<&str>, winner_count
     // and execution receipts below so signatures verify.
     let draw_id = "22222222-2222-2222-2222-222222222222";
     let (ehash, _) = entry_hash(draw_id, entries);
-    let drand = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+    let drand = BEACON_RANDOMNESS;
 
     let (seed_bytes, _) = match weather {
         Some(w) => compute_seed(&ehash, drand, w),
@@ -61,7 +79,7 @@ pub fn build_valid_bundle(entries: &[Entry], weather: Option<&str>, winner_count
     let lock_jcs = serde_json::json!({
         "commitment_hash": "00".repeat(32),
         "drand_chain": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
-        "drand_round": 12345,
+        "drand_round": BEACON_ROUND,
         "draw_id": "22222222-2222-2222-2222-222222222222",
         "entropy_composition": "drand-quicknet+openmeteo-v1",
         "entry_hash": &ehash,
@@ -87,8 +105,8 @@ pub fn build_valid_bundle(entries: &[Entry], weather: Option<&str>, winner_count
     let exec_jcs = serde_json::json!({
         "drand_chain": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
         "drand_randomness": drand,
-        "drand_round": 12345,
-        "drand_signature": "00".repeat(48),
+        "drand_round": BEACON_ROUND,
+        "drand_signature": BEACON_SIGNATURE,
         "drand_signature_algorithm": "bls12_381_g2",
         "draw_id": "22222222-2222-2222-2222-222222222222",
         "entropy_composition": "drand-quicknet+openmeteo-v1",
@@ -115,9 +133,12 @@ pub fn build_valid_bundle(entries: &[Entry], weather: Option<&str>, winner_count
 
     // Bundle JSON
     let mut entropy = serde_json::Map::new();
-    entropy.insert("drand_round".into(), serde_json::json!(12345));
+    entropy.insert("drand_round".into(), serde_json::json!(BEACON_ROUND));
     entropy.insert("drand_randomness".into(), serde_json::json!(drand));
-    entropy.insert("drand_signature".into(), serde_json::json!("00".repeat(48)));
+    entropy.insert(
+        "drand_signature".into(),
+        serde_json::json!(BEACON_SIGNATURE),
+    );
     entropy.insert(
         "drand_chain_hash".into(),
         serde_json::json!("52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971"),
@@ -172,7 +193,7 @@ pub fn build_valid_v5_bundle(
 
     let draw_id = "22222222-2222-2222-2222-222222222222";
     let (ehash, _) = entry_hash(draw_id, entries);
-    let drand = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+    let drand = BEACON_RANDOMNESS;
 
     let (seed_bytes, _) = match weather {
         Some(w) => compute_seed(&ehash, drand, w),
@@ -188,7 +209,7 @@ pub fn build_valid_v5_bundle(
     let lock_jcs = serde_json::json!({
         "commitment_hash": "00".repeat(32),
         "drand_chain": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
-        "drand_round": 12345,
+        "drand_round": BEACON_ROUND,
         "draw_id": "22222222-2222-2222-2222-222222222222",
         "entropy_composition": "drand-quicknet+openmeteo-v1",
         "entry_hash": &ehash,
@@ -215,8 +236,8 @@ pub fn build_valid_v5_bundle(
     let exec_jcs = serde_json::json!({
         "drand_chain": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
         "drand_randomness": drand,
-        "drand_round": 12345,
-        "drand_signature": "00".repeat(48),
+        "drand_round": BEACON_ROUND,
+        "drand_signature": BEACON_SIGNATURE,
         "drand_signature_algorithm": "bls12_381_g2",
         "draw_id": "22222222-2222-2222-2222-222222222222",
         "entropy_composition": "drand-quicknet+openmeteo-v1",
@@ -243,9 +264,12 @@ pub fn build_valid_v5_bundle(
     let exec_sig_hex = hex::encode(sk.sign(exec_jcs.as_bytes()).to_bytes());
 
     let mut entropy = serde_json::Map::new();
-    entropy.insert("drand_round".into(), serde_json::json!(12345));
+    entropy.insert("drand_round".into(), serde_json::json!(BEACON_ROUND));
     entropy.insert("drand_randomness".into(), serde_json::json!(drand));
-    entropy.insert("drand_signature".into(), serde_json::json!("00".repeat(48)));
+    entropy.insert(
+        "drand_signature".into(),
+        serde_json::json!(BEACON_SIGNATURE),
+    );
     entropy.insert(
         "drand_chain_hash".into(),
         serde_json::json!("52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971"),
@@ -314,5 +338,33 @@ impl KeyResolver for MockResolver {
         } else {
             Err(ResolutionError::KeyNotFound)
         }
+    }
+}
+
+#[cfg(test)]
+mod beacon_tests {
+    use super::*;
+    use crate::drand::{QUICKNET_CHAIN_HASH, verify_drand_round};
+
+    #[test]
+    fn fixture_beacons_are_genuine() {
+        assert!(
+            verify_drand_round(
+                QUICKNET_CHAIN_HASH,
+                BEACON_ROUND,
+                BEACON_SIGNATURE,
+                BEACON_RANDOMNESS
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_drand_round(
+                QUICKNET_CHAIN_HASH,
+                BEACON_2_ROUND,
+                BEACON_2_SIGNATURE,
+                BEACON_2_RANDOMNESS
+            )
+            .is_ok()
+        );
     }
 }

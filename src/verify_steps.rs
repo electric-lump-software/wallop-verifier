@@ -1594,7 +1594,7 @@ mod tests {
 
         let draw_id = "22222222-2222-2222-2222-222222222222";
         let (ehash, _) = entry_hash(draw_id, &entries);
-        let drand_randomness = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let drand_randomness = crate::_test_support::BEACON_RANDOMNESS;
         let weather_val = "1013";
         let (seed_bytes, _) = compute_seed(&ehash, drand_randomness, weather_val);
         let seed_hex = hex::encode(seed_bytes);
@@ -1607,7 +1607,7 @@ mod tests {
         let lock_jcs = serde_json::json!({
             "commitment_hash": "0000000000000000000000000000000000000000000000000000000000000000",
             "drand_chain": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
-            "drand_round": 12345,
+            "drand_round": crate::_test_support::BEACON_ROUND,
             "draw_id": "22222222-2222-2222-2222-222222222222",
             "entropy_composition": "drand-quicknet+openmeteo-v1",
             "entry_hash": &ehash,
@@ -1634,8 +1634,8 @@ mod tests {
         let exec_jcs = serde_json::json!({
             "drand_chain": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
             "drand_randomness": drand_randomness,
-            "drand_round": 12345,
-            "drand_signature": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "drand_round": crate::_test_support::BEACON_ROUND,
+            "drand_signature": crate::_test_support::BEACON_SIGNATURE,
             "drand_signature_algorithm": "bls12_381_g2",
             "draw_id": "22222222-2222-2222-2222-222222222222",
             "entropy_composition": "drand-quicknet+openmeteo-v1",
@@ -1657,7 +1657,8 @@ mod tests {
             "weather_observation_time": "2026-04-09T12:10:00.000000Z",
             "weather_station": "middle-wallop",
             "weather_value": weather_val
-        }).to_string();
+        })
+        .to_string();
         let exec_sig = sk.sign(exec_jcs.as_bytes());
         let exec_sig_hex = hex::encode(exec_sig.to_bytes());
 
@@ -1671,9 +1672,9 @@ mod tests {
             ],
             "results": winners.iter().map(|w| serde_json::json!({"entry_id": &w.entry_id, "position": w.position})).collect::<Vec<_>>(),
             "entropy": {
-                "drand_round": 12345,
+                "drand_round": crate::_test_support::BEACON_ROUND,
                 "drand_randomness": drand_randomness,
-                "drand_signature": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+                "drand_signature": crate::_test_support::BEACON_SIGNATURE,
                 "drand_chain_hash": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
                 "weather_value": weather_val
             },
@@ -1706,12 +1707,11 @@ mod tests {
                 step.status
             );
         }
-        // Without cli feature, step 8 is a skip and the report passes overall.
-        // With cli feature, step 8 runs real BLS (the test bundle uses a fake signature so it fails).
-        #[cfg(not(feature = "cli"))]
+        // The fixture carries a real quicknet beacon, so the report passes
+        // overall whether or not this build runs the BLS step.
         assert!(
             report.passed(),
-            "expected all pass (no cli), got: {:?}",
+            "expected all pass, got: {:?}",
             report.steps
         );
     }
@@ -2298,8 +2298,7 @@ mod tests {
                 step.status
             );
         }
-        // Without cli feature, BLS step is Skip; report passes overall.
-        #[cfg(not(feature = "cli"))]
+        // Real quicknet beacon: the report passes overall in every build.
         assert!(report.passed(), "expected pass; got {:?}", report.steps);
         // mode is plumbed through.
         assert_eq!(report.mode, VerifierMode::Attestable);
