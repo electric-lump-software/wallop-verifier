@@ -772,9 +772,15 @@ pub fn validate_weather_station(station: &str) -> Result<(), String> {
 /// error MUST upgrade, MUST NOT retry. Mirrors `parse_execution_receipt`'s
 /// dispatcher pattern.
 ///
-/// V4 and V5 carry byte-identical field sets; the discriminant exists so
-/// callers can route on whether the bundle's wrapper is expected to carry
-/// inline keys (V4) or to be resolver-driven (V5). See spec §4.2.4.
+/// V4, V5 and V6 carry byte-identical field sets; the discriminant exists
+/// so callers can route on whether the bundle's wrapper is expected to
+/// carry inline keys (V4) or to be resolver-driven (V5). See spec §4.2.4.
+/// V6 is resolver-driven like V5, additionally carries the
+/// `drand-quicknet+metoffice-landobs-v1` tag, and pairs only with
+/// execution receipt V5.
+///
+/// The enum is `#[non_exhaustive]`: callers MUST treat an unrecognised
+/// variant as a verification failure, never as a pass.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ParsedLockReceipt {

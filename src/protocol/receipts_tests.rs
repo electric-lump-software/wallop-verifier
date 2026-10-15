@@ -1039,7 +1039,9 @@ fn lock_v6_requires_the_primary_station() {
     for station in ["middle-wallop", "wmo-03462", "wmo-03772"] {
         let p = lock_v6(|v| v["weather_station"] = serde_json::json!(station));
         assert!(
-            validate_lock_receipt_tags_v6(&p).is_err(),
+            validate_lock_receipt_tags_v6(&p)
+                .unwrap_err()
+                .contains("weather_station"),
             "accepted {station}"
         );
     }
