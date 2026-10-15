@@ -51,9 +51,11 @@ pub enum StepName {
     /// observation hour the drand round implies, `locked_at` is at least
     /// 46 minutes before it, and the execution receipt carries either an
     /// observation of exactly that hour or the fallback reason
-    /// `no_observation_by_deadline`, never part of either. Always `Pass` or
-    /// `Fail` under v6, fallback included, because the schedule is checked
-    /// either way.
+    /// `no_observation_by_deadline`, never a mix of the two. Always `Pass`
+    /// or `Fail` under v6, fallback included, because the schedule is
+    /// checked either way. On a fallback, `Pass` means the schedule holds.
+    /// Whether the archive really had no observation is checked by
+    /// `weather-attest`, not here.
     WeatherObservationWindow,
     /// Bundle shape — both receipts MUST parse against the typed structs
     /// (`deny_unknown_fields`), MUST resolve via the schema_version
@@ -779,10 +781,12 @@ pub fn verify_bundle_with<R: KeyResolver>(
 
     // === Step 11: Weather observation window ===
     //
-    // exec.weather_observation_time MUST fall in
-    // [lock.weather_time, lock.weather_time + 3600s]. Prevents an
-    // infrastructure-level attacker from fetching weather from any point
-    // in time and attributing it to the draw's declared window.
+    // Lock v4/v5: exec.weather_observation_time MUST fall in
+    // [lock.weather_time - 3600s, lock.weather_time].
+    // Lock v6 / exec v5: lock.weather_time is the hour the drand round
+    // implies, the lock is at least 46 minutes before it, and the
+    // observation (if any) is of exactly that hour.
+    // See `StepName::WeatherObservationWindow` for the full rules.
     steps.push(check_weather_observation_window(bundle));
 
     // === Step 12: Bundle shape ===
@@ -1548,11 +1552,14 @@ fn check_landobs_weather(lock: &serde_json::Value, exec: &serde_json::Value) -> 
     }
 
     let locked_at_str = lock_str("locked_at")?;
-    let locked_at = chrono_parse_canonical(locked_at_str)
+    let locked_at = chrono_parse_canonical_strict(locked_at_str)
         .map_err(|e| format!("lock.locked_at ({locked_at_str}): {e}"))?;
     let latest = landobs_v1::latest_lock_at(expected)
         .ok_or_else(|| format!("weather_time {weather_time} has no latest lock time"))?;
-    if locked_at.timestamp_micros() > latest * 1_000_000 {
+    let latest_micros = latest
+        .checked_mul(1_000_000)
+        .ok_or_else(|| format!("latest lock time {latest} is out of range"))?;
+    if locked_at.timestamp_micros() > latest_micros {
         return Err(format!(
             "lock locked_at {locked_at_str} is later than weather_time minus {} minutes ({})",
             landobs_v1::LOCK_OFFSET_SECS / 60,

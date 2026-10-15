@@ -340,6 +340,30 @@ fn v6_lock_one_microsecond_late_fails() {
 }
 
 #[test]
+fn v6_normalising_locked_at_fails_the_window() {
+    // One minute before the latest lock time, written with the minutes
+    // pushed past 59 into the previous hour; a lenient parse reads it as a
+    // valid lock time.
+    let honest = format_canonical(latest_lock(derived_weather_time()) - 60, 0);
+    let earlier = format_canonical(latest_lock(derived_weather_time()) - 60 - 3600, 0);
+    let minutes: u32 = earlier[14..16].parse().unwrap();
+    let locked_at = format!("{}{}{}", &earlier[..14], minutes + 60, &earlier[16..]);
+    assert_eq!(
+        chrono_parse_canonical(&locked_at).unwrap().timestamp(),
+        chrono_parse_canonical(&honest).unwrap().timestamp()
+    );
+    let p = V6Params {
+        locked_at,
+        ..V6Params::weather()
+    };
+    assert_step_fails(
+        &run(&p),
+        StepName::WeatherObservationWindow,
+        "lock.locked_at",
+    );
+}
+
+#[test]
 fn v6_observation_an_hour_before_weather_time_fails() {
     // Allowed under lock v5; not under v6.
     let p = V6Params {
@@ -367,6 +391,16 @@ fn v6_partial_weather_fails() {
         V6Params {
             weather_fallback_reason: None,
             ..V6Params::fallback()
+        },
+        V6Params {
+            weather_value: None,
+            weather_fallback_reason: Some("no_observation_by_deadline".into()),
+            ..V6Params::weather()
+        },
+        V6Params {
+            weather_observation_time: None,
+            weather_fallback_reason: Some("no_observation_by_deadline".into()),
+            ..V6Params::weather()
         },
     ];
     for p in cases {
