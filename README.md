@@ -193,6 +193,34 @@ const ok = verify_wasm(
 );
 ```
 
+#### Verifying a proof bundle in the browser: the gate
+
+`verify_bundle_with_resolved_keys_wasm(bundle_json, resolved_keys, mode) -> bool` is the browser gate. It runs the full step pipeline, the same checks as the CLI, drand included. A proof page's green result must come from this function returning `true`, and from nothing else.
+
+```js
+import init, { verify_bundle_with_resolved_keys_wasm } from "./pkg/wallop_verifier.js";
+
+await init();
+
+// Keys come from wallop's keys endpoint, never from the bundle itself.
+const res = await fetch(`${wallopBaseUrl}/operator/${slug}/keys`);
+const { keys } = await res.json(); // [{ key_id, public_key_hex, key_class, inserted_at }, ...]
+
+const ok = verify_bundle_with_resolved_keys_wasm(bundleJson, keys, "attestable");
+```
+
+Fetch the keys from `/operator/:slug/keys` for attestable mode. Keys taken from the bundle being verified prove only that the bundle agrees with itself. A bundle that fails to parse, an unknown mode or a malformed key throws.
+
+#### `verify_drand_wasm(chain_hash, round, signature_hex, randomness_hex) -> bool`
+
+The drand check on its own, so a page can show it as a separate line: `true` only if the chain is the pinned quicknet chain, the BLS signature is valid for `round`, and `sha256(signature) == randomness`. `round` is a `u64`, so pass a `BigInt`.
+
+- Pass values **only from the signed execution receipt** (`drand_chain`, `drand_round`, `drand_signature`, `drand_randomness`), never from the bundle's unsigned `entropy` block or other page data. A genuine beacon for some other round proves nothing about this draw.
+- Pass hex in **lower case**, as the receipt carries it. Upper case is rejected.
+- It is **never a gate.** It does not check that the beacon belongs to this draw, that it fed the seed, or that the round published after the lock. Only the gate above does.
+
+`verify_full_wasm` is deprecated and is not a gate either.
+
 ---
 
 ## Building the WASM package
@@ -238,6 +266,7 @@ Top-level keys are sorted alphabetically at build time; there is no runtime key 
 | [`wasm-bindgen`](https://crates.io/crates/wasm-bindgen) | WASM bindings |
 | [`serde`](https://crates.io/crates/serde) + [`serde_json`](https://crates.io/crates/serde_json) | JSON (WASM boundary, receipt parsers) |
 | [`serde-wasm-bindgen`](https://crates.io/crates/serde-wasm-bindgen) | JS ↔ Rust value conversion |
+| [`drand-verify`](https://crates.io/crates/drand-verify) (Apache-2.0) | drand BLS beacon verification, in every build including WASM |
 
 ---
 

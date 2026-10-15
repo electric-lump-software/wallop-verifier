@@ -6,6 +6,7 @@
 CLAUDE.md
 .claude/
 docs/superpowers/
+.superpowers/
 
 # Worktrees
 .worktrees/

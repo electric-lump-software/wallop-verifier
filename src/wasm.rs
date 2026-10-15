@@ -206,6 +206,10 @@ pub fn anchor_root_wasm(op_root_hex: &str, exec_root_hex: &str) -> Result<String
 /// Hex inputs must be lower case, as the receipt carries them. The chain
 /// hash and randomness are compared exactly, so upper case is rejected
 /// (fails closed).
+///
+/// Never a gate: it does not check that the beacon belongs to this draw,
+/// fed its seed, or published after the lock. The gate is
+/// `verify_bundle_with_resolved_keys_wasm`.
 #[wasm_bindgen]
 pub fn verify_drand_wasm(
     chain_hash: &str,
