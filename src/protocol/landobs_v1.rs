@@ -58,6 +58,91 @@ pub fn latest_lock_at(weather_time: i64) -> Option<i64> {
     weather_time.checked_sub(LOCK_OFFSET_SECS)
 }
 
+/// Bounds on each part of `weather_value`, inclusive. Physical limits, not
+/// climate expectations: temperature in tenths of a degree C, pressure in
+/// whole hPa, humidity in whole percent, visibility in decametres. They
+/// apply to the canonical parts, after rounding. The shared vector
+/// `weather-value-landobs-v1.json` freezes the same values under `bounds`.
+pub const T_MIN: i64 = -900;
+pub const T_MAX: i64 = 600;
+pub const MSLP_MIN: i64 = 850;
+pub const MSLP_MAX: i64 = 1100;
+pub const RH_MIN: i64 = 0;
+pub const RH_MAX: i64 = 100;
+pub const VIS_MIN: i64 = 0;
+pub const VIS_MAX: i64 = 10_000;
+
+/// Longest `weather_value` accepted, in bytes.
+pub const WEATHER_VALUE_MAX_LEN: usize = 32;
+
+/// A parsed `weather_value`: `"<t>;<mslp>;<rh>;<vis>"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WeatherValue {
+    /// Temperature, tenths of a degree C.
+    pub t: i64,
+    /// Mean sea-level pressure, whole hPa.
+    pub mslp: i64,
+    /// Relative humidity, whole percent.
+    pub rh: i64,
+    /// Visibility, decametres.
+    pub vis: i64,
+}
+
+/// Parse `weather_value` under the tag's grammar. Each part is a decimal
+/// integer with no leading zeros, and only `t` may carry a `-` (never on
+/// zero). Every part must lie within its bounds.
+pub fn parse_weather_value(s: &str) -> Result<WeatherValue, String> {
+    if s.len() > WEATHER_VALUE_MAX_LEN {
+        return Err(format!(
+            "weather_value is longer than {WEATHER_VALUE_MAX_LEN} bytes"
+        ));
+    }
+    let parts: Vec<&str> = s.split(';').collect();
+    if parts.len() != 4 {
+        return Err(format!(
+            "weather_value must have 4 parts separated by ';', got {}",
+            parts.len()
+        ));
+    }
+    Ok(WeatherValue {
+        t: parse_part(parts[0], "t", true, T_MIN, T_MAX)?,
+        mslp: parse_part(parts[1], "mslp", false, MSLP_MIN, MSLP_MAX)?,
+        rh: parse_part(parts[2], "rh", false, RH_MIN, RH_MAX)?,
+        vis: parse_part(parts[3], "vis", false, VIS_MIN, VIS_MAX)?,
+    })
+}
+
+fn parse_part(text: &str, name: &str, signed: bool, min: i64, max: i64) -> Result<i64, String> {
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) if signed => (true, rest),
+        Some(_) => return Err(format!("weather_value {name} must not be negative")),
+        None => (false, text),
+    };
+    if digits.is_empty() || digits.len() > 6 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!(
+            "weather_value {name} ({text:?}) is not a decimal integer"
+        ));
+    }
+    if digits.len() > 1 && digits.starts_with('0') {
+        return Err(format!(
+            "weather_value {name} ({text:?}) has a leading zero"
+        ));
+    }
+    if negative && digits == "0" {
+        return Err(format!("weather_value {name} is -0"));
+    }
+    let magnitude: i64 = digits
+        .parse()
+        .map_err(|e: std::num::ParseIntError| e.to_string())?;
+    let value = if negative { -magnitude } else { magnitude };
+    if !(min..=max).contains(&value) {
+        return Err(format!(
+            "weather_value {name} ({value}) is outside [{min}, {max}]"
+        ));
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,5 +221,81 @@ mod tests {
     #[test]
     fn latest_lock_fails_closed_on_underflow() {
         assert_eq!(latest_lock_at(i64::MIN), None);
+    }
+    #[test]
+    fn grammar_accepts_canonical_values() {
+        assert_eq!(
+            parse_weather_value("184;1021;51;4114"),
+            Ok(WeatherValue {
+                t: 184,
+                mslp: 1021,
+                rh: 51,
+                vis: 4114
+            })
+        );
+        assert_eq!(
+            parse_weather_value("-35;998;100;0"),
+            Ok(WeatherValue {
+                t: -35,
+                mslp: 998,
+                rh: 100,
+                vis: 0
+            })
+        );
+        assert!(parse_weather_value("0;850;0;10000").is_ok());
+        assert!(parse_weather_value("-900;1100;0;0").is_ok());
+        assert!(parse_weather_value("600;1100;100;10000").is_ok());
+    }
+
+    #[test]
+    fn grammar_rejects_malformed_values() {
+        for bad in [
+            "",
+            "184;1021;51",
+            "184;1021;51;4114;1",
+            ";;;",
+            "0184;1021;51;4114",
+            "184;01021;51;4114",
+            "-0;1021;51;4114",
+            "184;-1021;51;4114",
+            "184;1021;-51;4114",
+            "184;1021;51;-4114",
+            "+184;1021;51;4114",
+            "18.4;1021;51;4114",
+            "1e2;1021;51;4114",
+            " 184;1021;51;4114",
+            "184;1021;51;4114 ",
+            "184,1021,51,4114",
+            "１８４;1021;51;4114",
+            "--1;1021;51;4114",
+            "-;1021;51;4114",
+            "1234567;1021;51;4114",
+        ] {
+            assert!(parse_weather_value(bad).is_err(), "accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn grammar_rejects_out_of_bounds_values() {
+        for bad in [
+            "601;1021;51;4114",
+            "-901;1021;51;4114",
+            "184;849;51;4114",
+            "184;1101;51;4114",
+            "184;1021;101;4114",
+            "184;1021;51;10001",
+        ] {
+            assert!(parse_weather_value(bad).is_err(), "accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn grammar_rejects_overlong_values() {
+        let long = format!("184;1021;51;4114{}", ";".repeat(WEATHER_VALUE_MAX_LEN));
+        assert!(
+            parse_weather_value(&long)
+                .unwrap_err()
+                .contains("longer than")
+        );
     }
 }
