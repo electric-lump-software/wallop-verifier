@@ -4,7 +4,7 @@
 //! The tag fixes every value in this module. Changing any of them needs a
 //! new tag and, with it, new receipt schemas.
 
-pub use crate::drand::{QUICKNET_GENESIS_TIME, QUICKNET_PERIOD_SECS, quicknet_round_time};
+use crate::drand::quicknet_round_time;
 
 /// The `entropy_composition` value of lock v6 and execution v5 receipts.
 pub const ENTROPY_COMPOSITION: &str = "drand-quicknet+metoffice-landobs-v1";
@@ -53,13 +53,15 @@ pub fn weather_time_for_round(round: u64) -> Option<i64> {
 }
 
 /// The latest permitted `locked_at` (unix seconds) for `weather_time`.
-pub fn latest_lock_at(weather_time: i64) -> i64 {
-    weather_time - LOCK_OFFSET_SECS
+/// `None` on overflow.
+pub fn latest_lock_at(weather_time: i64) -> Option<i64> {
+    weather_time.checked_sub(LOCK_OFFSET_SECS)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::drand::{QUICKNET_GENESIS_TIME, QUICKNET_PERIOD_SECS};
 
     /// 2026-10-01T19:00:00Z.
     const H: i64 = 1_790_881_200;
@@ -128,6 +130,11 @@ mod tests {
 
     #[test]
     fn latest_lock_is_the_offset_before_the_hour() {
-        assert_eq!(latest_lock_at(H), H - 46 * 60);
+        assert_eq!(latest_lock_at(H), Some(H - 46 * 60));
+    }
+
+    #[test]
+    fn latest_lock_fails_closed_on_underflow() {
+        assert_eq!(latest_lock_at(i64::MIN), None);
     }
 }
