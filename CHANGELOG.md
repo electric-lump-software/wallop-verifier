@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - unreleased
+
+### Fixed — the drand check is now as strict in the browser as in the CLI
+
+The drand step was compiled only into the CLI build, so the WASM verifier on the proof page skipped the BLS signature check, and a skipped check still counted as a pass. It also checked the wrong copy of the beacon. Both are fixed.
+
+- **Drand BLS verification in every build, including WASM.** The beacon signature is checked against the pinned quicknet chain wherever the verifier runs. Before, browser verification skipped it.
+- **The drand step verifies the signed beacon.** It reads `drand_chain`, `drand_round`, `drand_signature` and `drand_randomness` from the signed execution receipt, which is what the seed is derived from, and fails if any is missing. Before, it verified the bundle's unsigned `entropy` block, so a genuine beacon for any round placed there passed whatever the receipt said. The `entropy` block (its drand fields and `weather_value`) must now equal the receipt, or the step fails. If the execution receipt signature fails, the step is skipped, and so the report fails.
+- **Weather observation window.** The step is waived (`NotApplicable`) only when the execution receipt carries no weather at all. A weather value without an observation time, or an observation time without a value, now fails. Before, a missing observation time waived the check even when a weather value fed the seed.
+- **`verify_full` checks drand.** It now verifies the drand BLS signature and randomness, and that the lock and execution receipts name the same round and chain. A receipt missing `drand_round` or `drand_chain`, or an execution receipt missing `drand_signature`, is now an `Err`, as other missing fields already were.
+
+### Changed — **breaking:** a skipped check never counts as a pass
+
+- New `StepStatus::NotApplicable(String)`, for checks that genuinely do not apply (no weather on a drand-only draw; temporal binding in self-consistency mode). Exhaustive `match`es on `StepStatus` need a new arm.
+- `VerificationReport::passed()` accepts only `Pass` and `NotApplicable`, with at least one `Pass`. `Skip` means a check could not run, and now always fails the report.
+
+### Added
+
+- `verify_drand_wasm(chain_hash, round, signature_hex, randomness_hex) -> bool`: the drand check on its own, so the proof page can show it as a separate line. True only if the chain is the pinned quicknet chain, the BLS signature is valid for `round`, and `sha256(signature) == randomness`. `round` is a `u64`, so JavaScript passes a `BigInt`.
+- `Cargo.toml` version bump 0.16.1 → 0.17.0.
+
+The WASM bundle is larger, since the BLS pairing code is now linked in.
+
 ## [0.16.1] - unreleased
 
 ### Added — make `--infra-key-pin` overrides visible

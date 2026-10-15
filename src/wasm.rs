@@ -193,6 +193,20 @@ pub fn anchor_root_wasm(op_root_hex: &str, exec_root_hex: &str) -> Result<String
     )))
 }
 
+/// WASM entry point for the drand check on its own, so the proof page can
+/// show it as a separate line. True iff the chain is the pinned quicknet
+/// chain, the BLS signature is valid for `round`, and
+/// sha256(signature) == randomness.
+#[wasm_bindgen]
+pub fn verify_drand_wasm(
+    chain_hash: &str,
+    round: u64,
+    signature_hex: &str,
+    randomness_hex: &str,
+) -> bool {
+    crate::drand::verify_drand_round(chain_hash, round, signature_hex, randomness_hex).is_ok()
+}
+
 /// WASM entry point for verify_full.
 ///
 /// `winner_count` is extracted from the signed lock receipt, not passed externally.
@@ -355,4 +369,32 @@ pub fn verify_bundle_with_resolved_keys_wasm(
     let resolver = PreResolvedResolver { keys };
     let report = verify_bundle_with(&bundle, &resolver, parsed_mode);
     Ok(report.passed())
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_drand_export_tests {
+    use super::verify_drand_wasm;
+    use crate::_test_support::{BEACON_RANDOMNESS, BEACON_ROUND, BEACON_SIGNATURE};
+    use crate::drand::QUICKNET_CHAIN_HASH;
+    use wasm_bindgen_test::*;
+
+    #[wasm_bindgen_test]
+    fn accepts_real_beacon() {
+        assert!(verify_drand_wasm(
+            QUICKNET_CHAIN_HASH,
+            BEACON_ROUND,
+            BEACON_SIGNATURE,
+            BEACON_RANDOMNESS
+        ));
+    }
+
+    #[wasm_bindgen_test]
+    fn rejects_zero_signature() {
+        assert!(!verify_drand_wasm(
+            QUICKNET_CHAIN_HASH,
+            BEACON_ROUND,
+            &"00".repeat(48),
+            BEACON_RANDOMNESS
+        ));
+    }
 }
