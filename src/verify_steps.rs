@@ -2,7 +2,9 @@ use crate::bundle::ProofBundle;
 use crate::key_resolver::{BundleEmbeddedResolver, InsertedAt, KeyClass, KeyResolver, ResolvedKey};
 use crate::protocol::crypto;
 use crate::protocol::receipts::{
-    EXECUTION_SCHEMA_VERSION_V5, LOCK_SCHEMA_VERSION_V6, ParsedExecutionReceipt, ParsedLockReceipt,
+    ENTROPY_COMPOSITION, EXECUTION_SCHEMA_VERSION, EXECUTION_SCHEMA_VERSION_V3,
+    EXECUTION_SCHEMA_VERSION_V4, EXECUTION_SCHEMA_VERSION_V5, LOCK_SCHEMA_VERSION,
+    LOCK_SCHEMA_VERSION_V5, LOCK_SCHEMA_VERSION_V6, ParsedExecutionReceipt, ParsedLockReceipt,
     lock_receipt_hash, parse_execution_receipt, parse_lock_receipt,
     validate_execution_receipt_tags, validate_execution_receipt_tags_v3,
     validate_execution_receipt_tags_v4, validate_execution_receipt_tags_v5,
@@ -47,7 +49,9 @@ pub enum StepName {
     /// `weather_station` is checked against the Land Observations tag's
     /// station list instead: the lock names the primary station, the
     /// execution receipt names a listed station, and a fallback names the
-    /// primary.
+    /// primary. The rules are chosen by each receipt's
+    /// `(schema_version, entropy_composition)` pair; a pair the verifier
+    /// does not know fails this step.
     ReceiptFieldConsistency,
     /// Weather observation window. Lock v4/v5: the execution receipt's
     /// `weather_observation_time` falls in
@@ -61,7 +65,9 @@ pub enum StepName {
     /// or `Fail` under v6, fallback included, because the schedule is
     /// checked either way. On a fallback, `Pass` means the schedule holds.
     /// Whether the archive really had no observation is checked by
-    /// `wallop-verify weather-attest`, not here.
+    /// `wallop-verify weather-attest`, not here. The rules are chosen by
+    /// each receipt's `(schema_version, entropy_composition)` pair, never
+    /// the schema alone; a pair the verifier does not know fails this step.
     WeatherObservationWindow,
     /// Bundle shape — both receipts MUST parse against the typed structs
     /// (`deny_unknown_fields`), MUST resolve via the schema_version
@@ -778,15 +784,16 @@ pub fn verify_bundle_with<R: KeyResolver>(
     // the exec's own duplicated fields back to the lock.
     //
     // Fields checked (spec §4.2.5): draw_id, operator_id, sequence,
-    // drand_chain, drand_round, weather_station. Bundle envelope draw_id
-    // also cross-checked. Lock v6 / exec v5: `weather_station` is not
-    // compared for equality; it is checked against the Land Observations
-    // tag's station list (`check_landobs_stations`). See
+    // drand_chain, drand_round, weather_station, entropy_composition.
+    // Bundle envelope draw_id also cross-checked. Lock v6 / exec v5:
+    // `weather_station` is not compared for equality; it is checked
+    // against the Land Observations tag's station list (`check_landobs_stations`). See
     // `StepName::ReceiptFieldConsistency`. signing_key_id deliberately NOT
     // checked (lock = operator key, exec = infra key; different by design).
     // operator_slug NOT checked (derivative of operator_id). Algorithm
     // identity tags NOT cross-checked (validated per-receipt against pinned
-    // values already).
+    // values already), except entropy_composition, which also selects the
+    // rules both receipts are checked under.
     steps.push(check_receipt_field_consistency(bundle));
 
     // === Step 11: Weather observation window ===
@@ -1401,6 +1408,8 @@ fn check_drand_beacon(bundle: &ProofBundle, exec: &serde_json::Value) -> Result<
 
     // Under lock v6 / execution v5 the beacon must also have been public
     // when the execution receipt was signed. Either schema triggers it.
+    // An unrecognised pair gets the stricter rule too; the steps that pick
+    // their rules from the pair fail it outright.
     if weather_rules(&lock, exec) != WeatherRules::Legacy {
         drand_round_before_execution(round, exec_str("executed_at")?)?;
     }
@@ -1457,6 +1466,10 @@ const SCHEMA_PAIRING_ERROR: &str = "lock receipt schema_version \"6\" and execut
 
 // Fields that MUST be byte-identical between lock and exec receipts per
 // spec §4.2.5. draw_id is also cross-checked against the bundle envelope.
+// entropy_composition is compared as well: it picks the rule set, so both
+// receipts must name the same one. Today a differing tag already makes one
+// receipt's (schema_version, entropy_composition) pair unknown, which fails
+// first; the comparison guards a schema that later carries two tags.
 const CROSS_CHECKED_FIELDS: &[&str] = &[
     "draw_id",
     "operator_id",
@@ -1464,6 +1477,7 @@ const CROSS_CHECKED_FIELDS: &[&str] = &[
     "drand_chain",
     "drand_round",
     "weather_station",
+    "entropy_composition",
 ];
 
 // Under lock v6 / execution v5, `weather_station` is not compared for
@@ -1475,6 +1489,7 @@ const CROSS_CHECKED_FIELDS_LANDOBS: &[&str] = &[
     "sequence",
     "drand_chain",
     "drand_round",
+    "entropy_composition",
 ];
 
 fn check_landobs_stations(
@@ -1561,17 +1576,23 @@ fn check_receipt_field_consistency(bundle: &ProofBundle) -> StepResult {
     }
 
     let rules = weather_rules(&lock, &exec);
-    if rules == WeatherRules::Mismatched {
-        return StepResult {
-            name: StepName::ReceiptFieldConsistency,
-            status: StepStatus::Fail(SCHEMA_PAIRING_ERROR.into()),
-            detail: None,
-        };
-    }
-    let fields = if rules == WeatherRules::LandObs {
-        CROSS_CHECKED_FIELDS_LANDOBS
-    } else {
-        CROSS_CHECKED_FIELDS
+    let fields = match &rules {
+        WeatherRules::Legacy => CROSS_CHECKED_FIELDS,
+        WeatherRules::LandObs => CROSS_CHECKED_FIELDS_LANDOBS,
+        WeatherRules::Mismatched => {
+            return StepResult {
+                name: StepName::ReceiptFieldConsistency,
+                status: StepStatus::Fail(SCHEMA_PAIRING_ERROR.into()),
+                detail: None,
+            };
+        }
+        WeatherRules::Unrecognised(reason) => {
+            return StepResult {
+                name: StepName::ReceiptFieldConsistency,
+                status: StepStatus::Fail(reason.clone()),
+                detail: None,
+            };
+        }
     };
 
     // Every cross-checked field must match byte-identically.
@@ -1611,28 +1632,110 @@ fn check_receipt_field_consistency(bundle: &ProofBundle) -> StepResult {
 /// (all of them, as of v4). The fallback-reason rule applies only to these.
 const EXEC_SCHEMAS_WITH_FALLBACK_REASON: &[&str] = &["2", "3", "4"];
 
-/// Which weather rules govern a receipt pair.
+/// The rule set one known `(schema_version, entropy_composition)` pair
+/// selects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WeatherRules {
-    /// Lock v4/v5 with execution v2/v3/v4: the rules before the Land
-    /// Observations tag, unchanged.
+enum RuleSet {
+    /// The forecast tag on lock v4/v5 or execution v2/v3/v4.
     Legacy,
-    /// Lock v6 with execution v5.
+    /// The Land Observations tag on lock v6 or execution v5.
     LandObs,
-    /// One receipt is v6/v5 and the other is not.
+}
+
+/// Every lock receipt `(schema_version, entropy_composition)` pair the
+/// verifier knows. A schema may in future carry more than one tag, so the
+/// rule set is chosen by the pair, never by the schema alone.
+const LOCK_RULE_SETS: &[(&str, &str, RuleSet)] = &[
+    (LOCK_SCHEMA_VERSION, ENTROPY_COMPOSITION, RuleSet::Legacy),
+    (LOCK_SCHEMA_VERSION_V5, ENTROPY_COMPOSITION, RuleSet::Legacy),
+    (
+        LOCK_SCHEMA_VERSION_V6,
+        crate::protocol::landobs_v1::ENTROPY_COMPOSITION,
+        RuleSet::LandObs,
+    ),
+];
+
+/// Every execution receipt `(schema_version, entropy_composition)` pair
+/// the verifier knows.
+const EXEC_RULE_SETS: &[(&str, &str, RuleSet)] = &[
+    (
+        EXECUTION_SCHEMA_VERSION,
+        ENTROPY_COMPOSITION,
+        RuleSet::Legacy,
+    ),
+    (
+        EXECUTION_SCHEMA_VERSION_V3,
+        ENTROPY_COMPOSITION,
+        RuleSet::Legacy,
+    ),
+    (
+        EXECUTION_SCHEMA_VERSION_V4,
+        ENTROPY_COMPOSITION,
+        RuleSet::Legacy,
+    ),
+    (
+        EXECUTION_SCHEMA_VERSION_V5,
+        crate::protocol::landobs_v1::ENTROPY_COMPOSITION,
+        RuleSet::LandObs,
+    ),
+];
+
+/// Which weather rules govern a receipt pair.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum WeatherRules {
+    /// Lock v4/v5 with execution v2/v3/v4, both on the forecast tag: the
+    /// rules before the Land Observations tag, unchanged.
+    Legacy,
+    /// Lock v6 with execution v5, both on the Land Observations tag.
+    LandObs,
+    /// Both receipts are known pairs, but one is v6/v5 and the other is not.
     Mismatched,
+    /// A receipt's `(schema_version, entropy_composition)` pair is not one
+    /// the verifier knows. Fails closed: every step that picks its rules
+    /// from the pair fails with this reason.
+    Unrecognised(String),
+}
+
+/// The rule set `receipt`'s `(schema_version, entropy_composition)` pair
+/// selects from `known`, or why it selects none.
+fn rule_set_for(
+    which: &str,
+    receipt: &serde_json::Value,
+    known: &[(&str, &str, RuleSet)],
+) -> Result<RuleSet, String> {
+    let text = |field: &str| receipt.get(field).and_then(|v| v.as_str());
+    let schema = text("schema_version")
+        .ok_or_else(|| format!("{which} receipt schema_version is missing or not a string"))?;
+    if !known.iter().any(|(s, _, _)| *s == schema) {
+        return Err(format!(
+            "{which} receipt schema_version {schema:?} is not one this verifier knows"
+        ));
+    }
+    let tag = text("entropy_composition");
+    known
+        .iter()
+        .find(|(s, t, _)| *s == schema && Some(*t) == tag)
+        .map(|(_, _, rules)| *rules)
+        .ok_or_else(|| {
+            let shown = tag.map_or_else(
+                || "missing or not a string".to_string(),
+                |t| format!("{t:?}"),
+            );
+            format!(
+                "{which} receipt schema_version {schema:?} with entropy_composition {shown} \
+                 is not a combination this verifier knows"
+            )
+        })
 }
 
 fn weather_rules(lock: &serde_json::Value, exec: &serde_json::Value) -> WeatherRules {
-    let schema_is = |v: &serde_json::Value, want: &str| {
-        v.get("schema_version").and_then(|s| s.as_str()) == Some(want)
-    };
     match (
-        schema_is(lock, LOCK_SCHEMA_VERSION_V6),
-        schema_is(exec, EXECUTION_SCHEMA_VERSION_V5),
+        rule_set_for("lock", lock, LOCK_RULE_SETS),
+        rule_set_for("execution", exec, EXEC_RULE_SETS),
     ) {
-        (true, true) => WeatherRules::LandObs,
-        (false, false) => WeatherRules::Legacy,
+        (Err(reason), _) | (_, Err(reason)) => WeatherRules::Unrecognised(reason),
+        (Ok(RuleSet::Legacy), Ok(RuleSet::Legacy)) => WeatherRules::Legacy,
+        (Ok(RuleSet::LandObs), Ok(RuleSet::LandObs)) => WeatherRules::LandObs,
         _ => WeatherRules::Mismatched,
     }
 }
@@ -1752,6 +1855,13 @@ fn check_weather_observation_window(bundle: &ProofBundle) -> StepResult {
             return StepResult {
                 name: StepName::WeatherObservationWindow,
                 status: StepStatus::Fail(SCHEMA_PAIRING_ERROR.into()),
+                detail: None,
+            };
+        }
+        WeatherRules::Unrecognised(reason) => {
+            return StepResult {
+                name: StepName::WeatherObservationWindow,
+                status: StepStatus::Fail(reason),
                 detail: None,
             };
         }

@@ -58,8 +58,8 @@ pub use fair_pick_rs::{Entry, Winner, draw};
 /// What it does not check, and the step pipeline does: receipt shape
 /// (typed schema parse, algorithm tags, canonical timestamps), the other
 /// cross-receipt fields (`draw_id`, `operator_id`, `sequence`,
-/// `weather_station`), the weather observation window and fallback reason,
-/// key resolution and temporal binding (it trusts whatever keys it is
+/// `weather_station`, `entropy_composition`), the weather observation
+/// window and fallback reason, key resolution and temporal binding (it trusts whatever keys it is
 /// given), and anything in the proof bundle outside the two receipts
 /// (the `entropy` block, `results`).
 ///

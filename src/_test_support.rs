@@ -612,8 +612,22 @@ pub const V6_NEGATIVE_CASES: &[(&str, &[&str])] = &[
         "v5_reason_in_v6_exec",
         &["bundle_shape", "weather_observation_window"],
     ),
-    ("wrong_entropy_composition", &["bundle_shape"]),
-    ("wrong_entropy_composition_exec", &["bundle_shape"]),
+    (
+        "wrong_entropy_composition",
+        &[
+            "bundle_shape",
+            "weather_observation_window",
+            "receipt_field_consistency",
+        ],
+    ),
+    (
+        "wrong_entropy_composition_exec",
+        &[
+            "bundle_shape",
+            "weather_observation_window",
+            "receipt_field_consistency",
+        ],
+    ),
     (
         "lock_v6_with_exec_v4",
         &[

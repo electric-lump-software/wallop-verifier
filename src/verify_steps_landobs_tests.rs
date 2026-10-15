@@ -702,3 +702,245 @@ fn null_value_and_reason_naming_the_backup_fails_window_and_consistency() {
         report.steps
     );
 }
+
+// ── Rules chosen by (schema_version, entropy_composition) ──────────────
+
+/// A tag no receipt schema carries today: a later Land Observations
+/// revision that this verifier has never heard of.
+const UNKNOWN_TAG: &str = "drand-quicknet+metoffice-landobs-v2";
+const NOT_KNOWN: &str = "is not a combination this verifier knows";
+
+/// Every step that fails, in report order.
+fn failing(report: &VerificationReport) -> Vec<StepName> {
+    report
+        .steps
+        .iter()
+        .filter(|s| matches!(s.status, StepStatus::Fail(_)))
+        .map(|s| s.name)
+        .collect()
+}
+
+/// What an unknown pairing must fail: the shape gate (tag validator) and
+/// both steps that pick their rules from the pair. Nothing else.
+const FAILS_CLOSED: [StepName; 3] = [
+    StepName::ReceiptFieldConsistency,
+    StepName::WeatherObservationWindow,
+    StepName::BundleShape,
+];
+
+/// Set the lock and execution `entropy_composition`, re-sign both receipts
+/// with the test key, and re-link the execution receipt to the new lock.
+fn retag(json: &str, lock_tag: &str, exec_tag: &str) -> String {
+    use ed25519_dalek::Signer;
+    let sk = crate::_test_support::test_signing_key();
+    let mut bundle: serde_json::Value = serde_json::from_str(json).unwrap();
+    let payload = |b: &serde_json::Value, w: &str| -> serde_json::Value {
+        serde_json::from_str(b[w]["payload_jcs"].as_str().unwrap()).unwrap()
+    };
+    let mut lock = payload(&bundle, "lock_receipt");
+    lock["entropy_composition"] = serde_json::json!(lock_tag);
+    let lock_jcs = lock.to_string();
+    let mut exec = payload(&bundle, "execution_receipt");
+    exec["entropy_composition"] = serde_json::json!(exec_tag);
+    exec["lock_receipt_hash"] = serde_json::json!(lock_receipt_hash(&lock_jcs));
+    let exec_jcs = exec.to_string();
+    for (w, jcs) in [("lock_receipt", lock_jcs), ("execution_receipt", exec_jcs)] {
+        bundle[w]["signature_hex"] =
+            serde_json::json!(hex::encode(sk.sign(jcs.as_bytes()).to_bytes()));
+        bundle[w]["payload_jcs"] = serde_json::json!(jcs);
+    }
+    bundle.to_string()
+}
+
+fn assert_fails_closed(report: &VerificationReport, case: &str) {
+    assert_eq!(failing(report), FAILS_CLOSED, "{case}: {:?}", report.steps);
+    assert!(!report.passed(), "{case}");
+    for step in &report.steps {
+        if !FAILS_CLOSED.contains(&step.name) {
+            assert!(
+                matches!(step.status, StepStatus::Pass | StepStatus::NotApplicable(_)),
+                "{case}: {} is {:?}",
+                step.name,
+                step.status
+            );
+        }
+    }
+}
+
+#[test]
+fn v6_with_an_unknown_tag_fails_closed() {
+    let forecast = crate::protocol::receipts::ENTROPY_COMPOSITION;
+    let landobs = landobs_v1::ENTROPY_COMPOSITION;
+    for (lock_tag, exec_tag) in [
+        (UNKNOWN_TAG, UNKNOWN_TAG),
+        (UNKNOWN_TAG, landobs),
+        (landobs, UNKNOWN_TAG),
+        (forecast, forecast),
+        (forecast, landobs),
+        (landobs, forecast),
+        ("", ""),
+    ] {
+        let case = format!("lock 6 {lock_tag:?} / exec 5 {exec_tag:?}");
+        for p in [V6Params::weather(), V6Params::fallback()] {
+            let report = run(&V6Params {
+                lock_entropy_composition: lock_tag.into(),
+                exec_entropy_composition: exec_tag.into(),
+                ..p
+            });
+            assert_fails_closed(&report, &case);
+            // Never treated as Land Observations, never skipped, never
+            // waved through as not applicable: the window and the field
+            // check both name the unknown pairing.
+            for name in [
+                StepName::WeatherObservationWindow,
+                StepName::ReceiptFieldConsistency,
+            ] {
+                assert_step_fails(&report, name, NOT_KNOWN);
+            }
+        }
+    }
+}
+
+#[test]
+fn v6_unknown_tag_names_the_receipt_and_the_tag() {
+    let report = run(&V6Params {
+        lock_entropy_composition: UNKNOWN_TAG.into(),
+        exec_entropy_composition: UNKNOWN_TAG.into(),
+        ..V6Params::weather()
+    });
+    assert_eq!(
+        status(&report, StepName::WeatherObservationWindow),
+        &StepStatus::Fail(format!(
+            "lock receipt schema_version \"6\" with entropy_composition \"{UNKNOWN_TAG}\" {NOT_KNOWN}"
+        ))
+    );
+    let report = run(&V6Params {
+        exec_entropy_composition: UNKNOWN_TAG.into(),
+        ..V6Params::weather()
+    });
+    assert_eq!(
+        status(&report, StepName::ReceiptFieldConsistency),
+        &StepStatus::Fail(format!(
+            "execution receipt schema_version \"5\" with entropy_composition \"{UNKNOWN_TAG}\" {NOT_KNOWN}"
+        ))
+    );
+}
+
+#[test]
+fn legacy_v5_v4_with_an_unexpected_tag_fails_closed() {
+    let forecast = crate::protocol::receipts::ENTROPY_COMPOSITION;
+    let landobs = landobs_v1::ENTROPY_COMPOSITION;
+    let entries = crate::_test_support::v6_entries();
+    for weather in [Some("1013"), None] {
+        let (json, pk_hex, kid) = crate::_test_support::build_valid_v5_bundle(&entries, weather, 2);
+        // The untouched bundle passes, and re-signing alone changes nothing.
+        assert!(run_json(&json, &pk_hex, &kid).passed());
+        assert!(run_json(&retag(&json, forecast, forecast), &pk_hex, &kid).passed());
+        for (lock_tag, exec_tag) in [
+            (UNKNOWN_TAG, UNKNOWN_TAG),
+            (landobs, landobs),
+            (UNKNOWN_TAG, forecast),
+            (forecast, UNKNOWN_TAG),
+            (forecast, landobs),
+        ] {
+            let report = run_json(&retag(&json, lock_tag, exec_tag), &pk_hex, &kid);
+            let case = format!("{weather:?}: lock 5 {lock_tag:?} / exec 4 {exec_tag:?}");
+            assert_fails_closed(&report, &case);
+            assert_step_fails(&report, StepName::WeatherObservationWindow, NOT_KNOWN);
+            assert_step_fails(&report, StepName::ReceiptFieldConsistency, NOT_KNOWN);
+        }
+    }
+}
+
+#[test]
+fn legacy_v4_v2_with_an_unexpected_tag_fails_closed() {
+    let forecast = crate::protocol::receipts::ENTROPY_COMPOSITION;
+    let entries = crate::_test_support::v6_entries();
+    for weather in [Some("1013"), None] {
+        let json = crate::_test_support::build_valid_bundle(&entries, weather, 2);
+        let verify = |j: &str| verify_bundle(&ProofBundle::from_json(j).unwrap());
+        assert!(verify(&json).passed());
+        assert!(verify(&retag(&json, forecast, forecast)).passed());
+        for (lock_tag, exec_tag) in [
+            (UNKNOWN_TAG, UNKNOWN_TAG),
+            (landobs_v1::ENTROPY_COMPOSITION, forecast),
+            (forecast, UNKNOWN_TAG),
+        ] {
+            let report = verify(&retag(&json, lock_tag, exec_tag));
+            let case = format!("{weather:?}: lock 4 {lock_tag:?} / exec 2 {exec_tag:?}");
+            assert_fails_closed(&report, &case);
+            assert_step_fails(&report, StepName::WeatherObservationWindow, NOT_KNOWN);
+            assert_step_fails(&report, StepName::ReceiptFieldConsistency, NOT_KNOWN);
+        }
+    }
+}
+
+#[test]
+fn weather_rules_dispatch_on_the_schema_and_tag_pair() {
+    let forecast = crate::protocol::receipts::ENTROPY_COMPOSITION;
+    let landobs = landobs_v1::ENTROPY_COMPOSITION;
+    let r = |schema: &str, tag: Option<&str>| {
+        let mut v = serde_json::json!({ "schema_version": schema });
+        if let Some(tag) = tag {
+            v["entropy_composition"] = serde_json::json!(tag);
+        }
+        v
+    };
+    let unrecognised = |w: WeatherRules| matches!(w, WeatherRules::Unrecognised(_));
+    for (lock, exec) in [("4", "2"), ("4", "3"), ("5", "3"), ("5", "4")] {
+        assert_eq!(
+            weather_rules(&r(lock, Some(forecast)), &r(exec, Some(forecast))),
+            WeatherRules::Legacy,
+            "{lock}/{exec}"
+        );
+    }
+    assert_eq!(
+        weather_rules(&r("6", Some(landobs)), &r("5", Some(landobs))),
+        WeatherRules::LandObs
+    );
+    assert_eq!(
+        weather_rules(&r("6", Some(landobs)), &r("4", Some(forecast))),
+        WeatherRules::Mismatched
+    );
+    assert_eq!(
+        weather_rules(&r("5", Some(forecast)), &r("5", Some(landobs))),
+        WeatherRules::Mismatched
+    );
+    for (lock, exec) in [
+        (r("6", Some(UNKNOWN_TAG)), r("5", Some(landobs))),
+        (r("6", Some(landobs)), r("5", Some(UNKNOWN_TAG))),
+        (r("6", None), r("5", Some(landobs))),
+        (r("6", Some(landobs)), r("5", None)),
+        (r("6", Some(forecast)), r("5", Some(landobs))),
+        (r("5", Some(landobs)), r("4", Some(forecast))),
+        (r("4", Some(UNKNOWN_TAG)), r("2", Some(forecast))),
+        (r("4", Some(forecast)), r("2", Some(landobs))),
+        (r("7", Some(landobs)), r("5", Some(landobs))),
+        (r("6", Some(landobs)), r("6", Some(landobs))),
+        (serde_json::json!({}), r("5", Some(landobs))),
+    ] {
+        assert!(
+            unrecognised(weather_rules(&lock, &exec)),
+            "{lock} / {exec} was not refused"
+        );
+    }
+}
+
+#[test]
+fn entropy_composition_is_cross_checked_under_both_rule_sets() {
+    assert!(CROSS_CHECKED_FIELDS.contains(&"entropy_composition"));
+    assert!(CROSS_CHECKED_FIELDS_LANDOBS.contains(&"entropy_composition"));
+}
+
+#[test]
+fn lock_and_exec_tags_that_differ_fail_field_consistency() {
+    let report = run(&V6Params {
+        exec_entropy_composition: crate::protocol::receipts::ENTROPY_COMPOSITION.into(),
+        ..V6Params::weather()
+    });
+    assert_step_fails(
+        &report,
+        StepName::ReceiptFieldConsistency,
+        "entropy_composition",
+    );
+}
