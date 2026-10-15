@@ -9,7 +9,6 @@ use wallop_verifier::verify_steps::{StepStatus, VerifierMode, verify_bundle, ver
 
 mod endpoint_resolver;
 mod pinned_resolver;
-#[allow(dead_code)]
 mod weather_attest;
 use endpoint_resolver::EndpointResolver;
 
@@ -140,12 +139,34 @@ enum Commands {
         #[cfg(feature = "tui")]
         record: Option<String>,
     },
+    /// Compare a schema 6 bundle's signed weather observation with public
+    /// records: Met Office Land Observations (within 48 hours) and the WMO
+    /// SYNOP via Ogimet. Informational only; never part of the verdict.
+    WeatherAttest {
+        /// Path to proof bundle JSON file, or "-" for stdin
+        bundle: String,
+        /// Met Office DataHub API key for Land Observations. Also read from
+        /// WALLOP_METOFFICE_KEY. Without it, that check is reported as
+        /// unavailable.
+        #[arg(long, value_name = "KEY")]
+        metoffice_key: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match (cli.command, cli.path.as_deref()) {
+        (
+            Some(Commands::WeatherAttest {
+                bundle,
+                metoffice_key,
+            }),
+            _,
+        ) => {
+            let key = metoffice_key.or_else(|| std::env::var("WALLOP_METOFFICE_KEY").ok());
+            weather_attest::run(&bundle, key.as_deref())
+        }
         (
             Some(Commands::Selftest {
                 #[cfg(feature = "tui")]
