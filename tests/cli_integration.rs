@@ -136,4 +136,6 @@ fn drand_only_bundle_omits_weather() {
             step.status
         );
     }
+    // The drand-only fixture is a complete, valid bundle.
+    assert!(report.passed(), "steps: {:?}", report.steps);
 }

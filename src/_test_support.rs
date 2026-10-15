@@ -55,7 +55,11 @@ pub fn test_signing_key() -> SigningKey {
 /// both receipt signatures all verify correctly.
 ///
 /// - `entries`: the draw's entry set
-/// - `weather`: `Some("1013")` for weather-variant, `None` for drand-only
+/// - `weather`: `Some("1013")` for weather-variant, `None` for drand-only.
+///   Drand-only takes the shape wallop_core emits when the weather fetch
+///   falls back: the execution receipt keeps the station, carries
+///   `weather_fallback_reason: "unreachable"`, and has null
+///   `weather_value` / `weather_observation_time`.
 /// - `winner_count`: how many winners the draw picks
 #[doc(hidden)]
 pub fn build_valid_bundle(entries: &[Entry], weather: Option<&str>, winner_count: u32) -> String {
@@ -129,9 +133,9 @@ pub fn build_valid_bundle(entries: &[Entry], weather: Option<&str>, winner_count
         "sequence": 1,
         "signature_algorithm": "ed25519",
         "wallop_core_version": "0.14.1",
-        "weather_fallback_reason": null,
+        "weather_fallback_reason": if weather.is_some() { serde_json::Value::Null } else { serde_json::json!("unreachable") },
         "weather_observation_time": if weather.is_some() { serde_json::json!("2026-04-09T12:10:00.000000Z") } else { serde_json::Value::Null },
-        "weather_station": if weather.is_some() { serde_json::json!("middle-wallop") } else { serde_json::Value::Null },
+        "weather_station": "middle-wallop",
         "weather_value": match weather { Some(w) => serde_json::json!(w), None => serde_json::Value::Null }
     }).to_string();
     let exec_sig_hex = hex::encode(sk.sign(exec_jcs.as_bytes()).to_bytes());
@@ -199,25 +203,8 @@ pub fn build_valid_drand_only_bundle() -> (String, String) {
             weight: 1,
         },
     ];
-    let sk = test_signing_key();
-    let pk_hex = hex::encode(sk.verifying_key().to_bytes());
-
-    // `build_valid_bundle(.., None, ..)` nulls the exec receipt's
-    // weather_station and has no fallback reason. Patch the exec payload
-    // to the real fallback shape and re-sign it. The lock receipt is
-    // untouched, so lock_receipt_hash still links.
-    let mut bundle: serde_json::Value =
-        serde_json::from_str(&build_valid_bundle(&entries, None, 2)).unwrap();
-    let mut exec: serde_json::Value =
-        serde_json::from_str(bundle["execution_receipt"]["payload_jcs"].as_str().unwrap()).unwrap();
-    exec["weather_station"] = serde_json::json!("middle-wallop");
-    exec["weather_fallback_reason"] = serde_json::json!("unreachable");
-    let exec_jcs = exec.to_string();
-    let exec_sig_hex = hex::encode(sk.sign(exec_jcs.as_bytes()).to_bytes());
-    bundle["execution_receipt"]["payload_jcs"] = serde_json::json!(exec_jcs);
-    bundle["execution_receipt"]["signature_hex"] = serde_json::json!(exec_sig_hex);
-
-    (bundle.to_string(), pk_hex)
+    let pk_hex = hex::encode(test_signing_key().verifying_key().to_bytes());
+    (build_valid_bundle(&entries, None, 2), pk_hex)
 }
 
 /// Build a fully-signed, verifiable proof bundle in resolver-driven shape:
@@ -308,9 +295,9 @@ pub fn build_valid_v5_bundle(
         "signature_algorithm": "ed25519",
         "signing_key_id": &signing_key_id,
         "wallop_core_version": "0.18.0",
-        "weather_fallback_reason": null,
+        "weather_fallback_reason": if weather.is_some() { serde_json::Value::Null } else { serde_json::json!("unreachable") },
         "weather_observation_time": if weather.is_some() { serde_json::json!("2026-04-09T12:10:00.000000Z") } else { serde_json::Value::Null },
-        "weather_station": if weather.is_some() { serde_json::json!("middle-wallop") } else { serde_json::Value::Null },
+        "weather_station": "middle-wallop",
         "weather_value": match weather { Some(w) => serde_json::json!(w), None => serde_json::Value::Null }
     }).to_string();
     let exec_sig_hex = hex::encode(sk.sign(exec_jcs.as_bytes()).to_bytes());
@@ -434,5 +421,42 @@ mod beacon_tests {
             )
             .is_ok()
         );
+    }
+}
+
+#[cfg(test)]
+mod fixture_tests {
+    use super::*;
+    use crate::bundle::ProofBundle;
+    use crate::verify_steps::{VerifierMode, verify_bundle, verify_bundle_with};
+
+    fn entries() -> Vec<Entry> {
+        ["a", "b", "c"]
+            .iter()
+            .map(|id| Entry {
+                id: (*id).into(),
+                weight: 1,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn drand_only_bundle_is_valid() {
+        let json = build_valid_bundle(&entries(), None, 2);
+        let report = verify_bundle(&ProofBundle::from_json(&json).unwrap());
+        assert!(report.passed(), "steps: {:?}", report.steps);
+    }
+
+    #[test]
+    fn drand_only_v5_bundle_is_valid() {
+        let (json, pk_hex, kid) = build_valid_v5_bundle(&entries(), None, 2);
+        let pk: [u8; 32] = hex::decode(pk_hex).unwrap().try_into().unwrap();
+        let resolver = MockResolver::new(kid, pk);
+        let report = verify_bundle_with(
+            &ProofBundle::from_json(&json).unwrap(),
+            &resolver,
+            VerifierMode::Attestable,
+        );
+        assert!(report.passed(), "steps: {:?}", report.steps);
     }
 }
