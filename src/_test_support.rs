@@ -473,13 +473,13 @@ pub fn build_v6_bundle(p: &V6Params) -> (String, String, String) {
     let chain = crate::drand::QUICKNET_CHAIN_HASH;
 
     let lock_jcs = serde_json::json!({
-        "commitment_hash": "00".repeat(32),
+        "commitment_hash": &ehash,
         "drand_chain": chain,
         "drand_round": p.drand_round,
         "draw_id": draw_id,
         "entropy_composition": &p.lock_entropy_composition,
         "entry_hash": &ehash,
-        "fair_pick_version": "0.1.0",
+        "fair_pick_version": "0.2.0",
         "jcs_version": "sha256-jcs-v1",
         "locked_at": &p.locked_at,
         "operator_id": "11111111-1111-1111-1111-111111111111",
@@ -506,7 +506,7 @@ pub fn build_v6_bundle(p: &V6Params) -> (String, String, String) {
         "entropy_composition": &p.exec_entropy_composition,
         "entry_hash": &ehash,
         "executed_at": &p.executed_at,
-        "fair_pick_version": "0.1.0",
+        "fair_pick_version": "0.2.0",
         "jcs_version": "sha256-jcs-v1",
         "lock_receipt_hash": lock_receipt_hash(&lock_jcs),
         "merkle_algorithm": "sha256-pairwise-v1",

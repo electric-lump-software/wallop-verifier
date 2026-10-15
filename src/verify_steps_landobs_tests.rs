@@ -546,7 +546,7 @@ fn station_errors_name_the_station_without_option_debug_text() {
 }
 
 #[test]
-fn landobs_cross_checked_fields_differ_only_by_weather_station() {
+fn landobs_cross_checked_fields_swap_weather_station_for_slug_and_fair_pick() {
     let only_legacy: Vec<&str> = CROSS_CHECKED_FIELDS
         .iter()
         .copied()
@@ -558,7 +558,7 @@ fn landobs_cross_checked_fields_differ_only_by_weather_station() {
         .filter(|f| !CROSS_CHECKED_FIELDS.contains(f))
         .collect();
     assert_eq!(only_legacy, ["weather_station"]);
-    assert!(only_landobs.is_empty(), "{only_landobs:?}");
+    assert_eq!(only_landobs, ["operator_slug", "fair_pick_version"]);
 }
 
 fn published() -> i64 {
@@ -728,9 +728,14 @@ const FAILS_CLOSED: [StepName; 3] = [
     StepName::BundleShape,
 ];
 
-/// Set the lock and execution `entropy_composition`, re-sign both receipts
-/// with the test key, and re-link the execution receipt to the new lock.
-fn retag(json: &str, lock_tag: &str, exec_tag: &str) -> String {
+/// Apply `lock_edit` and `exec_edit` to the two signed payloads, re-sign
+/// both receipts with the test key, and re-link the execution receipt to
+/// the new lock.
+fn resign_both(
+    json: &str,
+    lock_edit: impl FnOnce(&mut serde_json::Value),
+    exec_edit: impl FnOnce(&mut serde_json::Value),
+) -> String {
     use ed25519_dalek::Signer;
     let sk = crate::_test_support::test_signing_key();
     let mut bundle: serde_json::Value = serde_json::from_str(json).unwrap();
@@ -738,10 +743,10 @@ fn retag(json: &str, lock_tag: &str, exec_tag: &str) -> String {
         serde_json::from_str(b[w]["payload_jcs"].as_str().unwrap()).unwrap()
     };
     let mut lock = payload(&bundle, "lock_receipt");
-    lock["entropy_composition"] = serde_json::json!(lock_tag);
+    lock_edit(&mut lock);
     let lock_jcs = lock.to_string();
     let mut exec = payload(&bundle, "execution_receipt");
-    exec["entropy_composition"] = serde_json::json!(exec_tag);
+    exec_edit(&mut exec);
     exec["lock_receipt_hash"] = serde_json::json!(lock_receipt_hash(&lock_jcs));
     let exec_jcs = exec.to_string();
     for (w, jcs) in [("lock_receipt", lock_jcs), ("execution_receipt", exec_jcs)] {
@@ -750,6 +755,15 @@ fn retag(json: &str, lock_tag: &str, exec_tag: &str) -> String {
         bundle[w]["payload_jcs"] = serde_json::json!(jcs);
     }
     bundle.to_string()
+}
+
+/// Set the lock and execution `entropy_composition` and re-sign both.
+fn retag(json: &str, lock_tag: &str, exec_tag: &str) -> String {
+    resign_both(
+        json,
+        |lock| lock["entropy_composition"] = serde_json::json!(lock_tag),
+        |exec| exec["entropy_composition"] = serde_json::json!(exec_tag),
+    )
 }
 
 fn assert_fails_closed(report: &VerificationReport, case: &str) {
@@ -975,4 +989,306 @@ fn each_schema_has_exactly_one_tag() {
             );
         }
     }
+}
+
+// ---- fair_pick_version, operator_slug and commitment_hash (v6 / v5 only) ----
+
+const FIELD_MISMATCH: &str = "differs between lock";
+
+/// The v6 bundle for `p` with both receipts edited and re-signed.
+fn v6_edited(
+    p: &V6Params,
+    lock_edit: impl FnOnce(&mut serde_json::Value),
+    exec_edit: impl FnOnce(&mut serde_json::Value),
+) -> VerificationReport {
+    let (json, pk_hex, kid) = build_v6_bundle(p);
+    run_json(&resign_both(&json, lock_edit, exec_edit), &pk_hex, &kid)
+}
+
+/// Exactly `only` fails; every other step passes.
+fn assert_only_fails(report: &VerificationReport, only: StepName, needle: &str, case: &str) {
+    assert_eq!(failing(report), [only], "{case}: {:?}", report.steps);
+    for step in &report.steps {
+        if step.name != only {
+            assert_eq!(step.status, StepStatus::Pass, "{case}: {}", step.name);
+        }
+    }
+    assert_step_fails(report, only, needle);
+}
+
+fn set(field: &'static str, value: serde_json::Value) -> impl FnOnce(&mut serde_json::Value) {
+    move |r| r[field] = value
+}
+
+fn keep(_: &mut serde_json::Value) {}
+
+#[test]
+fn v6_fair_pick_versions_this_verifier_implements_pass() {
+    for v in FAIR_PICK_VERSIONS {
+        for p in [V6Params::weather(), V6Params::fallback()] {
+            let report = v6_edited(
+                &p,
+                set("fair_pick_version", serde_json::json!(v)),
+                set("fair_pick_version", serde_json::json!(v)),
+            );
+            assert!(report.passed(), "{v}: {:?}", report.steps);
+            for step in &report.steps {
+                assert_eq!(step.status, StepStatus::Pass, "{v}: {}", step.name);
+            }
+        }
+    }
+}
+
+#[test]
+fn v6_fair_pick_version_differing_between_receipts_fails_field_consistency() {
+    for (lock_v, exec_v) in [("0.2.0", "0.1.0"), ("0.1.0", "0.2.0"), ("0.2.0", "0.2.1")] {
+        let case = format!("lock {lock_v} / exec {exec_v}");
+        for p in [V6Params::weather(), V6Params::fallback()] {
+            let report = v6_edited(
+                &p,
+                set("fair_pick_version", serde_json::json!(lock_v)),
+                set("fair_pick_version", serde_json::json!(exec_v)),
+            );
+            assert_only_fails(
+                &report,
+                StepName::ReceiptFieldConsistency,
+                FIELD_MISMATCH,
+                &case,
+            );
+            assert_step_fails(
+                &report,
+                StepName::ReceiptFieldConsistency,
+                "fair_pick_version",
+            );
+        }
+    }
+}
+
+#[test]
+fn v6_unknown_fair_pick_version_fails_field_consistency() {
+    for v in ["0.2.1", "0.3.0", "1.0.0", "0.2", "v0.2.0", ""] {
+        for p in [V6Params::weather(), V6Params::fallback()] {
+            let report = v6_edited(
+                &p,
+                set("fair_pick_version", serde_json::json!(v)),
+                set("fair_pick_version", serde_json::json!(v)),
+            );
+            assert_only_fails(
+                &report,
+                StepName::ReceiptFieldConsistency,
+                "is not one this verifier implements",
+                v,
+            );
+        }
+    }
+    let report = v6_edited(
+        &V6Params::weather(),
+        set("fair_pick_version", serde_json::json!("0.2.1")),
+        set("fair_pick_version", serde_json::json!("0.2.1")),
+    );
+    assert_eq!(
+        status(&report, StepName::ReceiptFieldConsistency),
+        &StepStatus::Fail(
+            "fair_pick_version \"0.2.1\" is not one this verifier implements (\"0.1.0\", \"0.2.0\")"
+                .into()
+        )
+    );
+}
+
+#[test]
+fn v6_operator_slug_differing_between_receipts_fails_field_consistency() {
+    for p in [V6Params::weather(), V6Params::fallback()] {
+        let report = v6_edited(
+            &p,
+            keep,
+            set("operator_slug", serde_json::json!("other-prizes")),
+        );
+        assert_only_fails(
+            &report,
+            StepName::ReceiptFieldConsistency,
+            "operator_slug",
+            "exec",
+        );
+        let report = v6_edited(
+            &p,
+            set("operator_slug", serde_json::json!("other-prizes")),
+            keep,
+        );
+        assert_only_fails(
+            &report,
+            StepName::ReceiptFieldConsistency,
+            "operator_slug",
+            "lock",
+        );
+        // The same new slug on both receipts is consistent.
+        let report = v6_edited(
+            &p,
+            set("operator_slug", serde_json::json!("other-prizes")),
+            set("operator_slug", serde_json::json!("other-prizes")),
+        );
+        assert!(report.passed(), "{:?}", report.steps);
+    }
+}
+
+#[test]
+fn v6_lock_commitment_hash_equal_to_entry_hash_passes() {
+    for p in [V6Params::weather(), V6Params::fallback()] {
+        let (json, _, _) = build_v6_bundle(&p);
+        let bundle: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let lock: serde_json::Value =
+            serde_json::from_str(bundle["lock_receipt"]["payload_jcs"].as_str().unwrap()).unwrap();
+        assert_eq!(lock["commitment_hash"], lock["entry_hash"]);
+        assert_eq!(
+            status(&run(&p), StepName::LockReceiptEntryHash),
+            &StepStatus::Pass
+        );
+    }
+}
+
+#[test]
+fn v6_lock_commitment_hash_other_than_entry_hash_fails_lock_entry_hash() {
+    let zeros = "00".repeat(32);
+    let other = "ab".repeat(32);
+    for (label, value) in [
+        ("zeros", serde_json::json!(zeros)),
+        ("other", serde_json::json!(other)),
+        ("upper", serde_json::Value::Null),
+    ] {
+        for p in [V6Params::weather(), V6Params::fallback()] {
+            let (json, pk_hex, kid) = build_v6_bundle(&p);
+            let value = value.clone();
+            let tampered = resign_both(
+                &json,
+                |lock| {
+                    lock["commitment_hash"] = if value.is_null() {
+                        // Same bytes as entry_hash, but upper-case.
+                        serde_json::json!(lock["entry_hash"].as_str().unwrap().to_uppercase())
+                    } else {
+                        value
+                    }
+                },
+                keep,
+            );
+            let report = run_json(&tampered, &pk_hex, &kid);
+            assert_only_fails(
+                &report,
+                StepName::LockReceiptEntryHash,
+                "commitment_hash",
+                label,
+            );
+            assert_step_fails(
+                &report,
+                StepName::LockReceiptEntryHash,
+                "is not its entry_hash",
+            );
+        }
+    }
+}
+
+/// Lock v5 / exec v4 and lock v4 / exec v2: a differing `fair_pick_version`,
+/// a differing or unknown `operator_slug`, an unknown `fair_pick_version` and
+/// a zero `commitment_hash` verify exactly as before (the fixtures already
+/// sign a zero `commitment_hash`).
+#[test]
+fn v6_only_rules_leave_older_schemas_unchanged() {
+    let entries = crate::_test_support::v6_entries();
+    let edits: [(&str, &str, &str, &str, &str); 3] = [
+        // (case, lock fair_pick, exec fair_pick, lock slug, exec slug)
+        (
+            "fair_pick differs",
+            "0.1.0",
+            "9.9.9",
+            "acme-prizes",
+            "acme-prizes",
+        ),
+        (
+            "fair_pick unknown",
+            "9.9.9",
+            "9.9.9",
+            "acme-prizes",
+            "acme-prizes",
+        ),
+        (
+            "slug differs",
+            "0.1.0",
+            "0.1.0",
+            "acme-prizes",
+            "other-prizes",
+        ),
+    ];
+    for weather in [Some("1013"), None] {
+        let (v5, pk_hex, kid) = crate::_test_support::build_valid_v5_bundle(&entries, weather, 2);
+        let v4 = crate::_test_support::build_valid_bundle(&entries, weather, 2);
+        for json in [&v5, &v4] {
+            let lock: serde_json::Value = serde_json::from_str(
+                serde_json::from_str::<serde_json::Value>(json).unwrap()["lock_receipt"]
+                    ["payload_jcs"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(lock["commitment_hash"], "00".repeat(32));
+            assert_ne!(lock["commitment_hash"], lock["entry_hash"]);
+        }
+        for (case, lock_fp, exec_fp, lock_slug, exec_slug) in edits {
+            let edited = |json: &str| {
+                resign_both(
+                    json,
+                    |l| {
+                        l["fair_pick_version"] = serde_json::json!(lock_fp);
+                        l["operator_slug"] = serde_json::json!(lock_slug);
+                    },
+                    |e| {
+                        e["fair_pick_version"] = serde_json::json!(exec_fp);
+                        e["operator_slug"] = serde_json::json!(exec_slug);
+                    },
+                )
+            };
+            let report = run_json(&edited(&v5), &pk_hex, &kid);
+            assert!(
+                report.passed(),
+                "v5/v4 {weather:?} {case}: {:?}",
+                report.steps
+            );
+            let report = verify_bundle(&ProofBundle::from_json(&edited(&v4)).unwrap());
+            assert!(
+                report.passed(),
+                "v4/v2 {weather:?} {case}: {:?}",
+                report.steps
+            );
+        }
+        // Untouched (zero commitment_hash) still passes.
+        assert!(run_json(&v5, &pk_hex, &kid).passed());
+        assert!(verify_bundle(&ProofBundle::from_json(&v4).unwrap()).passed());
+    }
+}
+
+/// The commitment rule follows the lock's rule set, not the pair: a lock 6
+/// paired with exec 4 already fails as a mismatched pair, and a lock 5 paired
+/// with exec 5 is not checked for its commitment.
+#[test]
+fn commitment_hash_rule_follows_the_lock_rule_set() {
+    let zero = |p: V6Params| {
+        v6_edited(
+            &p,
+            set("commitment_hash", serde_json::json!("00".repeat(32))),
+            keep,
+        )
+    };
+    let forecast = crate::protocol::receipts::ENTROPY_COMPOSITION.to_string();
+    let lock5 = zero(V6Params {
+        lock_schema: "5".into(),
+        lock_entropy_composition: forecast.clone(),
+        ..V6Params::weather()
+    });
+    assert_eq!(
+        status(&lock5, StepName::LockReceiptEntryHash),
+        &StepStatus::Pass
+    );
+    let lock6 = zero(V6Params {
+        exec_schema: "4".into(),
+        exec_entropy_composition: forecast,
+        ..V6Params::weather()
+    });
+    assert_step_fails(&lock6, StepName::LockReceiptEntryHash, "commitment_hash");
 }

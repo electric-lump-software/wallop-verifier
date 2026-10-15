@@ -13,6 +13,16 @@ pub const ENTROPY_COMPOSITION: &str = "drand-quicknet+openmeteo-v1";
 pub const DRAND_SIGNATURE_ALGORITHM: &str = "bls12_381_g2";
 pub const MERKLE_ALGORITHM: &str = "sha256-pairwise-v1";
 
+/// `fair_pick` releases whose winner selection this verifier implements
+/// (through `fair_pick_rs`). A receipt's `fair_pick_version` names the
+/// release of the `fair_pick` package that picked the winners. 0.1.0 and
+/// 0.2.0 select identically: 0.2.0 changed only which functions are
+/// public, and both pass the same frozen algorithm vectors. Lock v6 /
+/// execution v5 receipts must carry one of these; older schemas are not
+/// checked. A new `fair_pick` release is added here only once
+/// `fair_pick_rs` is shown to select identically to it.
+pub const FAIR_PICK_VERSIONS: &[&str] = &["0.1.0", "0.2.0"];
+
 // Current supported schema versions. Verifier rejects anything else.
 //
 // Lock receipt history:

@@ -3,9 +3,9 @@ use crate::key_resolver::{BundleEmbeddedResolver, InsertedAt, KeyClass, KeyResol
 use crate::protocol::crypto;
 use crate::protocol::receipts::{
     ENTROPY_COMPOSITION, EXECUTION_SCHEMA_VERSION, EXECUTION_SCHEMA_VERSION_V3,
-    EXECUTION_SCHEMA_VERSION_V4, EXECUTION_SCHEMA_VERSION_V5, LOCK_SCHEMA_VERSION,
-    LOCK_SCHEMA_VERSION_V5, LOCK_SCHEMA_VERSION_V6, ParsedExecutionReceipt, ParsedLockReceipt,
-    lock_receipt_hash, parse_execution_receipt, parse_lock_receipt,
+    EXECUTION_SCHEMA_VERSION_V4, EXECUTION_SCHEMA_VERSION_V5, FAIR_PICK_VERSIONS,
+    LOCK_SCHEMA_VERSION, LOCK_SCHEMA_VERSION_V5, LOCK_SCHEMA_VERSION_V6, ParsedExecutionReceipt,
+    ParsedLockReceipt, lock_receipt_hash, parse_execution_receipt, parse_lock_receipt,
     validate_execution_receipt_tags, validate_execution_receipt_tags_v3,
     validate_execution_receipt_tags_v4, validate_execution_receipt_tags_v5,
     validate_lock_receipt_tags, validate_lock_receipt_tags_v5, validate_lock_receipt_tags_v6,
@@ -30,6 +30,9 @@ pub enum StepName {
     LockSignature,
     ExecSignature,
     ReceiptLinkage,
+    /// The lock receipt's `entry_hash` equals the entry hash recomputed
+    /// from the bundle. Under lock v6 (the Land Observations tag), its
+    /// `commitment_hash` must equal that entry hash too.
     LockReceiptEntryHash,
     ExecReceiptEntryHash,
     SeedRecomputation,
@@ -49,9 +52,11 @@ pub enum StepName {
     /// `weather_station` is checked against the Land Observations tag's
     /// station list instead: the lock names the primary station, the
     /// execution receipt names a listed station, and a fallback names the
-    /// primary. The rules are chosen by each receipt's
-    /// `(schema_version, entropy_composition)` pair; a pair the verifier
-    /// does not know fails this step.
+    /// primary. Under lock v6 / execution v5, `operator_slug` and
+    /// `fair_pick_version` are also byte-identical across the receipts, and
+    /// `fair_pick_version` must be one this verifier implements. The rules
+    /// are chosen by each receipt's `(schema_version, entropy_composition)`
+    /// pair; a pair the verifier does not know fails this step.
     ReceiptFieldConsistency,
     /// Weather observation window. Lock v4/v5: the execution receipt's
     /// `weather_observation_time` falls in
@@ -560,23 +565,24 @@ pub fn verify_bundle_with<R: KeyResolver>(
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let step5a_pass = computed_entry_hash == lock_eh;
-        let step5a_detail = if step5a_pass {
-            None
+        if !step5a_pass {
+            steps.push(StepResult {
+                name: StepName::LockReceiptEntryHash,
+                status: StepStatus::Fail(format!(
+                    "expected {}, got {}",
+                    computed_entry_hash, lock_eh
+                )),
+                detail: Some(StepDetail::HexMismatch {
+                    expected: computed_entry_hash.clone(),
+                    computed: lock_eh.to_string(),
+                }),
+            });
         } else {
-            Some(StepDetail::HexMismatch {
-                expected: computed_entry_hash.clone(),
-                computed: lock_eh.to_string(),
-            })
-        };
-        steps.push(StepResult {
-            name: StepName::LockReceiptEntryHash,
-            status: if step5a_pass {
-                StepStatus::Pass
-            } else {
-                StepStatus::Fail(format!("expected {}, got {}", computed_entry_hash, lock_eh))
-            },
-            detail: step5a_detail,
-        });
+            steps.push(check_lock_commitment_hash(
+                &lock_parsed,
+                &computed_entry_hash,
+            ));
+        }
     }
 
     // === Step 5b: Exec receipt entry_hash ===
@@ -790,10 +796,13 @@ pub fn verify_bundle_with<R: KeyResolver>(
     // against the Land Observations tag's station list (`check_landobs_stations`). See
     // `StepName::ReceiptFieldConsistency`. signing_key_id deliberately NOT
     // checked (lock = operator key, exec = infra key; different by design).
-    // operator_slug NOT checked (derivative of operator_id). Algorithm
-    // identity tags NOT cross-checked (validated per-receipt against pinned
-    // values already), except entropy_composition, which also selects the
-    // rules both receipts are checked under.
+    // Before lock v6 / exec v5, operator_slug and fair_pick_version are NOT
+    // checked (operator_slug is derivative of operator_id). Lock v6 / exec
+    // v5 compares both, and fair_pick_version must also be in
+    // FAIR_PICK_VERSIONS. Algorithm identity tags NOT cross-checked
+    // (validated per-receipt against pinned values already), except
+    // entropy_composition, which also selects the rules both receipts are
+    // checked under.
     steps.push(check_receipt_field_consistency(bundle));
 
     // === Step 11: Weather observation window ===
@@ -1460,6 +1469,56 @@ pub(crate) fn drand_round_after_lock(round: u64, locked_at: &str) -> Result<(), 
     }
 }
 
+/// Step 5a once the lock's `entry_hash` matches: under lock v6 (its
+/// `(schema_version, entropy_composition)` pair selects the Land
+/// Observations rules), `commitment_hash` must equal that entry hash.
+/// Older lock schemas are not checked.
+fn check_lock_commitment_hash(lock: &serde_json::Value, entry_hash: &str) -> StepResult {
+    let pass = || StepResult {
+        name: StepName::LockReceiptEntryHash,
+        status: StepStatus::Pass,
+        detail: None,
+    };
+    if rule_set_for("lock", lock, LOCK_RULE_SETS) != Ok(RuleSet::LandObs) {
+        return pass();
+    }
+    match lock.get("commitment_hash").and_then(|v| v.as_str()) {
+        Some(c) if c == entry_hash => pass(),
+        other => StepResult {
+            name: StepName::LockReceiptEntryHash,
+            status: StepStatus::Fail(format!(
+                "lock receipt commitment_hash ({}) is not its entry_hash ({entry_hash})",
+                other.map_or_else(|| "missing or not a string".to_string(), str::to_string)
+            )),
+            detail: Some(StepDetail::HexMismatch {
+                expected: entry_hash.to_string(),
+                computed: other.unwrap_or("").to_string(),
+            }),
+        },
+    }
+}
+
+/// Under lock v6 / execution v5 the cross-check has already made both
+/// receipts' `fair_pick_version` identical; it must also name a `fair_pick`
+/// release this verifier implements.
+fn check_fair_pick_version(lock: &serde_json::Value) -> Result<(), String> {
+    match lock.get("fair_pick_version").and_then(|v| v.as_str()) {
+        Some(v) if FAIR_PICK_VERSIONS.contains(&v) => Ok(()),
+        other => Err(format!(
+            "fair_pick_version {} is not one this verifier implements ({})",
+            other.map_or_else(
+                || "missing or not a string".to_string(),
+                |v| format!("{v:?}")
+            ),
+            FAIR_PICK_VERSIONS
+                .iter()
+                .map(|v| format!("{v:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
 /// Lock receipt schema 6 and execution receipt schema 5 carry the Land
 /// Observations tag; neither may be paired with any other schema.
 const SCHEMA_PAIRING_ERROR: &str = "lock receipt schema_version \"6\" and execution receipt schema_version \"5\" must be used together";
@@ -1483,6 +1542,10 @@ const CROSS_CHECKED_FIELDS: &[&str] = &[
 // Under lock v6 / execution v5, `weather_station` is not compared for
 // equality: the lock names the primary station and the execution receipt
 // names the station actually used (see `check_landobs_stations`).
+// `operator_slug` and `fair_pick_version` are compared as well, and
+// `fair_pick_version` must name a release this verifier implements (see
+// `check_fair_pick_version`). Older schemas compare neither, so their
+// verification is unchanged.
 const CROSS_CHECKED_FIELDS_LANDOBS: &[&str] = &[
     "draw_id",
     "operator_id",
@@ -1490,6 +1553,8 @@ const CROSS_CHECKED_FIELDS_LANDOBS: &[&str] = &[
     "drand_chain",
     "drand_round",
     "entropy_composition",
+    "operator_slug",
+    "fair_pick_version",
 ];
 
 fn check_landobs_stations(
@@ -1612,7 +1677,8 @@ fn check_receipt_field_consistency(bundle: &ProofBundle) -> StepResult {
     }
 
     if rules == WeatherRules::LandObs
-        && let Err(reason) = check_landobs_stations(&lock, &exec)
+        && let Err(reason) =
+            check_landobs_stations(&lock, &exec).and_then(|()| check_fair_pick_version(&lock))
     {
         return StepResult {
             name: StepName::ReceiptFieldConsistency,
