@@ -48,8 +48,16 @@ pub(crate) struct LandObsClient {
 
 impl LandObsClient {
     pub(crate) fn new(base_url: &str, key: &str) -> Self {
+        // ureq re-sends custom headers on a redirect, so never follow one:
+        // the key must only ever go to `base_url`. Over https, refuse any
+        // downgrade too (tests run against plain-http mock servers).
+        let agent = ureq::AgentBuilder::new()
+            .timeout(TIMEOUT)
+            .redirects(0)
+            .https_only(base_url.starts_with("https://"))
+            .build();
         Self {
-            agent: ureq::AgentBuilder::new().timeout(TIMEOUT).build(),
+            agent,
             base_url: base_url.trim_end_matches('/').to_string(),
             key: key.to_string(),
         }
@@ -65,12 +73,20 @@ impl LandObsClient {
             .set("User-Agent", USER_AGENT)
             .call()
             .map_err(|e| describe("Land Observations", e))?;
+        if (300..400).contains(&response.status()) {
+            return Err(format!(
+                "Land Observations returned HTTP {}",
+                response.status()
+            ));
+        }
         let bytes = read_capped(response, "Land Observations")?;
         serde_json::from_slice(&bytes)
             .map_err(|e| format!("Land Observations response is not a list of rows: {e}"))
     }
 }
 
+/// Pacing is per client: a run must build one `OgimetClient` and pass
+/// `&OgimetClient` down, or the 20-second gap is not kept.
 pub(crate) struct OgimetClient {
     agent: ureq::Agent,
     base_url: String,
@@ -102,6 +118,12 @@ impl OgimetClient {
     /// `Ok(None)` when the response is empty; anything else, including an
     /// error page, is returned as text for the caller to parse.
     pub(crate) fn fetch(&self, block: &str, hour: &str) -> Result<Option<String>, String> {
+        debug_assert!(
+            [block, hour]
+                .iter()
+                .all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())),
+            "block and hour must be ASCII digits"
+        );
         self.wait_turn();
         let response = self
             .agent
@@ -166,6 +188,30 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("401"), "{err}");
         assert!(!err.contains("secret-key"), "{err}");
+    }
+
+    #[test]
+    fn landobs_never_follows_a_redirect_with_the_key() {
+        let mut elsewhere = mockito::Server::new();
+        let stolen = elsewhere
+            .mock("GET", Matcher::Any)
+            .with_status(200)
+            .with_body("[]")
+            .expect(0)
+            .create();
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", "/gcnfur")
+            .with_status(302)
+            .with_header("location", &format!("{}/gcnfur", elsewhere.url()))
+            .with_body("[]")
+            .create();
+        let err = LandObsClient::new(&server.url(), "secret-key")
+            .fetch("gcnfur")
+            .unwrap_err();
+        assert_eq!(err, "Land Observations returned HTTP 302");
+        assert!(!err.contains("secret-key"), "{err}");
+        stolen.assert();
     }
 
     #[test]

@@ -115,8 +115,8 @@ fn pressure(g: &str) -> Option<i64> {
     let v: i64 = digits.parse().ok()?;
     // The thousands digit is omitted: 0203 is 1020.3 hPa, 9987 is 998.7.
     let tenths = if v < 5000 { 10_000 + v } else { v };
-    // Anything outside 850.0..=1100.0 hPa is not a sea-level pressure
-    // (for example a high-altitude station's 4a3hhh height group).
+    // Backstop only: a high-altitude station (which sends 4a3hhh, not
+    // 4PPPP) would need a new tag. Outside 850.0..=1100.0 hPa is rejected.
     (8_500..=11_000).contains(&tenths).then_some(tenths)
 }
 
