@@ -516,3 +516,43 @@ fn legacy_v5_station_difference_still_fails_field_consistency() {
         "weather_station",
     );
 }
+
+#[test]
+fn station_errors_name_the_station_without_option_debug_text() {
+    let exec = serde_json::json!({"weather_station": "wmo-03749", "weather_value": "x"});
+    assert_eq!(
+        check_landobs_stations(&serde_json::json!({}), &exec).unwrap_err(),
+        "lock weather_station missing is not the primary station wmo-03749"
+    );
+    assert_eq!(
+        check_landobs_stations(&serde_json::json!({"weather_station": "wmo-03462"}), &exec)
+            .unwrap_err(),
+        "lock weather_station \"wmo-03462\" is not the primary station wmo-03749"
+    );
+    let lock = serde_json::json!({"weather_station": "wmo-03749"});
+    let off_list = serde_json::json!({"weather_station": "wmo-03772", "weather_value": "x"});
+    assert_eq!(
+        check_landobs_stations(&lock, &off_list).unwrap_err(),
+        "exec weather_station \"wmo-03772\" is not one of \"wmo-03749\", \"wmo-03462\""
+    );
+    assert_eq!(
+        check_landobs_stations(&lock, &serde_json::json!({"weather_value": "x"})).unwrap_err(),
+        "exec weather_station missing is not one of \"wmo-03749\", \"wmo-03462\""
+    );
+}
+
+#[test]
+fn landobs_cross_checked_fields_differ_only_by_weather_station() {
+    let only_legacy: Vec<&str> = CROSS_CHECKED_FIELDS
+        .iter()
+        .copied()
+        .filter(|f| !CROSS_CHECKED_FIELDS_LANDOBS.contains(f))
+        .collect();
+    let only_landobs: Vec<&str> = CROSS_CHECKED_FIELDS_LANDOBS
+        .iter()
+        .copied()
+        .filter(|f| !CROSS_CHECKED_FIELDS.contains(f))
+        .collect();
+    assert_eq!(only_legacy, ["weather_station"]);
+    assert!(only_landobs.is_empty(), "{only_landobs:?}");
+}

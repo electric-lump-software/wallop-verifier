@@ -37,12 +37,12 @@ pub enum StepName {
     /// randomness`, the bundle's `entropy` block equal to the receipt, and
     /// the round published strictly after the lock receipt's `locked_at`.
     DrandBlsSignature,
-    /// Cross-receipt field consistency — every field appearing in both the
-    /// lock and execution receipts MUST be byte-identical. Bundle-envelope
-    /// `draw_id` MUST also match. Closes splice-attack class per spec
-    /// §4.2.5. Appended rather than inserted mid-list so external
-    /// consumers pinning step ordinals are not broken. Under lock v6 /
-    /// execution v5, `weather_station` is checked against the tag's
+    /// Cross-receipt field consistency — the cross-checked fields listed in
+    /// spec §4.2.5 MUST be byte-identical. Bundle-envelope `draw_id` MUST
+    /// also match. Closes splice-attack class per spec §4.2.5. Appended
+    /// rather than inserted mid-list so external consumers pinning step
+    /// ordinals are not broken. Under lock v6 / execution v5,
+    /// `weather_station` is checked against the Land Observations tag's
     /// station list instead: the lock names the primary station, the
     /// execution receipt names a listed station, and a fallback names the
     /// primary.
@@ -59,7 +59,7 @@ pub enum StepName {
     /// or `Fail` under v6, fallback included, because the schedule is
     /// checked either way. On a fallback, `Pass` means the schedule holds.
     /// Whether the archive really had no observation is checked by
-    /// `weather-attest`, not here.
+    /// `wallop-verify weather-attest`, not here.
     WeatherObservationWindow,
     /// Bundle shape — both receipts MUST parse against the typed structs
     /// (`deny_unknown_fields`), MUST resolve via the schema_version
@@ -777,9 +777,12 @@ pub fn verify_bundle_with<R: KeyResolver>(
     //
     // Fields checked (spec §4.2.5): draw_id, operator_id, sequence,
     // drand_chain, drand_round, weather_station. Bundle envelope draw_id
-    // also cross-checked. signing_key_id deliberately NOT checked (lock =
-    // operator key, exec = infra key; different by design). operator_slug
-    // NOT checked (derivative of operator_id). Algorithm identity tags NOT
+    // also cross-checked. Lock v6 / exec v5: `weather_station` is not
+    // compared for equality; it is checked against the Land Observations
+    // tag's station list (`check_landobs_stations`). See
+    // `StepName::ReceiptFieldConsistency`. signing_key_id deliberately NOT
+    // checked (lock = operator key, exec = infra key; different by design).
+    // operator_slug NOT checked (derivative of operator_id). Algorithm identity tags NOT
     // cross-checked (validated per-receipt against pinned values already).
     steps.push(check_receipt_field_consistency(bundle));
 
@@ -1448,21 +1451,30 @@ fn check_landobs_stations(
     exec: &serde_json::Value,
 ) -> Result<(), String> {
     use crate::protocol::landobs_v1::{PRIMARY_STATION, STATIONS};
-    let lock_station = lock.get("weather_station").and_then(|v| v.as_str());
+    // A station renders as its quoted string, or `missing` when absent or
+    // not a string.
+    fn station(receipt: &serde_json::Value) -> Option<&str> {
+        receipt.get("weather_station").and_then(|v| v.as_str())
+    }
+    let render = |s: Option<&str>| s.map_or_else(|| "missing".to_string(), |s| format!("{s:?}"));
+    let lock_station = station(lock);
     if lock_station != Some(PRIMARY_STATION) {
         return Err(format!(
-            "lock weather_station {lock_station:?} is not the primary station {PRIMARY_STATION}"
+            "lock weather_station {} is not the primary station {PRIMARY_STATION}",
+            render(lock_station)
         ));
     }
-    let exec_station = exec
-        .get("weather_station")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "exec weather_station is missing or not a string".to_string())?;
-    if !STATIONS.contains(&exec_station) {
-        return Err(format!(
-            "exec weather_station {exec_station:?} is not one of {STATIONS:?}"
-        ));
-    }
+    let exec_station = match station(exec) {
+        Some(s) if STATIONS.contains(&s) => s,
+        other => {
+            let listed: Vec<String> = STATIONS.iter().map(|s| format!("{s:?}")).collect();
+            return Err(format!(
+                "exec weather_station {} is not one of {}",
+                render(other),
+                listed.join(", ")
+            ));
+        }
+    };
     let fallback = exec.get("weather_value").is_none_or(|v| v.is_null());
     if fallback && exec_station != PRIMARY_STATION {
         return Err(format!(
