@@ -40,7 +40,7 @@ serde_jcs = { version = "0.2", optional = true }
 
 [features]
 default = []
-cli = ["clap", "dep:ureq", "dep:serde_jcs"]
+cli = ["clap", "dep:ureq", "dep:serde_jcs", "serde_json/raw_value"]
 tui = ["cli", "dep:ratatui", "dep:crossterm"]
 
 [[bin]]

@@ -9,6 +9,8 @@ use wallop_verifier::verify_steps::{StepStatus, VerifierMode, verify_bundle, ver
 
 mod endpoint_resolver;
 mod pinned_resolver;
+#[allow(dead_code)]
+mod weather_attest;
 use endpoint_resolver::EndpointResolver;
 
 #[cfg(feature = "tui")]
