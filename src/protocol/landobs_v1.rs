@@ -58,8 +58,9 @@ pub fn latest_lock_at(weather_time: i64) -> Option<i64> {
     weather_time.checked_sub(LOCK_OFFSET_SECS)
 }
 
-/// Parse a lock receipt `weather_time` under this tag. It must be in
-/// canonical RFC 3339 form, a whole UTC hour, and a real calendar time:
+/// Parse a lock receipt `weather_time` under this tag. It must be exactly
+/// `YYYY-MM-DDTHH:MM:SS.ffffffZ` (six fractional digits, `Z` only), a whole
+/// UTC hour, and a real calendar time:
 /// the string must equal its own canonical rendering, so
 /// `18:60` or `09-31` is rejected rather than normalised. Returns unix
 /// seconds.
@@ -378,8 +379,34 @@ mod tests {
             "2026-10-01T24:00:00.000000Z",
             "2026-13-01T19:00:00.000000Z",
         ] {
+            assert!(
+                parse_weather_time(bad)
+                    .unwrap_err()
+                    .contains("valid calendar time"),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_weather_time_rejects_fields_that_would_wrap() {
+        for bad in [
+            "2026-00-01T00:00:00.000000Z",
+            "2026-10-00T00:00:00.000000Z",
+            "2026-10-99T00:00:00.000000Z",
+            "2026-02-29T00:00:00.000000Z",
+            "2026-12-31T23:59:60.000000Z",
+        ] {
             assert!(parse_weather_time(bad).is_err(), "accepted {bad}");
         }
+    }
+
+    #[test]
+    fn parse_weather_time_accepts_a_leap_day() {
+        assert_eq!(
+            parse_weather_time("2024-02-29T00:00:00.000000Z"),
+            Ok(1_709_164_800)
+        );
     }
 
     #[test]
