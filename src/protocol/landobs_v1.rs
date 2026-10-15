@@ -160,6 +160,105 @@ fn parse_part(text: &str, name: &str, signed: bool, min: i64, max: i64) -> Resul
     Ok(value)
 }
 
+/// Round the plain decimal `text` times 10^`shift` to an integer, half
+/// away from zero (19.55 -> 196, -0.05 -> -1, -0.04 -> 0, never "-0").
+/// With `exact`, any digits that would be rounded away must be zero.
+/// Exponents, NaN, quotes and signs other than a leading `-` are rejected.
+pub fn scale_decimal(text: &str, shift: i32, exact: bool) -> Result<i64, String> {
+    let (negative, body) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let (int_part, frac_part) = match body.split_once('.') {
+        Some((i, f)) if !f.is_empty() => (i, f),
+        Some(_) => return Err(format!("{text:?} is not a plain decimal number")),
+        None => (body, ""),
+    };
+    let digits_ok = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    if int_part.is_empty() || !digits_ok(int_part) || !digits_ok(frac_part) {
+        return Err(format!("{text:?} is not a plain decimal number"));
+    }
+    if int_part.len() + frac_part.len() > 15 {
+        return Err(format!("{text:?} has too many digits"));
+    }
+    let n: i64 = format!("{int_part}{frac_part}")
+        .parse()
+        .map_err(|e: std::num::ParseIntError| e.to_string())?;
+    let exp = shift - frac_part.len() as i32;
+    let magnitude = if exp >= 0 {
+        n.checked_mul(10i64.pow(exp as u32))
+            .ok_or_else(|| format!("{text:?} is too large"))?
+    } else {
+        let div = 10i64.pow(exp.unsigned_abs());
+        let (q, r) = (n / div, n % div);
+        if exact && r != 0 {
+            return Err(format!("{text:?} is not a whole number at this precision"));
+        }
+        if r * 2 >= div { q + 1 } else { q }
+    };
+    Ok(if negative { -magnitude } else { magnitude })
+}
+
+/// `text` unchanged, or an error if it starts with `-`. Pressure, humidity
+/// and visibility are never signed, so `-0`, `-4` and `-0.0` are all
+/// invalid, even where the value would round to zero.
+fn unsigned(text: &str) -> Result<&str, String> {
+    if text.starts_with('-') {
+        Err(format!("{text:?} must not be negative"))
+    } else {
+        Ok(text)
+    }
+}
+
+/// Visibility in metres as decametres. The metres must be a whole number
+/// with no `-` sign: a fractional value is invalid, never rounded to whole
+/// metres. The division by 10 rounds half up (25 m -> 3).
+pub fn decametres(text: &str) -> Result<i64, String> {
+    let metres = scale_decimal(unsigned(text)?, 0, true)?;
+    Ok((metres + 5) / 10)
+}
+
+/// The JSON text of `field`, or why it can't be used.
+fn number<'a>(
+    field_text: &impl Fn(&str) -> Option<&'a str>,
+    field: &str,
+) -> Result<&'a str, String> {
+    match field_text(field) {
+        None => Err(format!("{field} is missing")),
+        Some("null") => Err(format!("{field} is null")),
+        Some(text) => Ok(text),
+    }
+}
+
+/// The `weather_value` one Land Observations row yields under the tag's
+/// rules, or why the row is not a valid observation.
+///
+/// `field_text` returns a field's value exactly as it appears in the JSON
+/// source (for example `18.38`, `"50"` or `null`), or `None` if the row
+/// lacks the field. Numbers are rounded from their decimal digits, never
+/// through a float.
+///
+/// The rules are per field: an exponent, a string, a null or a missing
+/// value in a required field makes the row invalid; other fields are
+/// never read. Temperature may carry a `-`; pressure, humidity and
+/// visibility may not. Bounds are checked on the canonical parts, after
+/// rounding.
+pub fn row_to_value<'a>(field_text: impl Fn(&str) -> Option<&'a str>) -> Result<String, String> {
+    let t = scale_decimal(number(&field_text, "temperature")?, 1, false)
+        .map_err(|e| format!("temperature: {e}"))?;
+    let mslp = unsigned(number(&field_text, "mslp")?)
+        .and_then(|text| scale_decimal(text, 0, true))
+        .map_err(|e| format!("mslp: {e}"))?;
+    let rh = unsigned(number(&field_text, "humidity")?)
+        .and_then(|text| scale_decimal(text, 0, true))
+        .map_err(|e| format!("humidity: {e}"))?;
+    let vis =
+        decametres(number(&field_text, "visibility")?).map_err(|e| format!("visibility: {e}"))?;
+    let value = format!("{t};{mslp};{rh};{vis}");
+    parse_weather_value(&value)?;
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,5 +521,272 @@ mod tests {
         ] {
             assert!(parse_weather_time(bad).is_err(), "accepted {bad:?}");
         }
+    }
+
+    /// `row_to_value` of one row given as JSON members, verbatim (for
+    /// example `"temperature":18.38,"mslp":1021`). Values hold no commas.
+    fn value_of(fields: &str) -> Result<String, String> {
+        let members: Vec<(&str, &str)> = fields
+            .split(',')
+            .map(|m| {
+                let (k, v) = m.split_once(':').expect("member has a colon");
+                (k.trim_matches('"'), v)
+            })
+            .collect();
+        row_to_value(|f| members.iter().find(|(k, _)| *k == f).map(|(_, v)| *v))
+    }
+
+    #[test]
+    fn scale_decimal_rounds_half_away_from_zero_from_the_text() {
+        assert_eq!(scale_decimal("19.59", 1, false), Ok(196));
+        assert_eq!(scale_decimal("19.55", 1, false), Ok(196));
+        assert_eq!(scale_decimal("19.549", 1, false), Ok(195));
+        assert_eq!(scale_decimal("19.54", 1, false), Ok(195));
+        assert_eq!(scale_decimal("18.38", 1, false), Ok(184));
+        assert_eq!(scale_decimal("7", 1, false), Ok(70));
+        assert_eq!(scale_decimal("0.0", 1, false), Ok(0));
+        assert_eq!(scale_decimal("1021", 0, true), Ok(1021));
+        assert_eq!(scale_decimal("1021.0", 0, true), Ok(1021));
+    }
+
+    #[test]
+    fn scale_decimal_negative_half_rounds_away_from_zero() {
+        assert_eq!(scale_decimal("-0.05", 1, false), Ok(-1));
+        assert_eq!(scale_decimal("-0.04", 1, false), Ok(0));
+        assert_eq!(scale_decimal("-0.0", 1, false), Ok(0));
+        assert_eq!(scale_decimal("-3.45", 1, false), Ok(-35));
+        assert_eq!(scale_decimal("-12.35", 1, false), Ok(-124));
+        // Never "-0".
+        assert_eq!(scale_decimal("-0.04", 1, false).unwrap().to_string(), "0");
+    }
+
+    #[test]
+    fn scale_decimal_rejects_non_plain_decimals() {
+        for bad in [
+            "1e2",
+            "1.0E2",
+            "NaN",
+            "",
+            "-",
+            ".5",
+            "5.",
+            "\"18.3\"",
+            "null",
+            "+1",
+            "1021.5",
+            "1234567890123456",
+        ] {
+            assert!(scale_decimal(bad, 0, true).is_err(), "accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn visibility_must_be_whole_metres() {
+        assert_eq!(decametres("41140.0"), Ok(4114));
+        assert_eq!(decametres("41140"), Ok(4114));
+        assert_eq!(decametres("25"), Ok(3));
+        assert_eq!(decametres("24"), Ok(2));
+        assert_eq!(decametres("0"), Ok(0));
+        for bad in ["41140.5", "41140.04", "4.114e4", "\"41140\""] {
+            assert!(decametres(bad).is_err(), "accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn visibility_must_not_carry_a_minus_sign() {
+        for bad in ["-0", "-4", "-0.0", "-25", "-41140.0"] {
+            assert!(
+                decametres(bad)
+                    .unwrap_err()
+                    .contains("must not be negative"),
+                "accepted {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn row_to_value_follows_the_grammar() {
+        assert_eq!(
+            value_of(
+                r#""datetime":"2026-10-01T19:00:00Z","temperature":18.38,"mslp":1021,"humidity":51,"visibility":41140.0,"wind_speed":7.4,"weather_code":1"#
+            ),
+            Ok("184;1021;51;4114".to_string())
+        );
+    }
+
+    #[test]
+    fn row_with_a_missing_or_null_field_is_invalid() {
+        let missing = value_of(r#""temperature":18.38,"mslp":1021,"visibility":41140.0"#);
+        assert!(missing.unwrap_err().contains("humidity is missing"));
+        let null = value_of(r#""temperature":null,"mslp":1021,"humidity":51,"visibility":41140.0"#);
+        assert!(null.unwrap_err().contains("temperature is null"));
+    }
+
+    #[test]
+    fn a_minus_sign_invalidates_mslp_humidity_and_visibility_even_on_zero() {
+        for (fields, field) in [
+            (
+                r#""temperature":1.0,"mslp":-0,"humidity":50,"visibility":1000"#,
+                "mslp",
+            ),
+            (
+                r#""temperature":1.0,"mslp":-4,"humidity":50,"visibility":1000"#,
+                "mslp",
+            ),
+            (
+                r#""temperature":1.0,"mslp":-0.0,"humidity":50,"visibility":1000"#,
+                "mslp",
+            ),
+            (
+                r#""temperature":1.0,"mslp":1000,"humidity":-0,"visibility":1000"#,
+                "humidity",
+            ),
+            (
+                r#""temperature":1.0,"mslp":1000,"humidity":-4,"visibility":1000"#,
+                "humidity",
+            ),
+            (
+                r#""temperature":1.0,"mslp":1000,"humidity":-0.0,"visibility":1000"#,
+                "humidity",
+            ),
+            (
+                r#""temperature":1.0,"mslp":1000,"humidity":50,"visibility":-0"#,
+                "visibility",
+            ),
+            (
+                r#""temperature":1.0,"mslp":1000,"humidity":50,"visibility":-4"#,
+                "visibility",
+            ),
+            (
+                r#""temperature":1.0,"mslp":1000,"humidity":50,"visibility":-0.0"#,
+                "visibility",
+            ),
+        ] {
+            let err = value_of(fields).unwrap_err();
+            assert!(
+                err.starts_with(&format!("{field}: ")) && err.contains("must not be negative"),
+                "{fields}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn temperature_keeps_its_signed_rules() {
+        let t = |text: &str| {
+            value_of(&format!(
+                r#""temperature":{text},"mslp":1000,"humidity":50,"visibility":1000"#
+            ))
+        };
+        assert_eq!(t("-0.04"), Ok("0;1000;50;100".to_string()));
+        assert_eq!(t("-0.05"), Ok("-1;1000;50;100".to_string()));
+        assert_eq!(t("-0"), Ok("0;1000;50;100".to_string()));
+        assert_eq!(t("-0.0"), Ok("0;1000;50;100".to_string()));
+        assert_eq!(t("-4"), Ok("-40;1000;50;100".to_string()));
+    }
+
+    #[test]
+    fn from_row_edge_cases() {
+        let ok = |fields: &str, want: &str| {
+            assert_eq!(value_of(fields), Ok(want.to_string()), "{fields}")
+        };
+        let invalid = |fields: &str, field: &str| {
+            let err = value_of(fields).unwrap_err();
+            assert!(err.contains(field), "{fields}: {err}");
+        };
+        let out_of_bounds = |fields: &str| assert!(value_of(fields).is_err(), "accepted {fields}");
+
+        // Temperature: tenths, half away from zero, from the decimal text.
+        ok(
+            r#""temperature":19.55,"mslp":1000,"humidity":50,"visibility":1000"#,
+            "196;1000;50;100",
+        );
+        ok(
+            r#""temperature":-0.05,"mslp":1000,"humidity":50,"visibility":1000"#,
+            "-1;1000;50;100",
+        );
+        ok(
+            r#""temperature":-0.04,"mslp":1000,"humidity":50,"visibility":1000"#,
+            "0;1000;50;100",
+        );
+        ok(
+            r#""temperature":-0.0,"mslp":1000,"humidity":50,"visibility":1000"#,
+            "0;1000;50;100",
+        );
+
+        // Visibility: whole metres only, then decametres half away from zero.
+        ok(
+            r#""temperature":1.0,"mslp":1000,"humidity":50,"visibility":25"#,
+            "10;1000;50;3",
+        );
+        ok(
+            r#""temperature":1.0,"mslp":1000,"humidity":50,"visibility":24320.0"#,
+            "10;1000;50;2432",
+        );
+        invalid(
+            r#""temperature":1.0,"mslp":1000,"humidity":50,"visibility":41140.5"#,
+            "visibility",
+        );
+
+        // mslp and humidity: whole numbers only.
+        ok(
+            r#""temperature":1.0,"mslp":1021.0,"humidity":50,"visibility":1000"#,
+            "10;1021;50;100",
+        );
+        invalid(
+            r#""temperature":1.0,"mslp":1020.4,"humidity":50,"visibility":1000"#,
+            "mslp",
+        );
+        invalid(
+            r#""temperature":1.0,"mslp":1000,"humidity":76.5,"visibility":1000"#,
+            "humidity",
+        );
+
+        // An exponent invalidates the field it is in, and only that field.
+        invalid(
+            r#""temperature":1.959e1,"mslp":1000,"humidity":50,"visibility":1000"#,
+            "temperature",
+        );
+        invalid(
+            r#""temperature":1.0,"mslp":1.0E3,"humidity":50,"visibility":1000"#,
+            "mslp",
+        );
+        invalid(
+            r#""temperature":1.0,"mslp":1000,"humidity":50,"visibility":4.114e4"#,
+            "visibility",
+        );
+        ok(
+            r#""temperature":1.0,"mslp":1000,"humidity":50,"visibility":1000,"wind_speed":7.4e0"#,
+            "10;1000;50;100",
+        );
+
+        // A string is not a number.
+        invalid(
+            r#""temperature":1.0,"mslp":1000,"humidity":"50","visibility":1000"#,
+            "humidity",
+        );
+
+        // Bounds apply to the canonical parts, after rounding.
+        ok(
+            r#""temperature":60.04,"mslp":1000,"humidity":50,"visibility":1000"#,
+            "600;1000;50;100",
+        );
+        out_of_bounds(r#""temperature":60.05,"mslp":1000,"humidity":50,"visibility":1000"#);
+        ok(
+            r#""temperature":-90.04,"mslp":1000,"humidity":50,"visibility":1000"#,
+            "-900;1000;50;100",
+        );
+        out_of_bounds(r#""temperature":-90.05,"mslp":1000,"humidity":50,"visibility":1000"#);
+        ok(
+            r#""temperature":1.0,"mslp":850,"humidity":0,"visibility":0"#,
+            "10;850;0;0",
+        );
+        out_of_bounds(r#""temperature":1.0,"mslp":849,"humidity":50,"visibility":1000"#);
+        ok(
+            r#""temperature":1.0,"mslp":1100,"humidity":100,"visibility":100004"#,
+            "10;1100;100;10000",
+        );
+        out_of_bounds(r#""temperature":1.0,"mslp":1101,"humidity":50,"visibility":1000"#);
+        out_of_bounds(r#""temperature":1.0,"mslp":1000,"humidity":101,"visibility":1000"#);
+        out_of_bounds(r#""temperature":1.0,"mslp":1000,"humidity":50,"visibility":100005"#);
     }
 }

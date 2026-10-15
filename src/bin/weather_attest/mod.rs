@@ -537,6 +537,49 @@ mod tests {
     }
 
     #[test]
+    fn an_unparseable_land_observations_body_is_unavailable_not_a_mismatch() {
+        for body in [
+            r#"{"error":"x"}"#,
+            "<html>busy</html>",
+            "",
+            "[{\"datetime\":",
+        ] {
+            let mut server = mockito::Server::new();
+            server.mock("GET", "/gcnfur").with_body(body).create();
+            server.mock("GET", "/gcrem9").with_body(body).create();
+            mock_synop(&mut server, "03749", SYNOP_03749);
+            mock_synop(&mut server, "03462", &SYNOP_03749.replace("03749", "03462"));
+            let landobs = http::LandObsClient::new(&server.url(), "k");
+            let checked = attest(
+                &input("wmo-03749", Some("184;1021;51;4114")),
+                Some(&landobs),
+                &ogimet(&server),
+                WT_UNIX + 3600,
+            );
+            assert!(
+                matches!(&checked[0].outcome, Outcome::Unavailable(r) if r.contains("not a list of rows")),
+                "{body:?}: {checked:?}"
+            );
+            assert!(!has_mismatch(&checked), "{body:?}: {checked:?}");
+            let fallback = attest(
+                &input("wmo-03749", None),
+                Some(&landobs),
+                &ogimet(&server),
+                WT_UNIX + 3600,
+            );
+            for line in fallback
+                .iter()
+                .filter(|l| l.label.starts_with("Land Observations"))
+            {
+                assert!(
+                    matches!(&line.outcome, Outcome::Unavailable(r) if r.contains("not a list of rows")),
+                    "{body:?}: {fallback:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn ogimet_error_page_is_unavailable_not_absent() {
         let mut server = mockito::Server::new();
         mock_synop(
