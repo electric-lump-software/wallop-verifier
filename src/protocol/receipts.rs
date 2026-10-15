@@ -765,10 +765,10 @@ pub fn validate_execution_receipt_tags_v4(payload: &ExecutionReceiptV4) -> Resul
 /// that is present and one of `landobs_v1::STATIONS`, and the
 /// `weather_value` grammar when a value is present.
 ///
-/// It checks each field on its own. Later pipeline steps own the rest:
-/// pairing lock schema 6 with execution schema 5 only, the coupling
-/// between `weather_value`, the observation time and the fallback reason,
-/// and which station a fallback must name.
+/// It checks each field on its own. `check_bundle_shape` and later steps
+/// own the rest: pairing lock schema 6 with execution schema 5 only, the
+/// coupling between `weather_value`, the observation time and the
+/// fallback reason, and which station a fallback must name.
 pub fn validate_execution_receipt_tags_v5(payload: &ExecutionReceiptV5) -> Result<(), String> {
     if payload.schema_version != EXECUTION_SCHEMA_VERSION_V5 {
         return Err(format!(

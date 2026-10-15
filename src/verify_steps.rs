@@ -2,9 +2,8 @@ use crate::bundle::ProofBundle;
 use crate::key_resolver::{BundleEmbeddedResolver, InsertedAt, KeyClass, KeyResolver, ResolvedKey};
 use crate::protocol::crypto;
 use crate::protocol::receipts::{
-    LOCK_SCHEMA_VERSION_V6, ParsedExecutionReceipt, ParsedLockReceipt, lock_receipt_hash,
-    parse_execution_receipt, parse_lock_receipt, receipt_schema_version,
-    validate_execution_receipt_tags, validate_execution_receipt_tags_v3,
+    ParsedExecutionReceipt, ParsedLockReceipt, lock_receipt_hash, parse_execution_receipt,
+    parse_lock_receipt, validate_execution_receipt_tags, validate_execution_receipt_tags_v3,
     validate_execution_receipt_tags_v4, validate_execution_receipt_tags_v5,
     validate_lock_receipt_tags, validate_lock_receipt_tags_v5, validate_lock_receipt_tags_v6,
 };
@@ -56,7 +55,10 @@ pub enum StepName {
     /// RFC 3339 form (`chrono_parse_canonical`). It covers lock receipt
     /// schema 4, 5 or 6 and execution receipt schema 2 to 5; under lock
     /// schema 6 / execution schema 5 it also checks the Land Observations
-    /// tag pins (stations, fallback reason, `weather_value` grammar). The
+    /// tag pins (stations, fallback reason, `weather_value` grammar). Lock
+    /// schema 6 must pair with execution schema 5 in both directions, and
+    /// under lock schema 6 `weather_time`, `locked_at`, `executed_at` and
+    /// `weather_observation_time` must be canonical and round-trip. The
     /// typed parsers and validators ship in `protocol/receipts.rs`; this
     /// step is the entry point that wires them into the verifier pipeline.
     /// Appended to the end of `StepName::all()` so external consumers
@@ -1003,7 +1005,7 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
     // Mismatches reject as downgrade-relabel / upgrade-spoof attempts —
     // the same shape as the v2/v3 deny_unknown_fields defence (F2).
     let inline_lock_pk_present = bundle.lock_receipt.public_key_hex.is_some();
-    let (lock_locked_at, lock_weather_time) =
+    let (lock_locked_at, lock_weather_time, lock_is_v6) =
         match parse_lock_receipt(&bundle.lock_receipt.payload_jcs) {
             Ok(ParsedLockReceipt::V4(p)) => {
                 if let Err(e) = validate_lock_receipt_tags(&p) {
@@ -1024,7 +1026,7 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
                         detail: None,
                     };
                 }
-                (p.locked_at, p.weather_time)
+                (p.locked_at, p.weather_time, false)
             }
             Ok(ParsedLockReceipt::V5(p)) => {
                 if let Err(e) = validate_lock_receipt_tags_v5(&p) {
@@ -1045,7 +1047,7 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
                         detail: None,
                     };
                 }
-                (p.locked_at, p.weather_time)
+                (p.locked_at, p.weather_time, false)
             }
             Ok(ParsedLockReceipt::V6(p)) => {
                 if let Err(e) = validate_lock_receipt_tags_v6(&p) {
@@ -1066,7 +1068,7 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
                         detail: None,
                     };
                 }
-                (p.locked_at, p.weather_time)
+                (p.locked_at, p.weather_time, true)
             }
             Err(e) => {
                 return StepResult {
@@ -1215,8 +1217,6 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
         };
     }
 
-    let lock_is_v6 = receipt_schema_version(&bundle.lock_receipt.payload_jcs).as_deref()
-        == Some(LOCK_SCHEMA_VERSION_V6);
     let exec_is_v5 = matches!(parsed_exec, ParsedExecutionReceipt::V5(_));
     if lock_is_v6 != exec_is_v5 {
         return StepResult {
@@ -1225,14 +1225,32 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
             detail: None,
         };
     }
-    if lock_is_v6
-        && let Err(e) = crate::protocol::landobs_v1::parse_weather_time(&lock_weather_time)
-    {
-        return StepResult {
-            name: StepName::BundleShape,
-            status: StepStatus::Fail(format!("lock.weather_time: {e}")),
-            detail: None,
-        };
+    if lock_is_v6 {
+        // Under lock 6 every signed timestamp must round-trip: a string
+        // such as `17:99` that only normalises to a real time is rejected.
+        let mut strict = vec![
+            ("lock.locked_at", lock_locked_at.as_str()),
+            ("exec.executed_at", executed_at.as_str()),
+        ];
+        if let Some(obs) = &weather_observation_time {
+            strict.push(("exec.weather_observation_time", obs.as_str()));
+        }
+        for (field, value) in strict {
+            if let Err(e) = chrono_parse_canonical_strict(value) {
+                return StepResult {
+                    name: StepName::BundleShape,
+                    status: StepStatus::Fail(format!("{field}: {e}")),
+                    detail: None,
+                };
+            }
+        }
+        if let Err(e) = crate::protocol::landobs_v1::parse_weather_time(&lock_weather_time) {
+            return StepResult {
+                name: StepName::BundleShape,
+                status: StepStatus::Fail(format!("lock.weather_time: {e}")),
+                detail: None,
+            };
+        }
     }
 
     StepResult {
@@ -1876,6 +1894,18 @@ pub(crate) fn chrono_parse_canonical(s: &str) -> Result<ChronoStub, String> {
         secs: days_from_epoch * 86_400 + h * 3600 + mi * 60 + se,
         micros: us,
     })
+}
+
+/// `chrono_parse_canonical`, and the string must also be the canonical
+/// rendering of the instant it parses to, so `17:99` or `09-31` is
+/// rejected rather than normalised.
+pub(crate) fn chrono_parse_canonical_strict(s: &str) -> Result<ChronoStub, String> {
+    let t = chrono_parse_canonical(s)?;
+    let micros = u32::try_from(t.micros).map_err(|e| e.to_string())?;
+    if format_canonical(t.secs, micros) != s {
+        return Err(format!("{s} is not a valid calendar time"));
+    }
+    Ok(t)
 }
 
 pub(crate) struct ChronoStub {

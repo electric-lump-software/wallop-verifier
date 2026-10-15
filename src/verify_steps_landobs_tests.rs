@@ -134,7 +134,10 @@ fn lock_v6_with_exec_v4_fails_bundle_shape() {
         exec_entropy_composition: crate::protocol::receipts::ENTROPY_COMPOSITION.into(),
         ..V6Params::weather()
     };
-    assert_step_fails(&run(&p), StepName::BundleShape, "must be used together");
+    assert_eq!(
+        status(&run(&p), StepName::BundleShape),
+        &StepStatus::Fail(SCHEMA_PAIRING_ERROR.into())
+    );
 }
 
 #[test]
@@ -144,7 +147,31 @@ fn lock_v5_with_exec_v5_fails_bundle_shape() {
         lock_entropy_composition: crate::protocol::receipts::ENTROPY_COMPOSITION.into(),
         ..V6Params::weather()
     };
-    assert_step_fails(&run(&p), StepName::BundleShape, "must be used together");
+    assert_eq!(
+        status(&run(&p), StepName::BundleShape),
+        &StepStatus::Fail(SCHEMA_PAIRING_ERROR.into())
+    );
+}
+
+#[test]
+fn lock_v4_with_exec_v5_fails_bundle_shape() {
+    // Lock v4 needs the inline key on the wrapper, so the pairing rule is
+    // the only thing wrong with this bundle.
+    let p = V6Params {
+        lock_schema: "4".into(),
+        lock_entropy_composition: crate::protocol::receipts::ENTROPY_COMPOSITION.into(),
+        ..V6Params::weather()
+    };
+    let (json, pk_hex, kid) = build_v6_bundle(&p);
+    let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    v["lock_receipt"]["operator_public_key_hex"] = serde_json::json!(pk_hex.clone());
+    assert_eq!(
+        status(
+            &run_json(&v.to_string(), &pk_hex, &kid),
+            StepName::BundleShape
+        ),
+        &StepStatus::Fail(SCHEMA_PAIRING_ERROR.into())
+    );
 }
 
 #[test]
@@ -179,5 +206,54 @@ fn legacy_v5_lock_with_off_hour_weather_time_still_passes_bundle_shape() {
         2,
     );
     let report = run_json(&json, &pk_hex, &kid);
+    assert_eq!(status(&report, StepName::BundleShape), &StepStatus::Pass);
+}
+
+#[test]
+fn v6_lock_with_a_normalising_locked_at_fails_bundle_shape() {
+    // 17:99 would otherwise be read as 18:39.
+    let p = V6Params {
+        locked_at: "2026-10-01T17:99:00.000000Z".into(),
+        ..V6Params::weather()
+    };
+    assert_step_fails(&run(&p), StepName::BundleShape, "lock.locked_at");
+}
+
+#[test]
+fn v5_exec_with_a_normalising_executed_at_fails_bundle_shape() {
+    let p = V6Params {
+        executed_at: "2026-10-01T19:60:05.000000Z".into(),
+        ..V6Params::weather()
+    };
+    assert_step_fails(&run(&p), StepName::BundleShape, "exec.executed_at");
+}
+
+#[test]
+fn v5_exec_with_a_normalising_observation_time_fails_bundle_shape() {
+    let p = V6Params {
+        weather_observation_time: Some("2026-10-01T18:60:00.000000Z".into()),
+        ..V6Params::weather()
+    };
+    assert_step_fails(
+        &run(&p),
+        StepName::BundleShape,
+        "exec.weather_observation_time",
+    );
+}
+
+#[test]
+fn legacy_v5_lock_with_a_normalising_locked_at_still_passes_bundle_shape() {
+    // Lock v4/v5 timestamps are checked for shape only; that is unchanged.
+    let (json, pk_hex, kid) = crate::_test_support::build_valid_v5_bundle(
+        &crate::_test_support::v6_entries(),
+        Some("1013"),
+        2,
+    );
+    let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let mut lock: serde_json::Value =
+        serde_json::from_str(v["lock_receipt"]["payload_jcs"].as_str().unwrap()).unwrap();
+    lock["locked_at"] = serde_json::json!("2023-08-23T15:99:00.000000Z");
+    v["lock_receipt"]["payload_jcs"] = serde_json::json!(lock.to_string());
+    let report = run_json(&v.to_string(), &pk_hex, &kid);
     assert_eq!(status(&report, StepName::BundleShape), &StepStatus::Pass);
 }
