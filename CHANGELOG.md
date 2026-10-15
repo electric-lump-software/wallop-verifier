@@ -27,6 +27,10 @@ The drand step was compiled only into the CLI build, so the WASM verifier on the
 - `VerificationReport::passed()` accepts only `Pass` and `NotApplicable`, with at least one `Pass`. `Skip` means a check could not run, and now always fails the report.
 - `NotApplicable` is accepted only on `WeatherObservationWindow` and `TemporalBinding`, the two steps that can genuinely not apply. On any other step it fails the report, so a future change cannot waive a core check by marking it not applicable.
 
+### Deprecated
+
+- `verify_full` and `verify_full_wasm`. They check a lock / execution receipt pair only, and less than the step pipeline: no receipt shape, no cross-receipt fields beyond the drand round and chain, no weather window or fallback reason, no key resolution or temporal binding, and nothing in the bundle outside the receipts. Use `verify_bundle_with` (in the browser, `verify_bundle_with_resolved_keys_wasm`) and gate on `passed()`. Their docs, and the README, no longer call `verify_full` the complete end-to-end check. Both keep the drand, round, chain and lock-time checks added in this release.
+
 ### Added
 
 - `verify_drand_wasm(chain_hash, round, signature_hex, randomness_hex) -> bool`: the drand check on its own, so the proof page can show it as a separate line. True only if the chain is the pinned quicknet chain, the BLS signature is valid for `round`, and `sha256(signature) == randomness`. `round` is a `u64`, so JavaScript passes a `BigInt`. Pass the values from the signed execution receipt, never from unsigned page data, and pass hex in lower case: an upper-case chain hash or randomness is rejected.

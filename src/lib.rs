@@ -39,13 +39,34 @@ pub use protocol::{compute_seed, compute_seed_drand_only, entry_hash};
 // Re-export fair_pick_rs types for convenience
 pub use fair_pick_rs::{Entry, Winner, draw};
 
-/// Full v2 verification pipeline.
+/// Receipt-level verification of a lock / execution receipt pair.
 ///
-/// Chains: sig checks → lock receipt parse → linkage → entry_hash → seed → draw → compare
-/// → drand (exec round/chain match the lock's, BLS signature and randomness verify).
-/// `winner_count` is extracted from the signed lock receipt, not passed externally.
-/// Returns Ok(true) if all checks pass, Ok(false) if any check fails,
-/// Err with reason if inputs are structurally invalid (unparseable JSON).
+/// **Deprecated: it checks less than the step pipeline.** Use
+/// `verify_steps::verify_bundle_with` (or `verify_bundle` for legacy
+/// inline-key bundles) and gate on `VerificationReport::passed()`.
+///
+/// What it checks, in order: both Ed25519 signatures against the keys the
+/// caller passes in; `lock_receipt_hash` linkage; `entry_hash` on both
+/// receipts against the recomputed value; the seed, recomputed from the
+/// execution receipt's `drand_randomness` and `weather_value`; the draw,
+/// recomputed with the lock receipt's `winner_count` and compared with the
+/// execution receipt's `results`; that both receipts name the same drand
+/// round and chain; the drand BLS signature and randomness on the pinned
+/// quicknet chain; and that the round published strictly after the lock
+/// receipt's `locked_at`.
+///
+/// What it does not check, and the step pipeline does: receipt shape
+/// (typed schema parse, algorithm tags, canonical timestamps), the other
+/// cross-receipt fields (`draw_id`, `operator_id`, `sequence`,
+/// `weather_station`), the weather observation window and fallback reason,
+/// key resolution and temporal binding (it trusts whatever keys it is
+/// given), and anything in the proof bundle outside the two receipts
+/// (the `entropy` block, `results`).
+///
+/// Returns `Ok(true)` if every check above passes, `Ok(false)` if any
+/// fails, and `Err` if the inputs are structurally invalid (unparseable
+/// JSON or a missing field).
+#[deprecated(note = "checks less than verify_bundle_with; use verify_bundle_with")]
 #[allow(clippy::too_many_arguments)]
 pub fn verify_full(
     lock_receipt_jcs: &str,
@@ -250,6 +271,7 @@ pub fn verify(
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // exercises verify_full
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};

@@ -216,11 +216,17 @@ pub fn verify_drand_wasm(
     crate::drand::verify_drand_round(chain_hash, round, signature_hex, randomness_hex).is_ok()
 }
 
-/// WASM entry point for verify_full.
+/// WASM entry point for `verify_full`.
+///
+/// **Deprecated: it checks less than the step pipeline.** It is not a
+/// gate; the proof page gates on `verify_bundle_with_resolved_keys_wasm`.
+/// See `verify_full` for exactly what it does and does not check.
 ///
 /// `winner_count` is extracted from the signed lock receipt, not passed externally.
+#[deprecated(note = "checks less than verify_bundle_with; use verify_bundle_with")]
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
+#[allow(deprecated)] // wraps verify_full
 pub fn verify_full_wasm(
     lock_receipt_jcs: &str,
     lock_signature_hex: &str,
@@ -338,7 +344,7 @@ fn parse_verifier_mode(s: &str) -> Result<VerifierMode, JsError> {
 ///
 /// **This is the browser gate.** The proof page's green result must come
 /// from this function returning `true` in attestable mode, and from
-/// nothing else: not from `verify_drand_wasm`, not from
+/// nothing else: not from `verify_drand_wasm`, not from the deprecated
 /// `verify_full_wasm`, not from the per-line checks the page shows
 /// alongside it.
 ///

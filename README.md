@@ -89,13 +89,17 @@ Same as `compute_seed` but the `weather_value` key is omitted entirely, providin
 
 ### `verify(draw_id, entries, drand_randomness, weather_value, count, expected_results) -> bool`
 
-Runs the inner algorithmic pipeline — `entry_hash → compute_seed → draw → compare` — and returns `true` if the recomputed winners match `expected_results` exactly. Does **not** verify receipt signatures; use `verify_full` for the complete end-to-end check.
+Runs the inner algorithmic pipeline — `entry_hash → compute_seed → draw → compare` — and returns `true` if the recomputed winners match `expected_results` exactly. Does **not** verify receipt signatures or anything else about a proof bundle; to verify a bundle, use the step pipeline (`verify_steps::verify_bundle_with`) and gate on `VerificationReport::passed()`.
 
 ---
 
 ### `verify_full(lock_receipt_jcs, lock_signature, operator_public_key, execution_receipt_jcs, execution_signature, infrastructure_public_key, entries) -> Result<bool, String>`
 
-The complete signed-bundle verification pipeline. Verifies both receipt signatures, extracts `winner_count` from the signed lock receipt, confirms receipt linkage via `lock_receipt_hash`, cross-checks `entry_hash` on both receipts against the recomputed value, re-derives the seed from the signed entropy fields, re-runs the draw, and compares the recomputed winners against the execution receipt's committed results. Returns `Ok(true)` on success, `Ok(false)` on any verification mismatch, or `Err` on structurally invalid inputs.
+**Deprecated: it checks less than the step pipeline.** Use `verify_steps::verify_bundle_with` and gate on `VerificationReport::passed()`.
+
+A receipt-level check of a lock / execution receipt pair. It verifies both receipt signatures against the keys you pass in, confirms receipt linkage via `lock_receipt_hash`, cross-checks `entry_hash` on both receipts against the recomputed value, re-derives the seed from the execution receipt's entropy fields, re-runs the draw with the lock receipt's `winner_count` and compares the winners with the execution receipt's `results`, checks that both receipts name the same drand round and chain, verifies the drand BLS signature and randomness, and checks that the round published after the lock receipt's `locked_at`. Returns `Ok(true)` on success, `Ok(false)` on any mismatch, or `Err` on structurally invalid inputs.
+
+It does **not** check receipt shape (schema, algorithm tags, canonical timestamps), the other cross-receipt fields, the weather observation window or fallback reason, key resolution or temporal binding (it trusts the keys it is given), or anything in the bundle outside the two receipts (the `entropy` block, `results`). The step pipeline checks all of these.
 
 ---
 
@@ -138,7 +142,18 @@ let expected = fair_pick_rs::draw(&entries, &seed, 2).unwrap();
 assert!(verify(draw_id, &entries, drand, Some(weather), 2, &expected));
 ```
 
-For signed-bundle verification (receipts + signatures), use `verify_full` — it accepts the lock receipt JCS bytes, execution receipt JCS bytes, and their Ed25519 signatures and does the full pipeline end-to-end.
+For signed-bundle verification (receipts, signatures, drand and everything else), run the step pipeline and gate on `passed()`:
+
+```rust,ignore
+use wallop_verifier::bundle::ProofBundle;
+use wallop_verifier::verify_steps::{VerifierMode, verify_bundle_with};
+
+let bundle = ProofBundle::from_json(&bundle_json)?;
+let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attestable);
+assert!(report.passed());
+```
+
+`verify_full` is deprecated: it checks the two receipts only, and less than the pipeline does.
 
 ### WASM / JavaScript
 

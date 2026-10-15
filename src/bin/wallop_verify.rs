@@ -929,6 +929,9 @@ fn print_report(
     println!();
 }
 
+// Belt-and-braces cross-check against the deprecated receipt-level
+// verify_full. The step pipeline is the gate; this only flags drift.
+#[allow(deprecated)]
 fn run_verify_full_check(bundle: &ProofBundle) -> bool {
     let entries: Vec<wallop_verifier::Entry> = bundle
         .entries

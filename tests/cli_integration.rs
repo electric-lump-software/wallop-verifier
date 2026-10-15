@@ -8,6 +8,7 @@ use wallop_verifier::Entry;
 use wallop_verifier::bundle::ProofBundle;
 use wallop_verifier::verify_steps::{StepStatus, verify_bundle};
 
+#[allow(deprecated)] // drift guard against verify_full
 fn run_verify_full(bundle: &ProofBundle) -> bool {
     let entries: Vec<Entry> = bundle
         .entries
