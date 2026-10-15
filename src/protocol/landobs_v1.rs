@@ -58,6 +58,23 @@ pub fn latest_lock_at(weather_time: i64) -> Option<i64> {
     weather_time.checked_sub(LOCK_OFFSET_SECS)
 }
 
+/// Parse a lock receipt `weather_time` under this tag. It must be in
+/// canonical RFC 3339 form, a whole UTC hour, and a real calendar time:
+/// the string must equal its own canonical rendering, so
+/// `18:60` or `09-31` is rejected rather than normalised. Returns unix
+/// seconds.
+pub fn parse_weather_time(s: &str) -> Result<i64, String> {
+    let t = crate::verify_steps::chrono_parse_canonical(s)?;
+    let secs = t.timestamp();
+    if t.subsec_micros() != 0 || secs.rem_euclid(HOUR_SECS) != 0 {
+        return Err(format!("{s} is not a whole UTC hour"));
+    }
+    if crate::verify_steps::format_canonical(secs, 0) != s {
+        return Err(format!("{s} is not a valid calendar time"));
+    }
+    Ok(secs)
+}
+
 /// Bounds on each part of `weather_value`, inclusive. Physical limits, not
 /// climate expectations: temperature in tenths of a degree C, pressure in
 /// whole hPa, humidity in whole percent, visibility in decametres. They
@@ -147,6 +164,7 @@ fn parse_part(text: &str, name: &str, signed: bool, min: i64, max: i64) -> Resul
 mod tests {
     use super::*;
     use crate::drand::{QUICKNET_GENESIS_TIME, QUICKNET_PERIOD_SECS};
+    use crate::verify_steps::{chrono_parse_canonical, format_canonical};
 
     /// 2026-10-01T19:00:00Z.
     const H: i64 = 1_790_881_200;
@@ -304,5 +322,74 @@ mod tests {
                 .unwrap_err()
                 .contains("longer than")
         );
+    }
+
+    #[test]
+    fn format_canonical_renders_known_instants() {
+        assert_eq!(format_canonical(H, 0), "2026-10-01T19:00:00.000000Z");
+        assert_eq!(
+            format_canonical(1_692_806_364, 0),
+            "2023-08-23T15:59:24.000000Z"
+        );
+        assert_eq!(format_canonical(0, 1), "1970-01-01T00:00:00.000001Z");
+        assert_eq!(
+            format_canonical(951_782_400, 0),
+            "2000-02-29T00:00:00.000000Z"
+        );
+    }
+
+    #[test]
+    fn format_canonical_round_trips_through_the_parser() {
+        for (secs, micros) in [(H, 0), (H - 1, 999_999), (1_692_803_367, 123_456)] {
+            let s = format_canonical(secs, micros);
+            let parsed = chrono_parse_canonical(&s).unwrap();
+            assert_eq!(parsed.timestamp(), secs);
+            assert_eq!(parsed.subsec_micros(), micros as i64);
+            assert_eq!(parsed.timestamp_micros(), secs * 1_000_000 + micros as i64);
+        }
+    }
+
+    #[test]
+    fn parse_weather_time_accepts_a_whole_hour() {
+        assert_eq!(parse_weather_time("2026-10-01T19:00:00.000000Z"), Ok(H));
+    }
+
+    #[test]
+    fn parse_weather_time_rejects_part_hours() {
+        for bad in [
+            "2026-10-01T19:30:00.000000Z",
+            "2026-10-01T19:00:01.000000Z",
+            "2026-10-01T19:00:00.000001Z",
+        ] {
+            assert!(
+                parse_weather_time(bad)
+                    .unwrap_err()
+                    .contains("whole UTC hour"),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_weather_time_rejects_out_of_range_fields() {
+        for bad in [
+            "2026-10-01T18:60:00.000000Z",
+            "2026-09-31T19:00:00.000000Z",
+            "2026-10-01T24:00:00.000000Z",
+            "2026-13-01T19:00:00.000000Z",
+        ] {
+            assert!(parse_weather_time(bad).is_err(), "accepted {bad}");
+        }
+    }
+
+    #[test]
+    fn parse_weather_time_rejects_non_canonical_text() {
+        for bad in [
+            "2026-10-01T19:00:00Z",
+            "2026-10-01T19:00:00.000000+00:00",
+            "",
+        ] {
+            assert!(parse_weather_time(bad).is_err(), "accepted {bad:?}");
+        }
     }
 }

@@ -1784,6 +1784,7 @@ pub(crate) fn chrono_parse_canonical(s: &str) -> Result<ChronoStub, String> {
     let h = parse_slice(11, 13)?;
     let mi = parse_slice(14, 16)?;
     let se = parse_slice(17, 19)?;
+    let us = parse_slice(20, 26)?;
 
     // Days-from-epoch via Rata Die (civil-from-days). The weather window
     // is 3600 seconds — we only need second-precision unix time for the
@@ -1800,17 +1801,56 @@ pub(crate) fn chrono_parse_canonical(s: &str) -> Result<ChronoStub, String> {
 
     Ok(ChronoStub {
         secs: days_from_epoch * 86_400 + h * 3600 + mi * 60 + se,
+        micros: us,
     })
 }
 
 pub(crate) struct ChronoStub {
     secs: i64,
+    micros: i64,
 }
 
 impl ChronoStub {
     pub(crate) fn timestamp(&self) -> i64 {
         self.secs
     }
+
+    /// The microseconds field, 0..=999_999.
+    pub(crate) fn subsec_micros(&self) -> i64 {
+        self.micros
+    }
+
+    /// Microseconds since the unix epoch. Use this for comparisons that
+    /// must not lose the fractional second.
+    #[allow(dead_code)] // consumed by the weather lock-time check (added in a later change)
+    pub(crate) fn timestamp_micros(&self) -> i64 {
+        self.secs * 1_000_000 + self.micros
+    }
+}
+
+/// Render unix time in the canonical form `chrono_parse_canonical` accepts
+/// (`YYYY-MM-DDTHH:MM:SS.ffffffZ`). Inverse of the parser for every valid
+/// calendar instant from year 0 to 9999.
+pub(crate) fn format_canonical(unix_secs: i64, micros: u32) -> String {
+    // civil_from_days:
+    // https://howardhinnant.github.io/date_algorithms.html#civil_from_days
+    let days = unix_secs.div_euclid(86_400);
+    let secs_of_day = unix_secs.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{micros:06}Z",
+        secs_of_day / 3600,
+        secs_of_day % 3600 / 60,
+        secs_of_day % 60
+    )
 }
 
 #[cfg(test)]
