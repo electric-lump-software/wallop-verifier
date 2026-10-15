@@ -2,8 +2,9 @@ use crate::bundle::ProofBundle;
 use crate::key_resolver::{BundleEmbeddedResolver, InsertedAt, KeyClass, KeyResolver, ResolvedKey};
 use crate::protocol::crypto;
 use crate::protocol::receipts::{
-    ParsedExecutionReceipt, ParsedLockReceipt, lock_receipt_hash, parse_execution_receipt,
-    parse_lock_receipt, validate_execution_receipt_tags, validate_execution_receipt_tags_v3,
+    EXECUTION_SCHEMA_VERSION_V5, LOCK_SCHEMA_VERSION_V6, ParsedExecutionReceipt, ParsedLockReceipt,
+    lock_receipt_hash, parse_execution_receipt, parse_lock_receipt,
+    validate_execution_receipt_tags, validate_execution_receipt_tags_v3,
     validate_execution_receipt_tags_v4, validate_execution_receipt_tags_v5,
     validate_lock_receipt_tags, validate_lock_receipt_tags_v5, validate_lock_receipt_tags_v6,
 };
@@ -42,10 +43,17 @@ pub enum StepName {
     /// §4.2.5. Appended rather than inserted mid-list so external
     /// consumers pinning step ordinals are not broken.
     ReceiptFieldConsistency,
-    /// Weather observation window — execution receipt's
-    /// `weather_observation_time` MUST fall in
-    /// `[lock.weather_time, lock.weather_time + 3600s]`.
-    /// Closes the weather-time splice vector per spec §4.2.5.
+    /// Weather observation window. Lock v4/v5: the execution receipt's
+    /// `weather_observation_time` falls in
+    /// `[lock.weather_time - 3600s, lock.weather_time]`, and a fallback
+    /// reason is present exactly when weather is missing; `NotApplicable`
+    /// on a drand-only draw. Lock v6 / execution v5: `weather_time` is the
+    /// observation hour the drand round implies, `locked_at` is at least
+    /// 46 minutes before it, and the execution receipt carries either an
+    /// observation of exactly that hour or the fallback reason
+    /// `no_observation_by_deadline`, never part of either. Always `Pass` or
+    /// `Fail` under v6, fallback included, because the schedule is checked
+    /// either way.
     WeatherObservationWindow,
     /// Bundle shape — both receipts MUST parse against the typed structs
     /// (`deny_unknown_fields`), MUST resolve via the schema_version
@@ -1484,6 +1492,114 @@ fn check_receipt_field_consistency(bundle: &ProofBundle) -> StepResult {
 /// (all of them, as of v4). The fallback-reason rule applies only to these.
 const EXEC_SCHEMAS_WITH_FALLBACK_REASON: &[&str] = &["2", "3", "4"];
 
+/// Which weather rules govern a receipt pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WeatherRules {
+    /// Lock v4/v5 with execution v2/v3/v4: the rules before the Land
+    /// Observations tag, unchanged.
+    Legacy,
+    /// Lock v6 with execution v5.
+    LandObs,
+    /// One receipt is v6/v5 and the other is not.
+    Mismatched,
+}
+
+fn weather_rules(lock: &serde_json::Value, exec: &serde_json::Value) -> WeatherRules {
+    let schema_is = |v: &serde_json::Value, want: &str| {
+        v.get("schema_version").and_then(|s| s.as_str()) == Some(want)
+    };
+    match (
+        schema_is(lock, LOCK_SCHEMA_VERSION_V6),
+        schema_is(exec, EXECUTION_SCHEMA_VERSION_V5),
+    ) {
+        (true, true) => WeatherRules::LandObs,
+        (false, false) => WeatherRules::Legacy,
+        _ => WeatherRules::Mismatched,
+    }
+}
+
+/// The weather window under the Land Observations tag. The lock receipt's
+/// `weather_time` must be the observation hour its drand round implies,
+/// the lock must be at least `LOCK_OFFSET_SECS` before it (compared to the
+/// microsecond), and the execution receipt must carry either an
+/// observation of exactly that hour with no fallback reason, or no
+/// observation with reason `no_observation_by_deadline`.
+fn check_landobs_weather(lock: &serde_json::Value, exec: &serde_json::Value) -> Result<(), String> {
+    use crate::protocol::landobs_v1;
+    let lock_str = |field: &str| {
+        lock.get(field)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("lock receipt {field} is missing or not a string"))
+    };
+    let weather_time = lock_str("weather_time")?;
+    let weather_time_unix = landobs_v1::parse_weather_time(weather_time)
+        .map_err(|e| format!("lock.weather_time: {e}"))?;
+    let round = lock
+        .get("drand_round")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| "lock receipt drand_round is missing or not an integer".to_string())?;
+    let expected = landobs_v1::weather_time_for_round(round)
+        .ok_or_else(|| format!("drand round {round} has no quicknet publish time"))?;
+    if weather_time_unix != expected {
+        return Err(format!(
+            "lock weather_time {weather_time} is not the observation hour for drand round {round}: expected {}",
+            format_canonical(expected, 0)
+        ));
+    }
+
+    let locked_at_str = lock_str("locked_at")?;
+    let locked_at = chrono_parse_canonical(locked_at_str)
+        .map_err(|e| format!("lock.locked_at ({locked_at_str}): {e}"))?;
+    let latest = landobs_v1::latest_lock_at(expected)
+        .ok_or_else(|| format!("weather_time {weather_time} has no latest lock time"))?;
+    if locked_at.timestamp_micros() > latest * 1_000_000 {
+        return Err(format!(
+            "lock locked_at {locked_at_str} is later than weather_time minus {} minutes ({})",
+            landobs_v1::LOCK_OFFSET_SECS / 60,
+            format_canonical(latest, 0)
+        ));
+    }
+
+    let field = |name: &str| exec.get(name).filter(|v| !v.is_null());
+    let shown = |v: Option<&serde_json::Value>| if v.is_some() { "set" } else { "null" };
+    match (
+        field("weather_value"),
+        field("weather_observation_time"),
+        field("weather_fallback_reason"),
+    ) {
+        (Some(_), Some(observation), None) => {
+            let observation = observation.as_str().ok_or_else(|| {
+                "exec receipt weather_observation_time is not a string".to_string()
+            })?;
+            if observation == weather_time {
+                Ok(())
+            } else {
+                Err(format!(
+                    "exec weather_observation_time {observation} must equal lock weather_time {weather_time}"
+                ))
+            }
+        }
+        (None, None, Some(reason)) => {
+            if reason.as_str() == Some(landobs_v1::FALLBACK_NO_OBSERVATION) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "exec weather_fallback_reason {reason} is not \"{}\"",
+                    landobs_v1::FALLBACK_NO_OBSERVATION
+                ))
+            }
+        }
+        (value, observation, reason) => Err(format!(
+            "exec receipt must carry weather_value and weather_observation_time with no \
+             weather_fallback_reason, or a weather_fallback_reason with neither; it has \
+             weather_value {}, weather_observation_time {}, weather_fallback_reason {}",
+            shown(value),
+            shown(observation),
+            shown(reason)
+        )),
+    }
+}
+
 fn check_weather_observation_window(bundle: &ProofBundle) -> StepResult {
     let lock: serde_json::Value = match serde_json::from_str(&bundle.lock_receipt.payload_jcs) {
         Ok(v) => v,
@@ -1507,6 +1623,27 @@ fn check_weather_observation_window(bundle: &ProofBundle) -> StepResult {
             };
         }
     };
+
+    match weather_rules(&lock, &exec) {
+        WeatherRules::Legacy => {}
+        WeatherRules::Mismatched => {
+            return StepResult {
+                name: StepName::WeatherObservationWindow,
+                status: StepStatus::Fail(SCHEMA_PAIRING_ERROR.into()),
+                detail: None,
+            };
+        }
+        WeatherRules::LandObs => {
+            return StepResult {
+                name: StepName::WeatherObservationWindow,
+                status: match check_landobs_weather(&lock, &exec) {
+                    Ok(()) => StepStatus::Pass,
+                    Err(reason) => StepStatus::Fail(reason),
+                },
+                detail: None,
+            };
+        }
+    }
 
     // The exec receipt's weather_value and weather_observation_time travel
     // together. Neither present: weather fell back (drand-only), there is
@@ -1925,13 +2062,6 @@ impl ChronoStub {
 
     /// Microseconds since the unix epoch. Use this for comparisons that
     /// must not lose the fractional second.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the weather lock-time check will use this; until then only tests do"
-        )
-    )]
     pub(crate) fn timestamp_micros(&self) -> i64 {
         self.secs * 1_000_000 + self.micros
     }

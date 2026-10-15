@@ -257,3 +257,149 @@ fn legacy_v5_lock_with_a_normalising_locked_at_still_passes_bundle_shape() {
     let report = run_json(&v.to_string(), &pk_hex, &kid);
     assert_eq!(status(&report, StepName::BundleShape), &StepStatus::Pass);
 }
+
+use crate::protocol::landobs_v1;
+
+fn derived_weather_time() -> i64 {
+    landobs_v1::weather_time_for_round(crate::_test_support::BEACON_V6_ROUND).unwrap()
+}
+
+fn latest_lock(weather_time: i64) -> i64 {
+    landobs_v1::latest_lock_at(weather_time).unwrap()
+}
+
+#[test]
+fn v6_window_passes_for_weather_backup_and_fallback() {
+    for p in [
+        V6Params::weather(),
+        V6Params::backup(),
+        V6Params::fallback(),
+    ] {
+        assert_eq!(
+            status(&run(&p), StepName::WeatherObservationWindow),
+            &StepStatus::Pass,
+            "{p:?}"
+        );
+    }
+}
+
+#[test]
+fn v6_weather_time_an_hour_early_fails() {
+    let wt = derived_weather_time() - 3600;
+    let p = V6Params {
+        weather_time: format_canonical(wt, 0),
+        weather_observation_time: Some(format_canonical(wt, 0)),
+        locked_at: format_canonical(latest_lock(wt) - 60, 0),
+        ..V6Params::weather()
+    };
+    assert_step_fails(
+        &run(&p),
+        StepName::WeatherObservationWindow,
+        "not the observation hour",
+    );
+}
+
+#[test]
+fn v6_weather_time_an_hour_late_fails() {
+    let wt = derived_weather_time() + 3600;
+    let p = V6Params {
+        weather_time: format_canonical(wt, 0),
+        weather_observation_time: Some(format_canonical(wt, 0)),
+        ..V6Params::weather()
+    };
+    assert_step_fails(
+        &run(&p),
+        StepName::WeatherObservationWindow,
+        "not the observation hour",
+    );
+}
+
+#[test]
+fn v6_lock_exactly_at_the_offset_passes() {
+    let p = V6Params {
+        locked_at: format_canonical(latest_lock(derived_weather_time()), 0),
+        ..V6Params::weather()
+    };
+    assert_eq!(
+        status(&run(&p), StepName::WeatherObservationWindow),
+        &StepStatus::Pass
+    );
+}
+
+#[test]
+fn v6_lock_one_microsecond_late_fails() {
+    let p = V6Params {
+        locked_at: format_canonical(latest_lock(derived_weather_time()), 1),
+        ..V6Params::weather()
+    };
+    assert_step_fails(
+        &run(&p),
+        StepName::WeatherObservationWindow,
+        "minus 46 minutes",
+    );
+}
+
+#[test]
+fn v6_observation_an_hour_before_weather_time_fails() {
+    // Allowed under lock v5; not under v6.
+    let p = V6Params {
+        weather_observation_time: Some(format_canonical(derived_weather_time() - 3600, 0)),
+        ..V6Params::weather()
+    };
+    assert_step_fails(&run(&p), StepName::WeatherObservationWindow, "must equal");
+}
+
+#[test]
+fn v6_partial_weather_fails() {
+    let cases = [
+        V6Params {
+            weather_observation_time: None,
+            ..V6Params::weather()
+        },
+        V6Params {
+            weather_value: None,
+            ..V6Params::weather()
+        },
+        V6Params {
+            weather_fallback_reason: Some("no_observation_by_deadline".into()),
+            ..V6Params::weather()
+        },
+        V6Params {
+            weather_fallback_reason: None,
+            ..V6Params::fallback()
+        },
+    ];
+    for p in cases {
+        assert_step_fails(&run(&p), StepName::WeatherObservationWindow, "must carry");
+    }
+}
+
+#[test]
+fn mismatched_schemas_fail_the_window() {
+    let p = V6Params {
+        exec_schema: "4".into(),
+        exec_entropy_composition: crate::protocol::receipts::ENTROPY_COMPOSITION.into(),
+        ..V6Params::weather()
+    };
+    assert_eq!(
+        status(&run(&p), StepName::WeatherObservationWindow),
+        &StepStatus::Fail(SCHEMA_PAIRING_ERROR.into())
+    );
+}
+
+#[test]
+fn legacy_v5_observation_an_hour_early_still_passes_the_window() {
+    let (json, pk_hex, kid) = crate::_test_support::build_valid_v5_bundle(
+        &crate::_test_support::v6_entries(),
+        Some("1013"),
+        2,
+    );
+    let edited = crate::_test_support::resign_exec(&json, |exec| {
+        exec["weather_observation_time"] = serde_json::json!("2023-08-23T15:00:00.000000Z");
+    });
+    let report = run_json(&edited.to_string(), &pk_hex, &kid);
+    assert_eq!(
+        status(&report, StepName::WeatherObservationWindow),
+        &StepStatus::Pass
+    );
+}
