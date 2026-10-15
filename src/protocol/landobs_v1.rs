@@ -60,10 +60,9 @@ pub fn latest_lock_at(weather_time: i64) -> Option<i64> {
 
 /// Parse a lock receipt `weather_time` under this tag. It must be exactly
 /// `YYYY-MM-DDTHH:MM:SS.ffffffZ` (six fractional digits, `Z` only), a whole
-/// UTC hour, and a real calendar time:
-/// the string must equal its own canonical rendering, so
-/// `18:60` or `09-31` is rejected rather than normalised. Returns unix
-/// seconds.
+/// UTC hour, and a real calendar time: the string must equal its own
+/// canonical rendering, so `18:60` or `09-31` is rejected rather than
+/// normalised. Returns unix seconds.
 pub fn parse_weather_time(s: &str) -> Result<i64, String> {
     let t = crate::verify_steps::chrono_parse_canonical(s)?;
     let secs = t.timestamp();
@@ -397,7 +396,12 @@ mod tests {
             "2026-02-29T00:00:00.000000Z",
             "2026-12-31T23:59:60.000000Z",
         ] {
-            assert!(parse_weather_time(bad).is_err(), "accepted {bad}");
+            assert!(
+                parse_weather_time(bad)
+                    .unwrap_err()
+                    .contains("valid calendar time"),
+                "{bad}"
+            );
         }
     }
 

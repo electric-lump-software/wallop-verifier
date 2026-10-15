@@ -1728,10 +1728,9 @@ fn check_one_class(
 // (`YYYY-MM-DDTHH:MM:SS.ffffffZ`, exactly 6 fractional digits, Z suffix).
 // Keeps whole unix seconds and the microseconds separately; use
 // `timestamp_micros()` for any comparison that must not lose the
-// fraction. This is a narrow parser, not a
-// general-purpose RFC 3339 parser — the spec §4.2.1 note explicitly
-// warns against general-purpose parsers that accept variable fractional
-// digit counts or +00:00 offsets.
+// fraction. This is a narrow parser, not a general-purpose RFC 3339
+// parser — the spec §4.2.1 note explicitly warns against general-purpose
+// parsers that accept variable fractional digit counts or +00:00 offsets.
 pub(crate) fn chrono_parse_canonical(s: &str) -> Result<ChronoStub, String> {
     // Manual check matching spec §4.2.1 regex
     // `\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z\z`. No regex dep
@@ -1825,7 +1824,10 @@ impl ChronoStub {
     /// must not lose the fractional second.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "used by the weather lock-time check")
+        expect(
+            dead_code,
+            reason = "the weather lock-time check will use this; until then only tests do"
+        )
     )]
     pub(crate) fn timestamp_micros(&self) -> i64 {
         self.secs * 1_000_000 + self.micros

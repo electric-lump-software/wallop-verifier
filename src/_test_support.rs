@@ -354,13 +354,15 @@ pub const BEACON_V6_SIGNATURE: &str = "995ffde0adb77c55a684f709ece0f4cb1effd6284
 pub const BEACON_V6_RANDOMNESS: &str =
     "63f5ac51561140f314891a16e6239142924611c313ff4cbf1aeb4dbb3c3ae135";
 
-/// A grammar-valid weather value (t 18.4 C, 1021 hPa, 51 %, 41.14 km).
+/// A synthetic, grammar-valid weather value (t 18.4 C, 1021 hPa, 51 %,
+/// 41.14 km). Not a real observation.
 #[doc(hidden)]
 pub const V6_WEATHER_VALUE: &str = "184;1021;51;4114";
 
-/// Every signed field a lock v6 / execution v5 fixture varies. Start from
-/// `weather()`, `fallback()` or `backup()` and change fields to build
-/// negative cases; `build_v6_bundle` signs whatever it is given.
+/// Every field (signed receipts and the entropy block) a lock v6 /
+/// execution v5 fixture varies. Start from `weather()`, `fallback()` or
+/// `backup()` and change fields to build negative cases; `build_v6_bundle`
+/// signs whatever it is given.
 #[doc(hidden)]
 #[derive(Clone, Debug)]
 pub struct V6Params {
@@ -702,6 +704,25 @@ mod fixture_tests {
             p.weather_observation_time.as_deref(),
             Some(p.weather_time.as_str())
         );
+        assert_eq!(p.weather_time, "2026-10-01T19:00:00.000000Z");
+        assert_eq!(p.locked_at, "2026-10-01T18:13:00.000000Z");
+        assert_eq!(p.executed_at, "2026-10-01T20:00:05.000000Z");
+    }
+
+    #[test]
+    fn v6_backup_fixture_uses_wittering() {
+        let (json, _, _) = build_v6_bundle(&V6Params::backup());
+        let bundle: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let lock: serde_json::Value =
+            serde_json::from_str(bundle["lock_receipt"]["payload_jcs"].as_str().unwrap()).unwrap();
+        let exec: serde_json::Value =
+            serde_json::from_str(bundle["execution_receipt"]["payload_jcs"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(exec["weather_station"], "wmo-03462");
+        assert_eq!(lock["weather_station"], "wmo-03749");
+        assert!(exec["weather_value"].is_string());
+        assert!(exec["weather_observation_time"].is_string());
+        assert!(exec["weather_fallback_reason"].is_null());
     }
 
     #[test]
