@@ -66,6 +66,9 @@ pub use fair_pick_rs::{Entry, Winner, draw};
 /// Returns `Ok(true)` if every check above passes, `Ok(false)` if any
 /// fails, and `Err` if the inputs are structurally invalid (unparseable
 /// JSON or a missing field).
+///
+/// Returns `Err` for a lock receipt with schema 6 or an execution receipt
+/// with schema 5.
 #[deprecated(note = "checks less than verify_bundle_with; use verify_bundle_with")]
 #[allow(clippy::too_many_arguments)]
 pub fn verify_full(
@@ -77,6 +80,20 @@ pub fn verify_full(
     infrastructure_public_key: &[u8; 32],
     entries: &[Entry],
 ) -> Result<bool, String> {
+    // The Land Observations schemas carry rules this function does not
+    // check (observation hour, lock offset, stations, fallback). Refuse
+    // rather than pass them without those checks.
+    if protocol::receipts::receipt_schema_version(lock_receipt_jcs).as_deref()
+        == Some(protocol::receipts::LOCK_SCHEMA_VERSION_V6)
+        || protocol::receipts::receipt_schema_version(execution_receipt_jcs).as_deref()
+            == Some(protocol::receipts::EXECUTION_SCHEMA_VERSION_V5)
+    {
+        return Err(
+            "lock receipt schema 6 / execution receipt schema 5 are verified only by verify_bundle_with"
+                .into(),
+        );
+    }
+
     // Step 1: Verify lock receipt signature
     if !protocol::crypto::verify_receipt(
         lock_receipt_jcs.as_bytes(),
@@ -770,5 +787,44 @@ mod tests {
             result.unwrap_err().contains("not a string"),
             "error should mention non-string element"
         );
+    }
+
+    /// `verify_full` over the receipts of a signed bundle.
+    fn verify_full_on(json: &str, pk_hex: &str) -> Result<bool, String> {
+        let b = crate::bundle::ProofBundle::from_json(json).unwrap();
+        let pk: [u8; 32] = hex::decode(pk_hex).unwrap().try_into().unwrap();
+        let sig = |h: &str| -> [u8; 64] { hex::decode(h).unwrap().try_into().unwrap() };
+        verify_full(
+            &b.lock_receipt.payload_jcs,
+            &sig(&b.lock_receipt.signature_hex),
+            &pk,
+            &b.execution_receipt.payload_jcs,
+            &sig(&b.execution_receipt.signature_hex),
+            &pk,
+            &crate::_test_support::v6_entries(),
+        )
+    }
+
+    const REFUSES_LANDOBS: &str = "lock receipt schema 6 / execution receipt schema 5 are verified only by verify_bundle_with";
+
+    #[test]
+    fn verify_full_refuses_lock_schema_6() {
+        use crate::_test_support::{V6Params, build_v6_bundle};
+        let (json, pk_hex, _) = build_v6_bundle(&V6Params::weather());
+        assert_eq!(verify_full_on(&json, &pk_hex).unwrap_err(), REFUSES_LANDOBS);
+    }
+
+    #[test]
+    fn verify_full_refuses_either_schema_alone() {
+        use crate::_test_support::v6_negative_bundle;
+        // Lock 6 with exec 4, and lock 5 with exec 5.
+        for name in ["lock_v6_with_exec_v4", "lock_v5_with_exec_v5"] {
+            let (json, pk_hex, _) = v6_negative_bundle(name);
+            assert_eq!(
+                verify_full_on(&json, &pk_hex).unwrap_err(),
+                REFUSES_LANDOBS,
+                "{name}"
+            );
+        }
     }
 }
