@@ -582,7 +582,17 @@ pub fn verify_bundle_with<R: KeyResolver>(
     // IMPORTANT: detect drand-only from exec receipt weather_value (not bundle entropy)
     let exec_parsed: serde_json::Value =
         serde_json::from_str(&bundle.execution_receipt.payload_jcs).unwrap_or_default();
-    let exec_weather = exec_parsed.get("weather_value").and_then(|v| v.as_str());
+    // Absent or null means a drand-only draw. Any other non-string value
+    // is malformed, not "no weather", and fails the seed step.
+    let exec_weather_parsed: Result<Option<&str>, &str> =
+        match exec_parsed.get("weather_value").filter(|v| !v.is_null()) {
+            None => Ok(None),
+            Some(v) => v
+                .as_str()
+                .map(Some)
+                .ok_or("exec receipt weather_value is neither a string nor null"),
+        };
+    let exec_weather = exec_weather_parsed.unwrap_or(None);
     let exec_seed = exec_parsed
         .get("seed")
         .and_then(|v| v.as_str())
@@ -597,6 +607,13 @@ pub fn verify_bundle_with<R: KeyResolver>(
         steps.push(StepResult {
             name: StepName::SeedRecomputation,
             status: StepStatus::Skip("exec signature failed".into()),
+            detail: None,
+        });
+        step6_pass = false;
+    } else if let Err(reason) = exec_weather_parsed {
+        steps.push(StepResult {
+            name: StepName::SeedRecomputation,
+            status: StepStatus::Fail(reason.into()),
             detail: None,
         });
         step6_pass = false;
@@ -3438,6 +3455,29 @@ mod tests {
                 StepStatus::Fail(r) if r.contains("results")),
             "got {:?}",
             winner_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn non_string_weather_value_fails_seed_recomputation() {
+        // A drand-only bundle whose signed receipt carries a numeric
+        // weather_value. Reading it as "no weather" would recompute the
+        // drand-only seed and pass; the seed step must fail instead.
+        let (json, _) = crate::_test_support::build_valid_drand_only_bundle();
+        let val = resign_exec(&json, |exec| {
+            exec["weather_value"] = serde_json::json!(1013);
+        });
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert_eq!(
+            step_named(&report, StepName::ExecSignature).status,
+            StepStatus::Pass
+        );
+        assert!(
+            matches!(&step_named(&report, StepName::SeedRecomputation).status,
+                StepStatus::Fail(r) if r.contains("weather_value")),
+            "got {:?}",
+            step_named(&report, StepName::SeedRecomputation).status
         );
         assert!(!report.passed());
     }
