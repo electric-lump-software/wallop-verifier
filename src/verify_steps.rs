@@ -1837,7 +1837,7 @@ mod tests {
             "entry_hash": &ehash,
             "fair_pick_version": "0.1.0",
             "jcs_version": "sha256-jcs-v1",
-            "locked_at": "2026-04-09T12:00:00.000000Z",
+            "locked_at": "2023-08-23T15:50:00.000000Z",
             "operator_id": "11111111-1111-1111-1111-111111111111",
             "operator_slug": "acme-prizes",
             "schema_version": "4",
@@ -1846,7 +1846,7 @@ mod tests {
             "signing_key_id": &kid,
             "wallop_core_version": "0.14.1",
             "weather_station": "middle-wallop",
-            "weather_time": "2026-04-09T12:10:00.000000Z",
+            "weather_time": "2023-08-23T16:00:00.000000Z",
             "winner_count": 2
         })
         .to_string();
@@ -1864,7 +1864,7 @@ mod tests {
             "draw_id": "22222222-2222-2222-2222-222222222222",
             "entropy_composition": "drand-quicknet+openmeteo-v1",
             "entry_hash": &ehash,
-            "executed_at": "2026-04-09T12:15:00.000000Z",
+            "executed_at": "2023-08-23T16:05:00.000000Z",
             "fair_pick_version": "0.1.0",
             "jcs_version": "sha256-jcs-v1",
             "lock_receipt_hash": &lrh,
@@ -1878,7 +1878,7 @@ mod tests {
             "signature_algorithm": "ed25519",
             "wallop_core_version": "0.14.1",
             "weather_fallback_reason": null,
-            "weather_observation_time": "2026-04-09T12:10:00.000000Z",
+            "weather_observation_time": "2023-08-23T16:00:00.000000Z",
             "weather_station": "middle-wallop",
             "weather_value": weather_val
         })
@@ -2446,7 +2446,7 @@ mod tests {
         let tampered = rewrite_lock_payload(&json, |obj| {
             obj.insert(
                 "locked_at".into(),
-                serde_json::Value::String("2026-04-09T12:00:00.000000+00:00".into()),
+                serde_json::Value::String("2023-08-23T15:50:00.000000+00:00".into()),
             );
         });
         let bundle = ProofBundle::from_json(&tampered).unwrap();
@@ -2662,12 +2662,12 @@ mod tests {
         let bundle = ProofBundle::from_json(&json).unwrap();
         let pk: [u8; 32] = hex::decode(&pk_hex).unwrap().try_into().unwrap();
 
-        // build_valid_v5_bundle's lock.locked_at = 2026-04-09T12:00:00.000000Z.
+        // build_valid_v5_bundle's lock.locked_at = 2023-08-23T15:50:00.000000Z.
         // Inserted_at well before that.
         let resolver = TimedResolver {
             signing_key_id,
             public_key: pk,
-            inserted_at: InsertedAt::At("2026-04-01T00:00:00.000000Z".into()),
+            inserted_at: InsertedAt::At("2023-08-01T00:00:00.000000Z".into()),
         };
         let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attestable);
         let step = temporal_binding_step(&report);
@@ -2690,7 +2690,7 @@ mod tests {
         let resolver = TimedResolver {
             signing_key_id,
             public_key: pk,
-            inserted_at: InsertedAt::At("2026-04-09T12:00:00.000000Z".into()),
+            inserted_at: InsertedAt::At("2023-08-23T15:50:00.000000Z".into()),
         };
         let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attestable);
         let step = temporal_binding_step(&report);
@@ -2712,7 +2712,7 @@ mod tests {
         let resolver = TimedResolver {
             signing_key_id,
             public_key: pk,
-            inserted_at: InsertedAt::At("2026-04-09T12:00:01.000000Z".into()),
+            inserted_at: InsertedAt::At("2023-08-23T15:50:01.000000Z".into()),
         };
         let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attestable);
         let step = temporal_binding_step(&report);
@@ -3304,7 +3304,7 @@ mod tests {
     fn observation_time_without_weather_value_fails_window() {
         let (json, _) = crate::_test_support::build_valid_drand_only_bundle();
         let val = resign_exec(&json, |exec| {
-            exec["weather_observation_time"] = serde_json::json!("2026-04-09T12:10:00.000000Z");
+            exec["weather_observation_time"] = serde_json::json!("2023-08-23T16:00:00.000000Z");
         });
         let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
         assert_eq!(

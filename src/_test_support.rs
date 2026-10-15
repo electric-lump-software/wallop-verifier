@@ -34,7 +34,7 @@ pub const BEACON_2_RANDOMNESS: &str =
 /// `inserted_at` for the test key as a resolver reports it: before every
 /// fixture's `locked_at` and `executed_at`, so temporal binding passes.
 #[doc(hidden)]
-pub const KEY_INSERTED_AT: &str = "2026-01-01T00:00:00.000000Z";
+pub const KEY_INSERTED_AT: &str = "2023-08-01T00:00:00.000000Z";
 
 /// Fixed test signing key used by all generated bundles. Deterministic so
 /// bundles are reproducible across runs.
@@ -94,7 +94,7 @@ pub fn build_valid_bundle(entries: &[Entry], weather: Option<&str>, winner_count
         "entry_hash": &ehash,
         "fair_pick_version": "0.1.0",
         "jcs_version": "sha256-jcs-v1",
-        "locked_at": "2026-04-09T12:00:00.000000Z",
+        "locked_at": "2023-08-23T15:50:00.000000Z",
         "operator_id": "11111111-1111-1111-1111-111111111111",
         "operator_slug": "acme-prizes",
         "schema_version": "4",
@@ -103,7 +103,7 @@ pub fn build_valid_bundle(entries: &[Entry], weather: Option<&str>, winner_count
         "signing_key_id": &kid,
         "wallop_core_version": "0.14.1",
         "weather_station": "middle-wallop",
-        "weather_time": "2026-04-09T12:10:00.000000Z",
+        "weather_time": "2023-08-23T16:00:00.000000Z",
         "winner_count": winner_count
     })
     .to_string();
@@ -120,7 +120,7 @@ pub fn build_valid_bundle(entries: &[Entry], weather: Option<&str>, winner_count
         "draw_id": "22222222-2222-2222-2222-222222222222",
         "entropy_composition": "drand-quicknet+openmeteo-v1",
         "entry_hash": &ehash,
-        "executed_at": "2026-04-09T12:15:00.000000Z",
+        "executed_at": "2023-08-23T16:05:00.000000Z",
         "fair_pick_version": "0.1.0",
         "jcs_version": "sha256-jcs-v1",
         "lock_receipt_hash": &lrh,
@@ -134,7 +134,7 @@ pub fn build_valid_bundle(entries: &[Entry], weather: Option<&str>, winner_count
         "signature_algorithm": "ed25519",
         "wallop_core_version": "0.14.1",
         "weather_fallback_reason": if weather.is_some() { serde_json::Value::Null } else { serde_json::json!("unreachable") },
-        "weather_observation_time": if weather.is_some() { serde_json::json!("2026-04-09T12:10:00.000000Z") } else { serde_json::Value::Null },
+        "weather_observation_time": if weather.is_some() { serde_json::json!("2023-08-23T16:00:00.000000Z") } else { serde_json::Value::Null },
         "weather_station": "middle-wallop",
         "weather_value": match weather { Some(w) => serde_json::json!(w), None => serde_json::Value::Null }
     }).to_string();
@@ -254,7 +254,7 @@ pub fn build_valid_v5_bundle(
         "entry_hash": &ehash,
         "fair_pick_version": "0.1.0",
         "jcs_version": "sha256-jcs-v1",
-        "locked_at": "2026-04-09T12:00:00.000000Z",
+        "locked_at": "2023-08-23T15:50:00.000000Z",
         "operator_id": "11111111-1111-1111-1111-111111111111",
         "operator_slug": "acme-prizes",
         "schema_version": "5",
@@ -263,7 +263,7 @@ pub fn build_valid_v5_bundle(
         "signing_key_id": &signing_key_id,
         "wallop_core_version": "0.18.0",
         "weather_station": "middle-wallop",
-        "weather_time": "2026-04-09T12:10:00.000000Z",
+        "weather_time": "2023-08-23T16:00:00.000000Z",
         "winner_count": winner_count
     })
     .to_string();
@@ -281,7 +281,7 @@ pub fn build_valid_v5_bundle(
         "draw_id": "22222222-2222-2222-2222-222222222222",
         "entropy_composition": "drand-quicknet+openmeteo-v1",
         "entry_hash": &ehash,
-        "executed_at": "2026-04-09T12:15:00.000000Z",
+        "executed_at": "2023-08-23T16:05:00.000000Z",
         "fair_pick_version": "0.1.0",
         "jcs_version": "sha256-jcs-v1",
         "lock_receipt_hash": &lrh,
@@ -296,7 +296,7 @@ pub fn build_valid_v5_bundle(
         "signing_key_id": &signing_key_id,
         "wallop_core_version": "0.18.0",
         "weather_fallback_reason": if weather.is_some() { serde_json::Value::Null } else { serde_json::json!("unreachable") },
-        "weather_observation_time": if weather.is_some() { serde_json::json!("2026-04-09T12:10:00.000000Z") } else { serde_json::Value::Null },
+        "weather_observation_time": if weather.is_some() { serde_json::json!("2023-08-23T16:00:00.000000Z") } else { serde_json::Value::Null },
         "weather_station": "middle-wallop",
         "weather_value": match weather { Some(w) => serde_json::json!(w), None => serde_json::Value::Null }
     }).to_string();
