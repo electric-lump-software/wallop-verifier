@@ -5,6 +5,7 @@ use crate::protocol::receipts::{
     ParsedExecutionReceipt, ParsedLockReceipt, lock_receipt_hash, parse_execution_receipt,
     parse_lock_receipt, validate_execution_receipt_tags, validate_execution_receipt_tags_v3,
     validate_execution_receipt_tags_v4, validate_lock_receipt_tags, validate_lock_receipt_tags_v5,
+    validate_lock_receipt_tags_v6,
 };
 use crate::{Entry, compute_seed, compute_seed_drand_only, draw, entry_hash};
 use serde::{Deserialize, Serialize};
@@ -351,6 +352,7 @@ pub fn verify_bundle_with<R: KeyResolver>(
         match parse_lock_receipt(&bundle.lock_receipt.payload_jcs).ok() {
             Some(ParsedLockReceipt::V4(r)) => (Some(r.signing_key_id), Some(r.locked_at)),
             Some(ParsedLockReceipt::V5(r)) => (Some(r.signing_key_id), Some(r.locked_at)),
+            Some(ParsedLockReceipt::V6(r)) => (Some(r.signing_key_id), Some(r.locked_at)),
             None => (None, None),
         };
     let (exec_signing_key_id, exec_executed_at) =
@@ -1032,6 +1034,27 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
                         name: StepName::BundleShape,
                         status: StepStatus::Fail(
                             "lock receipt schema_version=\"5\" must not carry inline \
+                             public_key_hex on the bundle wrapper (downgrade-relabel check)"
+                                .into(),
+                        ),
+                        detail: None,
+                    };
+                }
+                (p.locked_at, p.weather_time)
+            }
+            Ok(ParsedLockReceipt::V6(p)) => {
+                if let Err(e) = validate_lock_receipt_tags_v6(&p) {
+                    return StepResult {
+                        name: StepName::BundleShape,
+                        status: StepStatus::Fail(format!("lock receipt validation: {}", e)),
+                        detail: None,
+                    };
+                }
+                if inline_lock_pk_present {
+                    return StepResult {
+                        name: StepName::BundleShape,
+                        status: StepStatus::Fail(
+                            "lock receipt schema_version=\"6\" must not carry inline \
                              public_key_hex on the bundle wrapper (downgrade-relabel check)"
                                 .into(),
                         ),

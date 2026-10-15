@@ -614,7 +614,7 @@ fn parse_lock_receipt_accepts_v4() {
     let parsed = parse_lock_receipt(&payload).expect("v4 payload must parse");
     match parsed {
         ParsedLockReceipt::V4(_) => (),
-        ParsedLockReceipt::V5(_) => panic!("expected V4, got V5"),
+        other => panic!("expected V4, got {other:?}"),
     }
 }
 
@@ -729,7 +729,7 @@ fn parse_lock_receipt_accepts_v5() {
     let parsed = parse_lock_receipt(&payload).expect("v5 payload must parse");
     match parsed {
         ParsedLockReceipt::V5(_) => (),
-        ParsedLockReceipt::V4(_) => panic!("expected V5, got V4"),
+        other => panic!("expected V5, got {other:?}"),
     }
 }
 
@@ -970,4 +970,110 @@ fn validate_execution_receipt_tags_rejects_bad_weather_station() {
     input.weather_station = Some("HEATHROW".into());
 
     assert!(validate_execution_receipt_tags(&input).is_err());
+}
+
+// ── lock v6 / exec v5 (Land Observations tag) ──────────────────────────
+
+use crate::protocol::landobs_v1;
+
+fn lock_v6_value() -> serde_json::Value {
+    serde_json::json!({
+        "commitment_hash": "abc",
+        "drand_chain": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
+        "drand_round": 32693812u64,
+        "draw_id": "22222222-2222-2222-2222-222222222222",
+        "entropy_composition": landobs_v1::ENTROPY_COMPOSITION,
+        "entry_hash": "abc",
+        "fair_pick_version": "0.2.1",
+        "jcs_version": JCS_VERSION,
+        "locked_at": "2026-10-01T18:13:00.000000Z",
+        "operator_id": "11111111-1111-1111-1111-111111111111",
+        "operator_slug": "acme-prizes",
+        "schema_version": "6",
+        "sequence": 42,
+        "signature_algorithm": SIGNATURE_ALGORITHM,
+        "signing_key_id": "deadbeef",
+        "wallop_core_version": "0.29.0",
+        "weather_station": "wmo-03749",
+        "weather_time": "2026-10-01T19:00:00.000000Z",
+        "winner_count": 3
+    })
+}
+
+fn lock_v6(edit: impl FnOnce(&mut serde_json::Value)) -> LockReceiptV6 {
+    let mut v = lock_v6_value();
+    edit(&mut v);
+    match parse_lock_receipt(&v.to_string()).unwrap() {
+        ParsedLockReceipt::V6(p) => p,
+        other => panic!("expected V6, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_lock_receipt_accepts_v6_and_validates() {
+    assert!(validate_lock_receipt_tags_v6(&lock_v6(|_| {})).is_ok());
+}
+
+#[test]
+fn parse_lock_receipt_v6_rejects_unknown_field() {
+    let mut v = lock_v6_value();
+    v["draw_at"] = serde_json::json!("2026-10-01T20:00:00.000000Z");
+    assert!(matches!(
+        parse_lock_receipt(&v.to_string()),
+        Err(ParseLockReceiptError::PayloadShapeMismatch(_))
+    ));
+}
+
+#[test]
+fn lock_v6_rejects_the_forecast_tag() {
+    let p = lock_v6(|v| v["entropy_composition"] = serde_json::json!(ENTROPY_COMPOSITION));
+    assert!(
+        validate_lock_receipt_tags_v6(&p)
+            .unwrap_err()
+            .contains("entropy_composition")
+    );
+}
+
+#[test]
+fn lock_v6_requires_the_primary_station() {
+    for station in ["middle-wallop", "wmo-03462", "wmo-03772"] {
+        let p = lock_v6(|v| v["weather_station"] = serde_json::json!(station));
+        assert!(
+            validate_lock_receipt_tags_v6(&p).is_err(),
+            "accepted {station}"
+        );
+    }
+}
+
+#[test]
+fn lock_v6_rejects_empty_signing_key_id() {
+    let p = lock_v6(|v| v["signing_key_id"] = serde_json::json!(""));
+    assert!(
+        validate_lock_receipt_tags_v6(&p)
+            .unwrap_err()
+            .contains("signing_key_id")
+    );
+}
+
+#[test]
+fn lock_v5_still_rejects_the_landobs_tag() {
+    let mut v = lock_v6_value();
+    v["schema_version"] = serde_json::json!("5");
+    let p = match parse_lock_receipt(&v.to_string()).unwrap() {
+        ParsedLockReceipt::V5(p) => p,
+        other => panic!("expected V5, got {other:?}"),
+    };
+    assert!(
+        validate_lock_receipt_tags_v5(&p)
+            .unwrap_err()
+            .contains("entropy_composition")
+    );
+}
+
+#[test]
+fn unknown_lock_schema_message_lists_6() {
+    let lock = parse_lock_receipt(r#"{"schema_version":"99"}"#)
+        .unwrap_err()
+        .to_string();
+    assert!(lock.contains("\"6\""), "{lock}");
 }

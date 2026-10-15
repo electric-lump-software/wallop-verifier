@@ -1,6 +1,8 @@
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+use crate::protocol::landobs_v1;
+
 // Pinned algorithm identity tags embedded verbatim into every signed
 // receipt. Rotating any of these requires a new tag value plus a schema
 // version bump. The verifier rejects any receipt whose tag value does
@@ -21,6 +23,8 @@ pub const MERKLE_ALGORITHM: &str = "sha256-pairwise-v1";
 //        verifiers MUST resolve operator keys via `KeyResolver`. Field set
 //        on the signed payload is byte-identical to v4 — the schema_version
 //        difference encodes verifier behaviour, not receipt bytes.
+//   v6 — same field set as v5; carries the
+//        `drand-quicknet+metoffice-landobs-v1` tag. Resolver-driven.
 //
 // Execution receipt history:
 //   v2 — pre-F2 shape, no `signing_key_id` on the signed payload.
@@ -33,6 +37,7 @@ pub const MERKLE_ALGORITHM: &str = "sha256-pairwise-v1";
 // All historical schemas remain verifiable for the life of 1.x.
 pub const LOCK_SCHEMA_VERSION: &str = "4";
 pub const LOCK_SCHEMA_VERSION_V5: &str = "5";
+pub const LOCK_SCHEMA_VERSION_V6: &str = "6";
 pub const EXECUTION_SCHEMA_VERSION: &str = "2";
 pub const EXECUTION_SCHEMA_VERSION_V3: &str = "3";
 pub const EXECUTION_SCHEMA_VERSION_V4: &str = "4";
@@ -78,6 +83,33 @@ pub struct LockReceiptV4 {
 #[derive(serde::Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct LockReceiptV5 {
+    pub commitment_hash: String,
+    pub draw_id: String,
+    pub drand_chain: String,
+    pub drand_round: u64,
+    pub entropy_composition: String,
+    pub entry_hash: String,
+    pub fair_pick_version: String,
+    pub jcs_version: String,
+    pub locked_at: String,
+    pub operator_id: String,
+    pub operator_slug: String,
+    pub schema_version: String,
+    pub sequence: u64,
+    pub signature_algorithm: String,
+    pub signing_key_id: String,
+    pub wallop_core_version: String,
+    pub weather_station: String,
+    pub weather_time: String,
+    pub winner_count: u64,
+}
+
+/// V6 lock receipt: same field set as V5, under the
+/// `drand-quicknet+metoffice-landobs-v1` entropy tag (see `landobs_v1`).
+/// Resolver-driven like V5. Pairs only with `ExecutionReceiptV5`.
+#[derive(serde::Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct LockReceiptV6 {
     pub commitment_hash: String,
     pub draw_id: String,
     pub drand_chain: String,
@@ -601,6 +633,43 @@ pub fn validate_lock_receipt_tags_v5(payload: &LockReceiptV5) -> Result<(), Stri
     Ok(())
 }
 
+pub fn validate_lock_receipt_tags_v6(payload: &LockReceiptV6) -> Result<(), String> {
+    if payload.schema_version != LOCK_SCHEMA_VERSION_V6 {
+        return Err(format!(
+            "unknown lock receipt schema_version: {} (expected {})",
+            payload.schema_version, LOCK_SCHEMA_VERSION_V6
+        ));
+    }
+    if payload.jcs_version != JCS_VERSION {
+        return Err(format!("unknown jcs_version: {}", payload.jcs_version));
+    }
+    if payload.signature_algorithm != SIGNATURE_ALGORITHM {
+        return Err(format!(
+            "unknown signature_algorithm: {}",
+            payload.signature_algorithm
+        ));
+    }
+    if payload.entropy_composition != landobs_v1::ENTROPY_COMPOSITION {
+        return Err(format!(
+            "unknown entropy_composition: {}",
+            payload.entropy_composition
+        ));
+    }
+    if payload.signing_key_id.is_empty() {
+        return Err("signing_key_id is empty".into());
+    }
+    validate_weather_station(&payload.weather_station)?;
+    if payload.weather_station != landobs_v1::PRIMARY_STATION {
+        return Err(format!(
+            "weather_station must be {} under {}, got {:?}",
+            landobs_v1::PRIMARY_STATION,
+            landobs_v1::ENTROPY_COMPOSITION,
+            payload.weather_station
+        ));
+    }
+    Ok(())
+}
+
 pub fn validate_execution_receipt_tags_v4(payload: &ExecutionReceiptV4) -> Result<(), String> {
     if payload.schema_version != EXECUTION_SCHEMA_VERSION_V4 {
         return Err(format!(
@@ -707,9 +776,11 @@ pub fn validate_weather_station(station: &str) -> Result<(), String> {
 /// callers can route on whether the bundle's wrapper is expected to carry
 /// inline keys (V4) or to be resolver-driven (V5). See spec §4.2.4.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ParsedLockReceipt {
     V4(LockReceiptV4),
     V5(LockReceiptV5),
+    V6(LockReceiptV6),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -727,7 +798,7 @@ impl std::fmt::Display for ParseLockReceiptError {
             Self::MissingSchemaVersion => write!(f, "missing schema_version"),
             Self::UnknownSchemaVersion(v) => write!(
                 f,
-                "unknown lock receipt schema_version: {} (expected \"4\" or \"5\")",
+                "unknown lock receipt schema_version: {} (expected \"4\", \"5\" or \"6\")",
                 v
             ),
             Self::PayloadShapeMismatch(e) => write!(
@@ -760,6 +831,11 @@ pub fn parse_lock_receipt(payload_jcs: &str) -> Result<ParsedLockReceipt, ParseL
             let parsed: LockReceiptV5 = serde_json::from_str(payload_jcs)
                 .map_err(|e| ParseLockReceiptError::PayloadShapeMismatch(e.to_string()))?;
             Ok(ParsedLockReceipt::V5(parsed))
+        }
+        "6" => {
+            let parsed: LockReceiptV6 = serde_json::from_str(payload_jcs)
+                .map_err(|e| ParseLockReceiptError::PayloadShapeMismatch(e.to_string()))?;
+            Ok(ParsedLockReceipt::V6(parsed))
         }
         other => Err(ParseLockReceiptError::UnknownSchemaVersion(
             other.to_string(),

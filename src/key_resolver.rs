@@ -183,6 +183,7 @@ fn signing_key_id_from_lock(payload_jcs: &str) -> Option<String> {
     match parse_lock_receipt(payload_jcs).ok()? {
         ParsedLockReceipt::V4(p) => Some(p.signing_key_id),
         ParsedLockReceipt::V5(p) => Some(p.signing_key_id),
+        ParsedLockReceipt::V6(p) => Some(p.signing_key_id),
     }
 }
 
