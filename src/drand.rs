@@ -8,6 +8,24 @@ pub const QUICKNET_PUBLIC_KEY_HEX: &str = "83cf0f2896adee7eb8b5f01fcad3912212c43
      8c4b450b6a0a6c3ac6a5776a2d1064510d1fec758c921cc22b0e17e63aaf4bcb\
      5ed66304de9cf809bd274ca73bab4af5a6e9c76a4bc09e76eae8991ef5ece45a";
 
+/// Quicknet genesis time (unix seconds): when round 1 was published.
+/// From drand's published quicknet chain info,
+/// https://api.drand.sh/52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971/info
+/// (`genesis_time`).
+pub const QUICKNET_GENESIS_TIME: u64 = 1_692_803_367;
+
+/// Quicknet round period in seconds, from the same chain info (`period`).
+pub const QUICKNET_PERIOD_SECS: u64 = 3;
+
+/// Unix time (seconds) at which quicknet publishes `round`:
+/// `genesis_time + (round - 1) * period`. `None` for round 0, which does
+/// not exist, or on overflow.
+pub fn quicknet_round_time(round: u64) -> Option<i64> {
+    let elapsed = round.checked_sub(1)?.checked_mul(QUICKNET_PERIOD_SECS)?;
+    let t = QUICKNET_GENESIS_TIME.checked_add(elapsed)?;
+    i64::try_from(t).ok()
+}
+
 #[derive(Debug)]
 pub enum DrandError {
     UnknownChain(String),
@@ -109,5 +127,14 @@ mod tests {
             "real quicknet beacon should verify: {:?}",
             result
         );
+    }
+
+    #[test]
+    fn quicknet_round_times_match_the_published_beacons() {
+        // Round 1 is at genesis; round 1000 published 2023-08-23T15:59:24Z.
+        assert_eq!(quicknet_round_time(1), Some(1_692_803_367));
+        assert_eq!(quicknet_round_time(1000), Some(1_692_806_364));
+        assert_eq!(quicknet_round_time(0), None);
+        assert_eq!(quicknet_round_time(u64::MAX), None);
     }
 }

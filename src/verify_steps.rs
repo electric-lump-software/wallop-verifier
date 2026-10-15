@@ -30,6 +30,10 @@ pub enum StepName {
     ExecReceiptEntryHash,
     SeedRecomputation,
     WinnerSelection,
+    /// The drand beacon in the signed execution receipt: BLS signature
+    /// valid on the pinned quicknet chain, `sha256(signature) ==
+    /// randomness`, the bundle's `entropy` block equal to the receipt, and
+    /// the round published strictly after the lock receipt's `locked_at`.
     DrandBlsSignature,
     /// Cross-receipt field consistency — every field appearing in both the
     /// lock and execution receipts MUST be byte-identical. Bundle-envelope
@@ -1203,8 +1207,10 @@ fn check_bundle_results(bundle: &ProofBundle, receipt_ids: &[&str]) -> Result<()
 /// binding: take the drand beacon from the signed execution receipt,
 /// require every field of the bundle's unsigned `entropy` block
 /// (`drand_chain_hash`, `drand_round`, `drand_signature`,
-/// `drand_randomness`, `weather_value`) to match the receipt exactly, then
-/// verify the BLS signature (and `sha256(signature) == randomness`).
+/// `drand_randomness`, `weather_value`) to match the receipt exactly,
+/// verify the BLS signature (and `sha256(signature) == randomness`), and
+/// require the round to publish strictly after the lock receipt's
+/// `locked_at` (`drand_round_after_lock`).
 fn check_drand_beacon(bundle: &ProofBundle, exec: &serde_json::Value) -> Result<(), String> {
     let exec_str = |field: &str| -> Result<&str, String> {
         exec.get(field)
@@ -1269,7 +1275,43 @@ fn check_drand_beacon(bundle: &ProofBundle, exec: &serde_json::Value) -> Result<
         ));
     }
 
-    crate::drand::verify_drand_round(chain, round, signature, randomness).map_err(|e| e.to_string())
+    crate::drand::verify_drand_round(chain, round, signature, randomness)
+        .map_err(|e| e.to_string())?;
+
+    // The beacon must not have existed when the draw locked, or whoever
+    // locked could have known the randomness first.
+    let lock: serde_json::Value =
+        serde_json::from_str(&bundle.lock_receipt.payload_jcs).unwrap_or_default();
+    let locked_at = lock
+        .get("locked_at")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "lock receipt locked_at is missing or not a string".to_string())?;
+    drand_round_after_lock(round, locked_at)
+}
+
+/// The quicknet `round` must publish strictly after `locked_at` (canonical
+/// RFC 3339, parsed with `chrono_parse_canonical`). Publish time is
+/// `QUICKNET_GENESIS_TIME + (round - 1) * QUICKNET_PERIOD_SECS`.
+///
+/// `locked_at` is asserted by the operator's lock signature, so this is a
+/// consistency check that trusts the lock signer's clock: it catches a
+/// receipt that claims to have locked after its own beacon was public,
+/// not an operator who lies about the time.
+pub(crate) fn drand_round_after_lock(round: u64, locked_at: &str) -> Result<(), String> {
+    let locked = chrono_parse_canonical(locked_at)
+        .map_err(|e| format!("lock receipt locked_at ({locked_at}): {e}"))?;
+    let published = crate::drand::quicknet_round_time(round)
+        .ok_or_else(|| format!("drand round {round} has no quicknet publish time"))?;
+    // Comparing whole seconds is exact: drand publishes on whole seconds,
+    // and for a whole number P, P > locked_at iff P > floor(locked_at).
+    if published > locked.timestamp() {
+        Ok(())
+    } else {
+        Err(format!(
+            "drand round {round} was published at unix time {published}, \
+             not after lock receipt locked_at {locked_at}"
+        ))
+    }
 }
 
 // Fields that MUST be byte-identical between lock and exec receipts per
@@ -1688,7 +1730,7 @@ fn check_one_class(
 // general-purpose RFC 3339 parser — the spec §4.2.1 note explicitly
 // warns against general-purpose parsers that accept variable fractional
 // digit counts or +00:00 offsets.
-fn chrono_parse_canonical(s: &str) -> Result<ChronoStub, String> {
+pub(crate) fn chrono_parse_canonical(s: &str) -> Result<ChronoStub, String> {
     // Manual check matching spec §4.2.1 regex
     // `\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z\z`. No regex dep
     // needed — the positions are fixed.
@@ -1761,12 +1803,12 @@ fn chrono_parse_canonical(s: &str) -> Result<ChronoStub, String> {
     })
 }
 
-struct ChronoStub {
+pub(crate) struct ChronoStub {
     secs: i64,
 }
 
 impl ChronoStub {
-    fn timestamp(&self) -> i64 {
+    pub(crate) fn timestamp(&self) -> i64 {
         self.secs
     }
 }
@@ -3605,5 +3647,67 @@ mod tests {
             "got {:?}",
             window_step(&report).status
         );
+    }
+
+    // ── The drand round publishes after the lock ─────────────────────────
+
+    /// Rewrite `locked_at` in the lock receipt, re-sign it, and re-link and
+    /// re-sign the execution receipt, so every signature and the linkage
+    /// still verify.
+    fn with_locked_at(json: &str, locked_at: &str) -> String {
+        let sk = test_signing_key();
+        let mut val: serde_json::Value = serde_json::from_str(json).unwrap();
+        let mut lock: serde_json::Value =
+            serde_json::from_str(val["lock_receipt"]["payload_jcs"].as_str().unwrap()).unwrap();
+        lock["locked_at"] = serde_json::json!(locked_at);
+        let lock_jcs = lock.to_string();
+        val["lock_receipt"]["signature_hex"] =
+            serde_json::json!(hex::encode(sk.sign(lock_jcs.as_bytes()).to_bytes()));
+        val["lock_receipt"]["payload_jcs"] = serde_json::json!(lock_jcs);
+        let lrh = compute_lock_hash(&lock_jcs);
+        resign_exec(&val.to_string(), |exec| {
+            exec["lock_receipt_hash"] = serde_json::json!(lrh);
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn drand_round_published_before_lock_fails() {
+        // Round 1000 published at 2023-08-23T15:59:24Z.
+        let (json, _) = valid_signed_bundle();
+        let json = with_locked_at(&json, "2023-08-23T15:59:30.000000Z");
+        let report = verify_bundle(&ProofBundle::from_json(&json).unwrap());
+        assert!(
+            matches!(&drand_step(&report).status,
+                StepStatus::Fail(r) if r.contains("locked_at")),
+            "got {:?}",
+            drand_step(&report).status
+        );
+        assert_eq!(failing_steps(&report), vec![StepName::DrandBlsSignature]);
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn drand_round_published_at_lock_time_fails() {
+        // Strictly after: a round published in the same second as the
+        // lock does not count.
+        let (json, _) = valid_signed_bundle();
+        let json = with_locked_at(&json, "2023-08-23T15:59:24.000000Z");
+        let report = verify_bundle(&ProofBundle::from_json(&json).unwrap());
+        assert!(
+            matches!(&drand_step(&report).status,
+                StepStatus::Fail(r) if r.contains("locked_at")),
+            "got {:?}",
+            drand_step(&report).status
+        );
+    }
+
+    #[test]
+    fn drand_round_published_after_lock_passes() {
+        let (json, _) = valid_signed_bundle();
+        let json = with_locked_at(&json, "2023-08-23T15:59:23.999999Z");
+        let report = verify_bundle(&ProofBundle::from_json(&json).unwrap());
+        assert_eq!(drand_step(&report).status, StepStatus::Pass);
+        assert!(report.passed(), "steps: {:?}", report.steps);
     }
 }

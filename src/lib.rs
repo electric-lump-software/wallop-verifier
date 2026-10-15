@@ -211,6 +211,16 @@ pub fn verify_full(
         return Ok(false);
     }
 
+    // Step 10: the round must publish strictly after the lock. `locked_at`
+    // is the lock signer's claim, so this is a consistency check.
+    let locked_at = lock_parsed
+        .get("locked_at")
+        .and_then(|v| v.as_str())
+        .ok_or("missing locked_at in lock receipt")?;
+    if verify_steps::drand_round_after_lock(exec_round, locked_at).is_err() {
+        return Ok(false);
+    }
+
     Ok(true)
 }
 
@@ -422,6 +432,7 @@ mod tests {
             "entry_hash": ehash,
             "drand_chain": crate::drand::QUICKNET_CHAIN_HASH,
             "drand_round": BEACON_ROUND,
+            "locked_at": "2023-08-23T15:50:00.000000Z",
         });
         lock_edit(&mut lock);
         let lock = lock.to_string();
@@ -517,6 +528,33 @@ mod tests {
         let result = args.run();
         assert!(
             matches!(&result, Err(e) if e.contains("weather_value")),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_full_rejects_round_published_before_lock() {
+        // Round 1000 published at 2023-08-23T15:59:24Z.
+        let pair = signed_pair_edited(
+            crate::_test_support::BEACON_RANDOMNESS,
+            |lock| lock["locked_at"] = serde_json::json!("2023-08-23T15:59:30.000000Z"),
+            |_| {},
+        );
+        assert_eq!(pair.run(), Ok(false));
+    }
+
+    #[test]
+    fn verify_full_errors_when_lock_lacks_locked_at() {
+        let pair = signed_pair_edited(
+            crate::_test_support::BEACON_RANDOMNESS,
+            |lock| {
+                lock.as_object_mut().unwrap().remove("locked_at");
+            },
+            |_| {},
+        );
+        let result = pair.run();
+        assert!(
+            matches!(&result, Err(e) if e.contains("locked_at")),
             "got {result:?}"
         );
     }
