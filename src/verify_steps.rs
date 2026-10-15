@@ -1645,6 +1645,12 @@ enum RuleSet {
 /// Every lock receipt `(schema_version, entropy_composition)` pair the
 /// verifier knows. A schema may in future carry more than one tag, so the
 /// rule set is chosen by the pair, never by the schema alone.
+///
+/// When a second tag shares a schema, the seed derivation must also be
+/// chosen by the (schema, tag) pair, not by the schema or by whether
+/// `weather_value` is present: see the seed recomputation step (step 6 in
+/// `verify_bundle_with`), which today derives the seed the same way for
+/// every pair.
 const LOCK_RULE_SETS: &[(&str, &str, RuleSet)] = &[
     (LOCK_SCHEMA_VERSION, ENTROPY_COMPOSITION, RuleSet::Legacy),
     (LOCK_SCHEMA_VERSION_V5, ENTROPY_COMPOSITION, RuleSet::Legacy),
@@ -1736,7 +1742,8 @@ fn weather_rules(lock: &serde_json::Value, exec: &serde_json::Value) -> WeatherR
         (Err(reason), _) | (_, Err(reason)) => WeatherRules::Unrecognised(reason),
         (Ok(RuleSet::Legacy), Ok(RuleSet::Legacy)) => WeatherRules::Legacy,
         (Ok(RuleSet::LandObs), Ok(RuleSet::LandObs)) => WeatherRules::LandObs,
-        _ => WeatherRules::Mismatched,
+        (Ok(RuleSet::Legacy), Ok(RuleSet::LandObs))
+        | (Ok(RuleSet::LandObs), Ok(RuleSet::Legacy)) => WeatherRules::Mismatched,
     }
 }
 

@@ -932,15 +932,47 @@ fn entropy_composition_is_cross_checked_under_both_rule_sets() {
     assert!(CROSS_CHECKED_FIELDS_LANDOBS.contains(&"entropy_composition"));
 }
 
+/// Today a lock/exec tag difference always leaves one receipt with an
+/// unknown (schema, tag) pair, so field consistency fails on that, before
+/// the `entropy_composition` cross-check is reached. This proves the
+/// difference fails; it does not exercise the cross-check itself (see
+/// `each_schema_has_exactly_one_tag`).
 #[test]
-fn lock_and_exec_tags_that_differ_fail_field_consistency() {
+fn lock_and_exec_tags_that_differ_fail_field_consistency_as_an_unknown_pair() {
     let report = run(&V6Params {
         exec_entropy_composition: crate::protocol::receipts::ENTROPY_COMPOSITION.into(),
         ..V6Params::weather()
     });
-    assert_step_fails(
-        &report,
-        StepName::ReceiptFieldConsistency,
-        "entropy_composition",
+    assert_eq!(
+        status(&report, StepName::ReceiptFieldConsistency),
+        &StepStatus::Fail(format!(
+            "execution receipt schema_version \"5\" with entropy_composition \"{}\" {NOT_KNOWN}",
+            crate::protocol::receipts::ENTROPY_COMPOSITION
+        ))
     );
+    assert!(!report.passed());
+}
+
+/// Tripwire. While every schema carries exactly one tag, a lock/exec tag
+/// difference can only show up as an unknown pair, and the
+/// `entropy_composition` cross-check is unreachable. Once a schema gains a
+/// second tag the cross-check becomes live and needs a real test.
+#[test]
+fn each_schema_has_exactly_one_tag() {
+    for (table, rows) in [
+        ("LOCK_RULE_SETS", LOCK_RULE_SETS),
+        ("EXEC_RULE_SETS", EXEC_RULE_SETS),
+    ] {
+        for (schema, _, _) in rows {
+            let tags = rows.iter().filter(|(s, _, _)| s == schema).count();
+            assert_eq!(
+                tags, 1,
+                "{table}: schema_version {schema:?} now has {tags} tags. The \
+                 entropy_composition cross-check between lock and exec is now \
+                 reachable: add a real test that a lock/exec pair with two known \
+                 but different tags fails receipt_field_consistency on that \
+                 cross-check, then update this tripwire"
+            );
+        }
+    }
 }

@@ -164,7 +164,7 @@ fn parse_part(text: &str, name: &str, signed: bool, min: i64, max: i64) -> Resul
 /// away from zero (19.55 -> 196, -0.05 -> -1, -0.04 -> 0, never "-0").
 /// With `exact`, any digits that would be rounded away must be zero.
 /// Exponents, NaN, quotes and signs other than a leading `-` are rejected.
-pub fn scale_decimal(text: &str, shift: i32, exact: bool) -> Result<i64, String> {
+fn scale_decimal(text: &str, shift: i32, exact: bool) -> Result<i64, String> {
     let (negative, body) = match text.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, text),
@@ -213,7 +213,7 @@ fn unsigned(text: &str) -> Result<&str, String> {
 /// Visibility in metres as decametres. The metres must be a whole number
 /// with no `-` sign: a fractional value is invalid, never rounded to whole
 /// metres. The division by 10 rounds half up (25 m -> 3).
-pub fn decametres(text: &str) -> Result<i64, String> {
+fn decametres(text: &str) -> Result<i64, String> {
     let metres = scale_decimal(unsigned(text)?, 0, true)?;
     Ok((metres + 5) / 10)
 }
