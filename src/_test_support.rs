@@ -555,6 +555,207 @@ pub fn build_v6_bundle(p: &V6Params) -> (String, String, String) {
     (bundle, pk_hex, kid)
 }
 
+/// Every negative case the shared `proof-bundle-v6-negative.json` vector
+/// must carry, as `(name, expected_failing_steps)`. Steps are in their
+/// snake_case wire form. `v6_negative_bundle` builds each one. Each set
+/// is every step that fails: a `weather_time` that is not a whole calendar
+/// hour is also not the round's observation hour, and a reason other than
+/// `no_observation_by_deadline` is also outside the window's fallback rule.
+#[doc(hidden)]
+pub const V6_NEGATIVE_CASES: &[(&str, &[&str])] = &[
+    (
+        "weather_time_not_whole_hour",
+        &["bundle_shape", "weather_observation_window"],
+    ),
+    (
+        "weather_time_not_calendar",
+        &["bundle_shape", "weather_observation_window"],
+    ),
+    (
+        "weather_time_not_derived_from_round",
+        &["weather_observation_window"],
+    ),
+    (
+        "locked_at_after_latest_lock_at",
+        &["weather_observation_window"],
+    ),
+    (
+        "round_published_before_lock",
+        &["weather_observation_window", "drand_bls_signature"],
+    ),
+    (
+        "lock_station_not_first_in_tag",
+        &["bundle_shape", "receipt_field_consistency"],
+    ),
+    (
+        "exec_station_not_in_tag",
+        &["bundle_shape", "receipt_field_consistency"],
+    ),
+    ("backup_named_on_fallback", &["receipt_field_consistency"]),
+    (
+        "observation_time_not_weather_time",
+        &["weather_observation_window"],
+    ),
+    (
+        "partial_fallback_value_null_reason_null",
+        &["weather_observation_window"],
+    ),
+    (
+        "partial_fallback_reason_set_value_set",
+        &["weather_observation_window"],
+    ),
+    ("value_grammar_minus_zero", &["bundle_shape"]),
+    ("value_grammar_leading_zero", &["bundle_shape"]),
+    ("value_grammar_three_parts", &["bundle_shape"]),
+    ("value_out_of_bounds", &["bundle_shape"]),
+    (
+        "v5_reason_in_v6_exec",
+        &["bundle_shape", "weather_observation_window"],
+    ),
+    ("wrong_entropy_composition", &["bundle_shape"]),
+    ("wrong_entropy_composition_exec", &["bundle_shape"]),
+    (
+        "lock_v6_with_exec_v4",
+        &[
+            "bundle_shape",
+            "weather_observation_window",
+            "receipt_field_consistency",
+        ],
+    ),
+    (
+        "lock_v5_with_exec_v5",
+        &[
+            "bundle_shape",
+            "weather_observation_window",
+            "receipt_field_consistency",
+        ],
+    ),
+    ("inline_key_on_lock_v6", &["bundle_shape"]),
+    ("inline_key_on_exec_v5", &["bundle_shape"]),
+    ("executed_before_round_published", &["drand_bls_signature"]),
+];
+
+/// The signed bundle for one case in `V6_NEGATIVE_CASES`. Each case changes
+/// `V6Params::weather()` (or `fallback()`) and re-signs, so the named check
+/// is what fails. Returns `(bundle_json, public_key_hex, signing_key_id)`.
+#[doc(hidden)]
+pub fn v6_negative_bundle(name: &str) -> (String, String, String) {
+    let wt = landobs_v1::weather_time_for_round(BEACON_V6_ROUND)
+        .expect("fixture round has a weather time");
+    let published = crate::drand::quicknet_round_time(BEACON_V6_ROUND)
+        .expect("fixture round has a publish time");
+    let latest_lock = |weather_time: i64| {
+        landobs_v1::latest_lock_at(weather_time).expect("fixture weather time has a lock time")
+    };
+    let at = |secs: i64| format_canonical(secs, 0);
+    let with_weather_time = |s: String| V6Params {
+        weather_time: s.clone(),
+        weather_observation_time: Some(s),
+        ..V6Params::weather()
+    };
+    let forecast_tag = crate::protocol::receipts::ENTROPY_COMPOSITION.to_string();
+    let base = V6Params::weather();
+    let p = match name {
+        "weather_time_not_whole_hour" => with_weather_time(at(wt + 1800)),
+        "weather_time_not_calendar" => {
+            with_weather_time(format!("{}:60:00.000000Z", &at(wt - 3600)[..13]))
+        }
+        "weather_time_not_derived_from_round" => V6Params {
+            locked_at: at(latest_lock(wt - 3600) - 60),
+            ..with_weather_time(at(wt - 3600))
+        },
+        "locked_at_after_latest_lock_at" => V6Params {
+            locked_at: format_canonical(latest_lock(wt), 1),
+            ..base
+        },
+        "round_published_before_lock" => V6Params {
+            locked_at: at(published + 1),
+            ..base
+        },
+        "lock_station_not_first_in_tag" => V6Params {
+            lock_station: landobs_v1::STATIONS[1].into(),
+            ..base
+        },
+        "exec_station_not_in_tag" => V6Params {
+            exec_station: Some("wmo-03772".into()),
+            ..base
+        },
+        "backup_named_on_fallback" => V6Params {
+            exec_station: Some(landobs_v1::STATIONS[1].into()),
+            ..V6Params::fallback()
+        },
+        "observation_time_not_weather_time" => V6Params {
+            weather_observation_time: Some(at(wt + 3600)),
+            ..base
+        },
+        "partial_fallback_value_null_reason_null" => V6Params {
+            weather_fallback_reason: None,
+            ..V6Params::fallback()
+        },
+        "partial_fallback_reason_set_value_set" => V6Params {
+            weather_fallback_reason: Some(landobs_v1::FALLBACK_NO_OBSERVATION.into()),
+            ..base
+        },
+        "value_grammar_minus_zero" => V6Params {
+            weather_value: Some("-0;1021;51;4114".into()),
+            ..base
+        },
+        "value_grammar_leading_zero" => V6Params {
+            weather_value: Some("0184;1021;51;4114".into()),
+            ..base
+        },
+        "value_grammar_three_parts" => V6Params {
+            weather_value: Some("184;1021;51".into()),
+            ..base
+        },
+        "value_out_of_bounds" => V6Params {
+            weather_value: Some("601;1021;51;4114".into()),
+            ..base
+        },
+        "v5_reason_in_v6_exec" => V6Params {
+            weather_fallback_reason: Some("unreachable".into()),
+            ..V6Params::fallback()
+        },
+        "wrong_entropy_composition" => V6Params {
+            lock_entropy_composition: forecast_tag.clone(),
+            exec_entropy_composition: forecast_tag,
+            ..base
+        },
+        "wrong_entropy_composition_exec" => V6Params {
+            exec_entropy_composition: forecast_tag,
+            ..base
+        },
+        "lock_v6_with_exec_v4" => V6Params {
+            exec_schema: "4".into(),
+            exec_entropy_composition: forecast_tag,
+            ..base
+        },
+        "lock_v5_with_exec_v5" => V6Params {
+            lock_schema: "5".into(),
+            lock_entropy_composition: forecast_tag,
+            ..base
+        },
+        "executed_before_round_published" => V6Params {
+            executed_at: at(published - 1),
+            ..base
+        },
+        "inline_key_on_lock_v6" | "inline_key_on_exec_v5" => {
+            let (json, pk_hex, kid) = build_v6_bundle(&base);
+            let mut v: serde_json::Value =
+                serde_json::from_str(&json).expect("fixture bundle is JSON");
+            let (wrapper, field) = if name == "inline_key_on_lock_v6" {
+                ("lock_receipt", "operator_public_key_hex")
+            } else {
+                ("execution_receipt", "infrastructure_public_key_hex")
+            };
+            v[wrapper][field] = serde_json::json!(pk_hex.clone());
+            return (v.to_string(), pk_hex, kid);
+        }
+        other => panic!("unknown v6 negative case {other}"),
+    };
+    build_v6_bundle(&p)
+}
+
 /// Apply `edit` to the signed execution receipt payload of bundle `json`
 /// and re-sign it with the test signing key, so the execution signature
 /// still verifies. Returns the whole bundle as a JSON value.

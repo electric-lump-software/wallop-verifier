@@ -36,6 +36,8 @@ pub enum StepName {
     /// valid on the pinned quicknet chain, `sha256(signature) ==
     /// randomness`, the bundle's `entropy` block equal to the receipt, and
     /// the round published strictly after the lock receipt's `locked_at`.
+    /// Under lock v6 / execution v5, also that the execution receipt's
+    /// `executed_at` is not before the round published.
     DrandBlsSignature,
     /// Cross-receipt field consistency — the cross-checked fields listed in
     /// spec §4.2.5 MUST be byte-identical. Bundle-envelope `draw_id` MUST
@@ -1316,7 +1318,9 @@ fn check_bundle_results(bundle: &ProofBundle, receipt_ids: &[&str]) -> Result<()
 /// `drand_randomness`, `weather_value`) to match the receipt exactly,
 /// verify the BLS signature (and `sha256(signature) == randomness`), and
 /// require the round to publish strictly after the lock receipt's
-/// `locked_at` (`drand_round_after_lock`).
+/// `locked_at` (`drand_round_after_lock`). Under lock v6 / execution v5
+/// (either schema), also require `executed_at` not to precede the round's
+/// publication (`drand_round_before_execution`).
 fn check_drand_beacon(bundle: &ProofBundle, exec: &serde_json::Value) -> Result<(), String> {
     let exec_str = |field: &str| -> Result<&str, String> {
         exec.get(field)
@@ -1392,7 +1396,31 @@ fn check_drand_beacon(bundle: &ProofBundle, exec: &serde_json::Value) -> Result<
         .get("locked_at")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "lock receipt locked_at is missing or not a string".to_string())?;
-    drand_round_after_lock(round, locked_at)
+    drand_round_after_lock(round, locked_at)?;
+
+    // Under lock v6 / execution v5 the beacon must also have been public
+    // when the execution receipt was signed. Either schema triggers it.
+    if weather_rules(&lock, exec) != WeatherRules::Legacy {
+        drand_round_before_execution(round, exec_str("executed_at")?)?;
+    }
+    Ok(())
+}
+
+/// `executed_at` (canonical RFC 3339) must not be earlier than the quicknet
+/// publish time of `round`. Whole seconds suffice: for a whole number P,
+/// `executed_at >= P` iff `floor(executed_at) >= P`.
+pub(crate) fn drand_round_before_execution(round: u64, executed_at: &str) -> Result<(), String> {
+    let executed = chrono_parse_canonical(executed_at)
+        .map_err(|e| format!("execution receipt executed_at ({executed_at}): {e}"))?;
+    let published = crate::drand::quicknet_round_time(round)
+        .ok_or_else(|| format!("drand round {round} has no quicknet publish time"))?;
+    if executed.timestamp() >= published {
+        Ok(())
+    } else {
+        Err(format!(
+            "execution receipt executed_at {executed_at} is before drand round {round} was published (unix time {published})"
+        ))
+    }
 }
 
 /// The quicknet `round` must publish strictly after `locked_at` (canonical

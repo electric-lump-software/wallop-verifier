@@ -500,4 +500,38 @@ mod wasm_resolved_keys_gate_tests {
             .unwrap()
         );
     }
+
+    #[wasm_bindgen_test]
+    fn v6_bundle_passes_the_browser_gate() {
+        use crate::_test_support::{V6Params, build_v6_bundle};
+        for p in [V6Params::weather(), V6Params::fallback()] {
+            let (json, pk_hex, kid) = build_v6_bundle(&p);
+            assert!(
+                verify_bundle_with_resolved_keys_wasm(
+                    &json,
+                    resolved_keys(&pk_hex, &kid),
+                    "attestable"
+                )
+                .unwrap()
+            );
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn v6_late_lock_fails_the_browser_gate() {
+        use crate::_test_support::{V6Params, build_v6_bundle};
+        let p = V6Params {
+            locked_at: V6Params::weather().weather_time,
+            ..V6Params::weather()
+        };
+        let (json, pk_hex, kid) = build_v6_bundle(&p);
+        assert!(
+            !verify_bundle_with_resolved_keys_wasm(
+                &json,
+                resolved_keys(&pk_hex, &kid),
+                "attestable"
+            )
+            .unwrap()
+        );
+    }
 }

@@ -556,3 +556,126 @@ fn landobs_cross_checked_fields_differ_only_by_weather_station() {
     assert_eq!(only_legacy, ["weather_station"]);
     assert!(only_landobs.is_empty(), "{only_landobs:?}");
 }
+
+fn published() -> i64 {
+    crate::drand::quicknet_round_time(crate::_test_support::BEACON_V6_ROUND).unwrap()
+}
+
+#[test]
+fn v6_bundles_pass_every_step() {
+    for p in [
+        V6Params::weather(),
+        V6Params::fallback(),
+        V6Params::backup(),
+    ] {
+        let report = run(&p);
+        assert!(report.passed(), "{p:?}: {:?}", report.steps);
+        for step in &report.steps {
+            assert_eq!(step.status, StepStatus::Pass, "{}", step.name);
+        }
+    }
+}
+
+#[test]
+fn v6_execution_exactly_at_publication_passes() {
+    let p = V6Params {
+        executed_at: format_canonical(published(), 0),
+        ..V6Params::weather()
+    };
+    assert_eq!(
+        status(&run(&p), StepName::DrandBlsSignature),
+        &StepStatus::Pass
+    );
+}
+
+#[test]
+fn v6_execution_before_publication_fails() {
+    let p = V6Params {
+        executed_at: format_canonical(published() - 1, 999_999),
+        ..V6Params::weather()
+    };
+    assert_step_fails(&run(&p), StepName::DrandBlsSignature, "before drand round");
+}
+
+#[test]
+fn legacy_v4_exec_before_publication_still_passes_the_drand_step() {
+    let (json, pk_hex, kid) = crate::_test_support::build_valid_v5_bundle(
+        &crate::_test_support::v6_entries(),
+        Some("1013"),
+        2,
+    );
+    let edited = crate::_test_support::resign_exec(&json, |exec| {
+        exec["executed_at"] = serde_json::json!("2023-08-23T15:55:00.000000Z");
+    });
+    let report = run_json(&edited.to_string(), &pk_hex, &kid);
+    assert_eq!(
+        status(&report, StepName::DrandBlsSignature),
+        &StepStatus::Pass
+    );
+}
+
+#[test]
+fn mismatched_schema_pairs_fail_exactly_shape_window_and_consistency() {
+    let forecast = crate::protocol::receipts::ENTROPY_COMPOSITION.to_string();
+    let lock_5_exec_5 = V6Params {
+        lock_schema: "5".into(),
+        lock_entropy_composition: forecast.clone(),
+        ..V6Params::weather()
+    };
+    let lock_6_exec_4 = V6Params {
+        exec_schema: "4".into(),
+        exec_entropy_composition: forecast,
+        ..V6Params::weather()
+    };
+    let expected = [
+        StepName::BundleShape,
+        StepName::WeatherObservationWindow,
+        StepName::ReceiptFieldConsistency,
+    ];
+    for p in [lock_5_exec_5, lock_6_exec_4] {
+        let report = run(&p);
+        for step in &report.steps {
+            if expected.contains(&step.name) {
+                assert!(
+                    matches!(step.status, StepStatus::Fail(_)),
+                    "{p:?}: {} should fail, got {:?}",
+                    step.name,
+                    step.status
+                );
+            } else {
+                assert_eq!(step.status, StepStatus::Pass, "{p:?}: {}", step.name);
+            }
+        }
+        for name in &expected {
+            assert!(
+                report.steps.iter().any(|s| &s.name == name),
+                "{name} missing"
+            );
+        }
+    }
+}
+
+#[test]
+fn null_value_and_reason_naming_the_backup_fails_window_and_consistency() {
+    let p = V6Params {
+        exec_station: Some(landobs_v1::STATIONS[1].into()),
+        weather_fallback_reason: None,
+        ..V6Params::fallback()
+    };
+    let report = run(&p);
+    let failing: Vec<StepName> = report
+        .steps
+        .iter()
+        .filter(|s| matches!(s.status, StepStatus::Fail(_)))
+        .map(|s| s.name)
+        .collect();
+    assert_eq!(
+        failing,
+        [
+            StepName::ReceiptFieldConsistency,
+            StepName::WeatherObservationWindow
+        ],
+        "{:?}",
+        report.steps
+    );
+}
