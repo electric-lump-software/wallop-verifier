@@ -260,17 +260,24 @@ impl VerificationReport {
     /// failing the `BundleShape` step that catches the protocol violation.
     /// `passed()` correctly returns `false` in that case.
     ///
-    /// Every step must be `Pass` or `NotApplicable`, and at least one must
-    /// be `Pass`. A `Skip` (a check that could not run) never counts as a
-    /// pass.
+    /// Every step must be `Pass`, and at least one must be. `NotApplicable`
+    /// is accepted only on the steps that can genuinely not apply:
+    /// `WeatherObservationWindow` (a drand-only draw has no observation)
+    /// and `TemporalBinding` (vacuous against bundle-embedded keys). On any
+    /// other step it counts as a failure. A `Skip` (a check that could not
+    /// run) never counts as a pass.
     pub fn passed(&self) -> bool {
-        self.steps
+        self.steps.iter().all(|s| match s.status {
+            StepStatus::Pass => true,
+            StepStatus::NotApplicable(_) => matches!(
+                s.name,
+                StepName::WeatherObservationWindow | StepName::TemporalBinding
+            ),
+            _ => false,
+        }) && self
+            .steps
             .iter()
-            .all(|s| matches!(s.status, StepStatus::Pass | StepStatus::NotApplicable(_)))
-            && self
-                .steps
-                .iter()
-                .any(|s| matches!(s.status, StepStatus::Pass))
+            .any(|s| matches!(s.status, StepStatus::Pass))
     }
 
     pub fn error_count(&self) -> usize {
@@ -2892,13 +2899,57 @@ mod tests {
         assert!(!report.passed());
     }
 
+    fn report_of_named(steps: Vec<(StepName, StepStatus)>) -> VerificationReport {
+        let mut report = report_of(vec![]);
+        report.steps = steps
+            .into_iter()
+            .map(|(name, status)| StepResult {
+                name,
+                status,
+                detail: None,
+            })
+            .collect();
+        report
+    }
+
     #[test]
     fn not_applicable_does_not_block_a_pass() {
-        let report = report_of(vec![
-            StepStatus::Pass,
-            StepStatus::NotApplicable("no weather".into()),
+        let report = report_of_named(vec![
+            (StepName::EntryHash, StepStatus::Pass),
+            (
+                StepName::WeatherObservationWindow,
+                StepStatus::NotApplicable("no weather".into()),
+            ),
+            (
+                StepName::TemporalBinding,
+                StepStatus::NotApplicable("self-consistency".into()),
+            ),
         ]);
         assert!(report.passed());
+    }
+
+    #[test]
+    fn not_applicable_outside_the_allow_list_fails() {
+        // Only WeatherObservationWindow and TemporalBinding may be waived.
+        // Every other step must pass.
+        for name in StepName::all() {
+            if matches!(
+                name,
+                StepName::WeatherObservationWindow | StepName::TemporalBinding
+            ) {
+                continue;
+            }
+            let other = if *name == StepName::EntryHash {
+                StepName::LockSignature
+            } else {
+                StepName::EntryHash
+            };
+            let report = report_of_named(vec![
+                (other, StepStatus::Pass),
+                (*name, StepStatus::NotApplicable("waived".into())),
+            ]);
+            assert!(!report.passed(), "NotApplicable on {name:?} must fail");
+        }
     }
 
     #[test]
