@@ -110,7 +110,15 @@ pub fn verify_full(
         .and_then(|v| v.as_str())
         .ok_or("missing drand_randomness in execution receipt")?;
 
-    let weather_value = exec_parsed.get("weather_value").and_then(|v| v.as_str());
+    // Absent or null means a drand-only draw. Any other non-string value
+    // is malformed, not "no weather".
+    let weather_value = match exec_parsed.get("weather_value").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => Some(
+            v.as_str()
+                .ok_or("weather_value in execution receipt is not a string")?,
+        ),
+    };
 
     let exec_seed = exec_parsed
         .get("seed")
@@ -374,6 +382,14 @@ mod tests {
         randomness: &str,
         edit: impl FnOnce(&mut serde_json::Value),
     ) -> SignedPair {
+        signed_pair_edited(randomness, |_| {}, edit)
+    }
+
+    fn signed_pair_edited(
+        randomness: &str,
+        lock_edit: impl FnOnce(&mut serde_json::Value),
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> SignedPair {
         use crate::_test_support::{BEACON_ROUND, BEACON_SIGNATURE};
         let sk = test_signing_key();
         let pk = sk.verifying_key().to_bytes();
@@ -400,14 +416,15 @@ mod tests {
             .map(|w| w.entry_id)
             .collect();
 
-        let lock = serde_json::json!({
+        let mut lock = serde_json::json!({
             "draw_id": draw_id,
             "winner_count": 1,
             "entry_hash": ehash,
             "drand_chain": crate::drand::QUICKNET_CHAIN_HASH,
             "drand_round": BEACON_ROUND,
-        })
-        .to_string();
+        });
+        lock_edit(&mut lock);
+        let lock = lock.to_string();
         let lock_sig = sk.sign(lock.as_bytes()).to_bytes();
 
         let mut exec = serde_json::json!({
@@ -472,6 +489,36 @@ mod tests {
             exec["drand_chain"] = serde_json::json!("00".repeat(32));
         });
         assert_eq!(args.run(), Ok(false));
+    }
+
+    #[test]
+    fn verify_full_errors_when_lock_lacks_drand_round() {
+        let args = signed_pair_edited(
+            crate::_test_support::BEACON_RANDOMNESS,
+            |lock| {
+                lock.as_object_mut().unwrap().remove("drand_round");
+            },
+            |_| {},
+        );
+        let result = args.run();
+        assert!(
+            matches!(&result, Err(e) if e.contains("drand_round") && e.contains("lock receipt")),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_full_errors_when_weather_value_is_not_a_string() {
+        // A numeric weather_value must not be read as "no weather" and
+        // fall through to the drand-only seed.
+        let args = signed_pair_with(|exec| {
+            exec["weather_value"] = serde_json::json!(1013);
+        });
+        let result = args.run();
+        assert!(
+            matches!(&result, Err(e) if e.contains("weather_value")),
+            "got {result:?}"
+        );
     }
 
     #[test]
