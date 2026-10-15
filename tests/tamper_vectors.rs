@@ -3,8 +3,10 @@
 //! semantic checks can refuse it.
 //!
 //! The vector file is `spec/vectors/proof-bundle-v6-tamper.json` in the
-//! wallop repo. It is not vendored yet, so this test reads it from the
-//! path in `WALLOP_TAMPER_VECTORS` and skips, saying so, when that is unset.
+//! wallop repo. This test reads the vendored copy under `vendor/wallop`.
+//! Only when that file is missing does it read the path in
+//! `WALLOP_TAMPER_VECTORS`, and it skips, saying so, when neither exists.
+//! It prints which file it used.
 
 use wallop_verifier::bundle::ProofBundle;
 use wallop_verifier::key_resolver::{
@@ -15,15 +17,35 @@ use wallop_verifier::verify_steps::{
 };
 
 const ENV: &str = "WALLOP_TAMPER_VECTORS";
+const VENDORED: &str = "vendor/wallop/spec/vectors/proof-bundle-v6-tamper.json";
 
-/// The vector file, or `None` (with a message) when `WALLOP_TAMPER_VECTORS` is unset.
+/// The vector file: the vendored copy, else the path in
+/// `WALLOP_TAMPER_VECTORS`, else `None` (with a message).
 fn vector() -> Option<serde_json::Value> {
-    let Ok(path) = std::env::var(ENV) else {
-        eprintln!("skipping: set {ENV} to the path of proof-bundle-v6-tamper.json to run");
+    let vendored = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(VENDORED);
+    let path = if vendored.is_file() {
+        eprintln!(
+            "tamper vectors: using the vendored file {}",
+            vendored.display()
+        );
+        vendored
+    } else if let Ok(path) = std::env::var(ENV) {
+        eprintln!(
+            "tamper vectors: {} is missing; using {ENV}={path}",
+            vendored.display()
+        );
+        path.into()
+    } else {
+        eprintln!(
+            "skipping: {} is missing and {ENV} is unset; set {ENV} to the path of \
+             proof-bundle-v6-tamper.json to run",
+            vendored.display()
+        );
         return None;
     };
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-    Some(serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path}: {e}")))
+    let shown = path.display();
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{shown}: {e}"));
+    Some(serde_json::from_str(&text).unwrap_or_else(|e| panic!("{shown}: {e}")))
 }
 
 /// Resolves from the vector's inline `keys: [{key_id, public_key_hex, key_class, inserted_at}]`.
