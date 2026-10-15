@@ -706,6 +706,69 @@ pub fn validate_lock_receipt_tags_v6(payload: &LockReceiptV6) -> Result<(), Stri
     Ok(())
 }
 
+pub fn validate_execution_receipt_tags_v4(payload: &ExecutionReceiptV4) -> Result<(), String> {
+    if payload.schema_version != EXECUTION_SCHEMA_VERSION_V4 {
+        return Err(format!(
+            "unknown execution receipt schema_version: {} (expected {})",
+            payload.schema_version, EXECUTION_SCHEMA_VERSION_V4
+        ));
+    }
+    if payload.jcs_version != JCS_VERSION {
+        return Err(format!("unknown jcs_version: {}", payload.jcs_version));
+    }
+    if payload.signature_algorithm != SIGNATURE_ALGORITHM {
+        return Err(format!(
+            "unknown signature_algorithm: {}",
+            payload.signature_algorithm
+        ));
+    }
+    if payload.entropy_composition != ENTROPY_COMPOSITION {
+        return Err(format!(
+            "unknown entropy_composition: {}",
+            payload.entropy_composition
+        ));
+    }
+    if payload.drand_signature_algorithm != DRAND_SIGNATURE_ALGORITHM {
+        return Err(format!(
+            "unknown drand_signature_algorithm: {}",
+            payload.drand_signature_algorithm
+        ));
+    }
+    if payload.merkle_algorithm != MERKLE_ALGORITHM {
+        return Err(format!(
+            "unknown merkle_algorithm: {}",
+            payload.merkle_algorithm
+        ));
+    }
+    // See `validate_lock_receipt_tags_v5` for the rationale.
+    if payload.signing_key_id.is_empty() {
+        return Err("signing_key_id is empty".into());
+    }
+    let reason_ref = payload.weather_fallback_reason.as_deref();
+    if !VALID_WEATHER_FALLBACK_REASONS.contains(&reason_ref) {
+        return Err(format!(
+            "unknown weather_fallback_reason: {:?}",
+            payload.weather_fallback_reason
+        ));
+    }
+    if let Some(station) = &payload.weather_station {
+        validate_weather_station(station)?;
+    }
+    Ok(())
+}
+
+/// Validate the algorithm-identity tags of an execution receipt v5.
+///
+/// Pins the `drand-quicknet+metoffice-landobs-v1` entropy tag (with the
+/// JCS, signature, drand and Merkle tags), the v6-era fallback reason set
+/// (`landobs_v1::VALID_WEATHER_FALLBACK_REASONS`), a `weather_station`
+/// that is present and one of `landobs_v1::STATIONS`, and the
+/// `weather_value` grammar when a value is present.
+///
+/// It checks each field on its own. Later pipeline steps own the rest:
+/// pairing lock schema 6 with execution schema 5 only, the coupling
+/// between `weather_value`, the observation time and the fallback reason,
+/// and which station a fallback must name.
 pub fn validate_execution_receipt_tags_v5(payload: &ExecutionReceiptV5) -> Result<(), String> {
     if payload.schema_version != EXECUTION_SCHEMA_VERSION_V5 {
         return Err(format!(
@@ -763,57 +826,6 @@ pub fn validate_execution_receipt_tags_v5(payload: &ExecutionReceiptV5) -> Resul
     }
     if let Some(value) = &payload.weather_value {
         landobs_v1::parse_weather_value(value)?;
-    }
-    Ok(())
-}
-
-pub fn validate_execution_receipt_tags_v4(payload: &ExecutionReceiptV4) -> Result<(), String> {
-    if payload.schema_version != EXECUTION_SCHEMA_VERSION_V4 {
-        return Err(format!(
-            "unknown execution receipt schema_version: {} (expected {})",
-            payload.schema_version, EXECUTION_SCHEMA_VERSION_V4
-        ));
-    }
-    if payload.jcs_version != JCS_VERSION {
-        return Err(format!("unknown jcs_version: {}", payload.jcs_version));
-    }
-    if payload.signature_algorithm != SIGNATURE_ALGORITHM {
-        return Err(format!(
-            "unknown signature_algorithm: {}",
-            payload.signature_algorithm
-        ));
-    }
-    if payload.entropy_composition != ENTROPY_COMPOSITION {
-        return Err(format!(
-            "unknown entropy_composition: {}",
-            payload.entropy_composition
-        ));
-    }
-    if payload.drand_signature_algorithm != DRAND_SIGNATURE_ALGORITHM {
-        return Err(format!(
-            "unknown drand_signature_algorithm: {}",
-            payload.drand_signature_algorithm
-        ));
-    }
-    if payload.merkle_algorithm != MERKLE_ALGORITHM {
-        return Err(format!(
-            "unknown merkle_algorithm: {}",
-            payload.merkle_algorithm
-        ));
-    }
-    // See `validate_lock_receipt_tags_v5` for the rationale.
-    if payload.signing_key_id.is_empty() {
-        return Err("signing_key_id is empty".into());
-    }
-    let reason_ref = payload.weather_fallback_reason.as_deref();
-    if !VALID_WEATHER_FALLBACK_REASONS.contains(&reason_ref) {
-        return Err(format!(
-            "unknown weather_fallback_reason: {:?}",
-            payload.weather_fallback_reason
-        ));
-    }
-    if let Some(station) = &payload.weather_station {
-        validate_weather_station(station)?;
     }
     Ok(())
 }

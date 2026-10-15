@@ -57,10 +57,10 @@ pub enum StepName {
     /// schema 6 / execution schema 5 it also checks the Land Observations
     /// tag pins (stations, fallback reason, `weather_value` grammar). The
     /// typed parsers and validators ship in `protocol/receipts.rs`; this
-    /// step is the entry point that wires them into the verifier pipeline. Appended to the end of
-    /// `StepName::all()` so external consumers pinning step ordinals are
-    /// not broken; in pipeline execution order, this step runs FIRST and
-    /// gates everything else.
+    /// step is the entry point that wires them into the verifier pipeline.
+    /// Appended to the end of `StepName::all()` so external consumers
+    /// pinning step ordinals are not broken; in pipeline execution order,
+    /// this step runs FIRST and gates everything else.
     BundleShape,
     /// Temporal binding — every signed artefact is bound to the moment
     /// the signing key first appeared in the keyring (spec §4.2.4).
