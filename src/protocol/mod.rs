@@ -1,4 +1,5 @@
 pub mod crypto;
+pub mod landobs_v1;
 pub mod merkle;
 pub mod receipts;
 
