@@ -2,8 +2,9 @@ use crate::bundle::ProofBundle;
 use crate::key_resolver::{BundleEmbeddedResolver, InsertedAt, KeyClass, KeyResolver, ResolvedKey};
 use crate::protocol::crypto;
 use crate::protocol::receipts::{
-    ParsedExecutionReceipt, ParsedLockReceipt, lock_receipt_hash, parse_execution_receipt,
-    parse_lock_receipt, validate_execution_receipt_tags, validate_execution_receipt_tags_v3,
+    LOCK_SCHEMA_VERSION_V6, ParsedExecutionReceipt, ParsedLockReceipt, lock_receipt_hash,
+    parse_execution_receipt, parse_lock_receipt, receipt_schema_version,
+    validate_execution_receipt_tags, validate_execution_receipt_tags_v3,
     validate_execution_receipt_tags_v4, validate_execution_receipt_tags_v5,
     validate_lock_receipt_tags, validate_lock_receipt_tags_v5, validate_lock_receipt_tags_v6,
 };
@@ -1214,6 +1215,26 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
         };
     }
 
+    let lock_is_v6 = receipt_schema_version(&bundle.lock_receipt.payload_jcs).as_deref()
+        == Some(LOCK_SCHEMA_VERSION_V6);
+    let exec_is_v5 = matches!(parsed_exec, ParsedExecutionReceipt::V5(_));
+    if lock_is_v6 != exec_is_v5 {
+        return StepResult {
+            name: StepName::BundleShape,
+            status: StepStatus::Fail(SCHEMA_PAIRING_ERROR.into()),
+            detail: None,
+        };
+    }
+    if lock_is_v6
+        && let Err(e) = crate::protocol::landobs_v1::parse_weather_time(&lock_weather_time)
+    {
+        return StepResult {
+            name: StepName::BundleShape,
+            status: StepStatus::Fail(format!("lock.weather_time: {e}")),
+            detail: None,
+        };
+    }
+
     StepResult {
         name: StepName::BundleShape,
         status: StepStatus::Pass,
@@ -1361,6 +1382,10 @@ pub(crate) fn drand_round_after_lock(round: u64, locked_at: &str) -> Result<(), 
         ))
     }
 }
+
+/// Lock receipt schema 6 and execution receipt schema 5 carry the Land
+/// Observations tag; neither may be paired with any other schema.
+const SCHEMA_PAIRING_ERROR: &str = "lock receipt schema_version \"6\" and execution receipt schema_version \"5\" must be used together";
 
 // Fields that MUST be byte-identical between lock and exec receipts per
 // spec §4.2.5. draw_id is also cross-checked against the bundle envelope.
