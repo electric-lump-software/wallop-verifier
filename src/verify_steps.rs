@@ -1347,6 +1347,10 @@ fn check_receipt_field_consistency(bundle: &ProofBundle) -> StepResult {
     }
 }
 
+/// Execution receipt schema versions that carry `weather_fallback_reason`
+/// (all of them, as of v4). The fallback-reason rule applies only to these.
+const EXEC_SCHEMAS_WITH_FALLBACK_REASON: &[&str] = &["2", "3", "4"];
+
 fn check_weather_observation_window(bundle: &ProofBundle) -> StepResult {
     let lock: serde_json::Value = match serde_json::from_str(&bundle.lock_receipt.payload_jcs) {
         Ok(v) => v,
@@ -1377,12 +1381,41 @@ fn check_weather_observation_window(bundle: &ProofBundle) -> StepResult {
     // Exactly one present, or weather present without a locked
     // weather_time: the receipt is inconsistent, and since weather_value
     // feeds the seed the window cannot be waived, so it fails.
+    //
+    // Every execution receipt schema (v2, v3, v4) carries
+    // `weather_fallback_reason`. It says why weather is missing, so it is
+    // required exactly when there is no weather: a receipt with no weather
+    // must carry a reason, and one with weather must not.
     let exec_field = |field: &str| exec.get(field).filter(|v| !v.is_null());
     let exec_weather_value = exec_field("weather_value");
     let exec_observation = exec_field("weather_observation_time");
+    let has_fallback_field = matches!(
+        exec.get("schema_version").and_then(|v| v.as_str()),
+        Some(v) if EXEC_SCHEMAS_WITH_FALLBACK_REASON.contains(&v)
+    );
+    let fallback_reason = exec_field("weather_fallback_reason");
+
+    if has_fallback_field && exec_weather_value.is_some() && fallback_reason.is_some() {
+        return StepResult {
+            name: StepName::WeatherObservationWindow,
+            status: StepStatus::Fail(
+                "exec receipt has weather_value and also a weather_fallback_reason".into(),
+            ),
+            detail: None,
+        };
+    }
 
     let exec_observation_time = match (exec_weather_value, exec_observation) {
         (None, None) => {
+            if has_fallback_field && fallback_reason.is_none() {
+                return StepResult {
+                    name: StepName::WeatherObservationWindow,
+                    status: StepStatus::Fail(
+                        "exec receipt has no weather but no weather_fallback_reason".into(),
+                    ),
+                    detail: None,
+                };
+            }
             return StepResult {
                 name: StepName::WeatherObservationWindow,
                 status: StepStatus::NotApplicable(
@@ -3480,5 +3513,97 @@ mod tests {
             step_named(&report, StepName::SeedRecomputation).status
         );
         assert!(!report.passed());
+    }
+
+    // ── Weather fallback reason ──────────────────────────────────────────
+
+    #[test]
+    fn no_weather_without_fallback_reason_fails_window() {
+        let (json, _) = crate::_test_support::build_valid_drand_only_bundle();
+        let val = resign_exec(&json, |exec| {
+            exec["weather_fallback_reason"] = serde_json::Value::Null;
+        });
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(&window_step(&report).status,
+                StepStatus::Fail(r) if r.contains("weather_fallback_reason")),
+            "got {:?}",
+            window_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn no_weather_with_fallback_reason_key_absent_fails_window() {
+        let (json, _) = crate::_test_support::build_valid_drand_only_bundle();
+        let val = resign_exec(&json, |exec| {
+            exec.as_object_mut()
+                .unwrap()
+                .remove("weather_fallback_reason");
+        });
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(&window_step(&report).status,
+                StepStatus::Fail(r) if r.contains("weather_fallback_reason")),
+            "got {:?}",
+            window_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn weather_with_fallback_reason_fails_window() {
+        let (json, _) = valid_signed_bundle();
+        let val = resign_exec(&json, |exec| {
+            exec["weather_fallback_reason"] = serde_json::json!("unreachable");
+        });
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert_eq!(
+            step_named(&report, StepName::ExecSignature).status,
+            StepStatus::Pass
+        );
+        assert!(
+            matches!(&window_step(&report).status,
+                StepStatus::Fail(r) if r.contains("weather_fallback_reason")),
+            "got {:?}",
+            window_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn fallback_rule_holds_for_every_exec_schema_version() {
+        // v2 (valid_signed_bundle / build_valid_bundle) is covered above;
+        // v4 via the resolver-driven fixture.
+        let entries: Vec<Entry> = ["a", "b", "c"]
+            .iter()
+            .map(|id| Entry {
+                id: (*id).into(),
+                weight: 1,
+            })
+            .collect();
+        let (json, pk_hex, kid) = build_valid_v5_bundle(&entries, None, 2);
+        let pk: [u8; 32] = hex::decode(pk_hex).unwrap().try_into().unwrap();
+        let resolver = MockResolver::new(kid, pk);
+        let ok = verify_bundle_with(
+            &ProofBundle::from_json(&json).unwrap(),
+            &resolver,
+            VerifierMode::Attestable,
+        );
+        assert!(ok.passed(), "steps: {:?}", ok.steps);
+        let val = resign_exec(&json, |exec| {
+            exec["weather_fallback_reason"] = serde_json::Value::Null;
+        });
+        let report = verify_bundle_with(
+            &ProofBundle::from_json(&val.to_string()).unwrap(),
+            &resolver,
+            VerifierMode::Attestable,
+        );
+        assert!(
+            matches!(&window_step(&report).status,
+                StepStatus::Fail(r) if r.contains("weather_fallback_reason")),
+            "got {:?}",
+            window_step(&report).status
+        );
     }
 }
