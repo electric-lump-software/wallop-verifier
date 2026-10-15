@@ -114,21 +114,27 @@ impl OgimetClient {
         }
     }
 
-    /// The SYNOP lines for WMO `block` at `hour` (`YYYYMMDDHHmm`).
+    /// The SYNOP lines for WMO `block` from `begin` to `end` inclusive
+    /// (each `YYYYMMDDHHmm`).
     /// `Ok(None)` when the response is empty; anything else, including an
     /// error page, is returned as text for the caller to parse.
-    pub(crate) fn fetch(&self, block: &str, hour: &str) -> Result<Option<String>, String> {
+    pub(crate) fn fetch(
+        &self,
+        block: &str,
+        begin: &str,
+        end: &str,
+    ) -> Result<Option<String>, String> {
         debug_assert!(
-            [block, hour]
+            [block, begin, end]
                 .iter()
                 .all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())),
-            "block and hour must be ASCII digits"
+            "block, begin and end must be ASCII digits"
         );
         self.wait_turn();
         let response = self
             .agent
             .get(&format!(
-                "{}/cgi-bin/getsynop?block={block}&begin={hour}&end={hour}",
+                "{}/cgi-bin/getsynop?block={block}&begin={begin}&end={end}",
                 self.base_url
             ))
             .set("User-Agent", USER_AGENT)
@@ -230,20 +236,23 @@ mod tests {
     }
 
     #[test]
-    fn ogimet_queries_one_hour_and_maps_empty_to_none() {
+    fn ogimet_queries_the_given_window_and_maps_empty_to_none() {
         let mut server = mockito::Server::new();
         let mock = server
             .mock("GET", "/cgi-bin/getsynop")
             .match_query(Matcher::AllOf(vec![
                 Matcher::UrlEncoded("block".into(), "03749".into()),
-                Matcher::UrlEncoded("begin".into(), "202610011900".into()),
-                Matcher::UrlEncoded("end".into(), "202610011900".into()),
+                Matcher::UrlEncoded("begin".into(), "202610011600".into()),
+                Matcher::UrlEncoded("end".into(), "202610012200".into()),
             ]))
             .with_status(200)
             .with_body("\n")
             .create();
         let client = OgimetClient::with_pacing(&server.url(), Duration::ZERO, Box::new(|_| {}));
-        assert_eq!(client.fetch("03749", "202610011900"), Ok(None));
+        assert_eq!(
+            client.fetch("03749", "202610011600", "202610012200"),
+            Ok(None)
+        );
         mock.assert();
     }
 
@@ -263,9 +272,13 @@ mod tests {
             OGIMET_MIN_GAP,
             Box::new(move |d| record.borrow_mut().push(d)),
         );
-        client.fetch("03749", "202610011900").unwrap();
+        client
+            .fetch("03749", "202610011900", "202610011900")
+            .unwrap();
         assert!(slept.borrow().is_empty());
-        client.fetch("03462", "202610011900").unwrap();
+        client
+            .fetch("03462", "202610011900", "202610011900")
+            .unwrap();
         let waits = slept.borrow();
         assert_eq!(waits.len(), 1);
         assert!(waits[0] > Duration::from_secs(19), "{waits:?}");
@@ -285,7 +298,9 @@ mod tests {
             .with_body(vec![b'x'; MAX_BODY_BYTES as usize + 1])
             .create();
         let client = OgimetClient::with_pacing(&server.url(), Duration::ZERO, Box::new(|_| {}));
-        let err = client.fetch("03749", "202610011900").unwrap_err();
+        let err = client
+            .fetch("03749", "202610011900", "202610011900")
+            .unwrap_err();
         assert!(err.contains("larger than"), "{err}");
     }
 
@@ -298,7 +313,10 @@ mod tests {
             .with_body(vec![b'x'; MAX_BODY_BYTES as usize])
             .create();
         let client = OgimetClient::with_pacing(&server.url(), Duration::ZERO, Box::new(|_| {}));
-        let body = client.fetch("03749", "202610011900").unwrap().unwrap();
+        let body = client
+            .fetch("03749", "202610011900", "202610011900")
+            .unwrap()
+            .unwrap();
         assert_eq!(body.len(), MAX_BODY_BYTES as usize);
     }
 }

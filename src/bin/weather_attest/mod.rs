@@ -129,11 +129,9 @@ pub(crate) fn attest(
             .ok_or_else(|| format!("no Land Observations location for {station}"))?;
         client.fetch(geohash)
     };
+    let (begin, end) = synop::ogimet_window(input.weather_time_unix);
     let synop_for = |station: &str| -> Result<Option<String>, String> {
-        ogimet.fetch(
-            synop::block_for(station)?,
-            &synop::ogimet_hour(&input.weather_time),
-        )
+        ogimet.fetch(synop::block_for(station)?, &begin, &end)
     };
     let presence_lines = |station: &str, lines: &mut Vec<Line>| {
         lines.push(Line {
@@ -510,8 +508,18 @@ mod tests {
         let earlier = ROW_03749.replace("19:00:00Z", "18:00:00Z");
         server.mock("GET", "/gcnfur").with_body(&earlier).create();
         server.mock("GET", "/gcrem9").with_body(&earlier).create();
-        mock_synop(&mut server, "03749", "");
-        mock_synop(&mut server, "03462", "");
+        mock_synop(
+            &mut server,
+            "03749",
+            &SYNOP_03749.replace(",19,00,", ",18,00,"),
+        );
+        mock_synop(
+            &mut server,
+            "03462",
+            &SYNOP_03749
+                .replace(",19,00,", ",20,00,")
+                .replace("03749", "03462"),
+        );
         let landobs = http::LandObsClient::new(&server.url(), "k");
         let lines = attest(
             &input("wmo-03749", None),
@@ -619,6 +627,50 @@ mod tests {
                 .join(" ")
                 .contains(footer),
             "{used}"
+        );
+    }
+
+    #[test]
+    fn ogimet_is_asked_for_three_hours_either_side() {
+        let mut server = mockito::Server::new();
+        let window = server
+            .mock("GET", "/cgi-bin/getsynop")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("block".into(), "03749".into()),
+                mockito::Matcher::UrlEncoded("begin".into(), "202610011600".into()),
+                mockito::Matcher::UrlEncoded("end".into(), "202610012200".into()),
+            ]))
+            .with_body(SYNOP_03749)
+            .expect(1)
+            .create();
+        let lines = attest(
+            &input("wmo-03749", Some("184;1021;51;4114")),
+            None,
+            &ogimet(&server),
+            WT_UNIX + 3600,
+        );
+        window.assert();
+        assert!(matches!(lines[1].outcome, Outcome::Match(_)), "{lines:?}");
+    }
+
+    #[test]
+    fn fallback_with_no_ogimet_reports_around_the_hour_is_unavailable() {
+        let mut server = mockito::Server::new();
+        mock_synop(&mut server, "03749", "");
+        mock_synop(&mut server, "03462", "");
+        let lines = attest(
+            &input("wmo-03749", None),
+            None,
+            &ogimet(&server),
+            WT_UNIX + 3600,
+        );
+        let synop: Vec<_> = lines.iter().filter(|l| l.label.contains("SYNOP")).collect();
+        assert_eq!(synop.len(), 2);
+        assert!(
+            synop
+                .iter()
+                .all(|l| matches!(l.outcome, Outcome::Unavailable(_))),
+            "{lines:?}"
         );
     }
 }

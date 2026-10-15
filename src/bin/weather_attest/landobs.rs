@@ -133,7 +133,12 @@ fn row_stamp(row: &Row) -> Option<&str> {
             19 => b == b'Z',
             _ => b.is_ascii_digit(),
         });
-    shape_ok.then_some(stamp)
+    let in_range = |range: std::ops::Range<usize>, lo: u8, hi: u8| {
+        stamp[range]
+            .parse::<u8>()
+            .is_ok_and(|n| (lo..=hi).contains(&n))
+    };
+    (shape_ok && in_range(5..7, 1, 12) && in_range(8..10, 1, 31)).then_some(stamp)
 }
 
 /// Requires a `weather_time` that has passed `landobs_v1::parse_weather_time`.
@@ -421,6 +426,20 @@ mod tests {
             "{:?}",
             presence(&later, WT)
         );
+        // Impossible months or days prove nothing either.
+        for bad in [
+            "2026-13-01T18:00:00Z",
+            "2026-00-01T18:00:00Z",
+            "2026-10-32T18:00:00Z",
+            "2026-10-00T18:00:00Z",
+        ] {
+            let impossible = rows(&ROW.replace("2026-10-01T19:00:00Z", bad));
+            assert!(
+                reaching(&presence(&impossible, WT)),
+                "{bad}: {:?}",
+                presence(&impossible, WT)
+            );
+        }
         // Unreadable stamps prove nothing either.
         let junk = rows(&ROW.replace("2026-10-01T19:00:00Z", "yesterday"));
         assert!(reaching(&presence(&junk, WT)), "{:?}", presence(&junk, WT));

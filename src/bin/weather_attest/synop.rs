@@ -1,4 +1,4 @@
-use wallop_verifier::protocol::landobs_v1::parse_weather_value;
+use wallop_verifier::protocol::landobs_v1::{parse_weather_time, parse_weather_value};
 
 use super::Outcome;
 
@@ -10,16 +10,39 @@ pub(crate) fn block_for(station: &str) -> Result<&str, String> {
         .ok_or_else(|| format!("{station} is not a WMO station"))
 }
 
-/// `2026-10-01T19:00:00.000000Z` -> `202610011900`.
-/// Requires a `weather_time` that has passed `landobs_v1::parse_weather_time`.
-pub(crate) fn ogimet_hour(weather_time: &str) -> String {
+/// Ogimet is asked for this many seconds either side of the wanted hour,
+/// in the same single request, so a missing report can be told apart from
+/// a station Ogimet holds nothing for.
+const WINDOW_SECS: i64 = 3 * 3600;
+
+const NONE_AROUND: &str = "Ogimet has no reports for this station around this hour";
+
+/// Unix seconds as Ogimet's `YYYYMMDDHHmm` (UTC).
+fn ogimet_stamp(unix: i64) -> String {
+    // Days to civil date: Howard Hinnant's `civil_from_days`.
+    let z = unix.div_euclid(86_400) + 719_468;
+    let secs = unix.rem_euclid(86_400);
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
     format!(
-        "{}{}{}{}{}",
-        &weather_time[0..4],
-        &weather_time[5..7],
-        &weather_time[8..10],
-        &weather_time[11..13],
-        &weather_time[14..16]
+        "{year:04}{month:02}{day:02}{:02}{:02}",
+        secs / 3600,
+        secs % 3600 / 60
+    )
+}
+
+/// `(begin, end)` for the Ogimet query: three hours either side of the
+/// wanted hour, as `YYYYMMDDHHmm`.
+pub(crate) fn ogimet_window(weather_time_unix: i64) -> (String, String) {
+    (
+        ogimet_stamp(weather_time_unix - WINDOW_SECS),
+        ogimet_stamp(weather_time_unix + WINDOW_SECS),
     )
 }
 
@@ -45,6 +68,39 @@ fn find_report<'a>(body: &'a str, block: &str, weather_time: &str) -> Option<&'a
     );
     body.lines()
         .find_map(|line| line.strip_prefix(prefix.as_str()))
+}
+
+/// The `YYYYMMDDHHmm` of a body line holding a land SYNOP for `block`.
+fn report_stamp(line: &str, block: &str) -> Option<String> {
+    let mut fields = line.splitn(7, ',');
+    if fields.next()? != block {
+        return None;
+    }
+    let mut stamp = String::with_capacity(12);
+    for len in [4, 2, 2, 2, 2] {
+        let f = fields.next()?;
+        if f.len() != len || !f.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        stamp.push_str(f);
+    }
+    fields
+        .next()?
+        .trim_start()
+        .starts_with("AAXX")
+        .then_some(stamp)
+}
+
+/// Whether `body` holds any land SYNOP for `station` inside the query
+/// window, which shows Ogimet does hold reports for it around this hour.
+fn reports_around(body: &str, station: &str, weather_time: &str) -> bool {
+    let (Ok(block), Ok(unix)) = (block_for(station), parse_weather_time(weather_time)) else {
+        return false;
+    };
+    let (begin, end) = ogimet_window(unix);
+    body.lines()
+        .filter_map(|line| report_stamp(line, block))
+        .any(|stamp| begin <= stamp && stamp <= end)
 }
 
 /// Read the temperature and pressure groups from section 1 of a land
@@ -136,7 +192,7 @@ fn reading_for(
 /// Requires a `weather_time` that has passed `landobs_v1::parse_weather_time`.
 pub(crate) fn check(body: Option<&str>, station: &str, weather_time: &str, value: &str) -> Outcome {
     let Some(body) = body else {
-        return Outcome::Unavailable("no SYNOP for this hour".into());
+        return Outcome::Unavailable(NONE_AROUND.into());
     };
     let expected = match parse_weather_value(value) {
         Ok(v) => v,
@@ -163,13 +219,19 @@ pub(crate) fn check(body: Option<&str>, station: &str, weather_time: &str, value
 }
 
 /// Requires a `weather_time` that has passed `landobs_v1::parse_weather_time`.
+///
+/// ABSENT for a missing hour only when Ogimet holds other reports for the
+/// same station inside the window; otherwise it can't tell: UNAVAILABLE.
 pub(crate) fn presence(body: Option<&str>, station: &str, weather_time: &str) -> Outcome {
     let Some(body) = body else {
-        return Outcome::Absent("no SYNOP for this hour".into());
+        return Outcome::Unavailable(NONE_AROUND.into());
     };
     match reading_for(body, station, weather_time) {
         Err(e) => Outcome::Unavailable(e),
-        Ok(None) => Outcome::Unavailable("response has no report for this station and hour".into()),
+        Ok(None) if reports_around(body, station, weather_time) => {
+            Outcome::Absent("no SYNOP for this hour".into())
+        }
+        Ok(None) => Outcome::Unavailable(NONE_AROUND.into()),
         Ok(Some(r)) if r.nil => Outcome::Absent("SYNOP is NIL".into()),
         Ok(Some(r)) => match (r.t_tenths, r.mslp_tenths) {
             (Some(t), Some(p)) => Outcome::Present(format!("t {t}, mslp {}", (p + 5) / 10)),
@@ -186,8 +248,22 @@ mod tests {
     const BODY: &str = "03749,2026,10,01,19,00,AAXX 01194 03749 25481 82109 10184 20156 30096 40210 52001 88/// 333 10177 20130 60002==\n";
 
     #[test]
-    fn ogimet_hour_and_block() {
-        assert_eq!(ogimet_hour(WT), "202610011900");
+    fn ogimet_window_and_block() {
+        // 2026-10-01T19:00Z, three hours either side.
+        assert_eq!(
+            ogimet_window(1_790_881_200),
+            ("202610011600".to_string(), "202610012200".to_string())
+        );
+        // Across a year boundary: 2026-01-01T01:00Z.
+        assert_eq!(
+            ogimet_window(1_767_229_200),
+            ("202512312200".to_string(), "202601010400".to_string())
+        );
+        // Across a leap day: 2028-02-29T23:00Z.
+        assert_eq!(
+            ogimet_window(1_835_478_000),
+            ("202802292000".to_string(), "202803010200".to_string())
+        );
         assert_eq!(block_for("wmo-03749"), Ok("03749"));
         assert!(block_for("middle-wallop").is_err());
     }
@@ -265,6 +341,21 @@ mod tests {
     }
 
     #[test]
+    fn check_uses_only_the_wanted_hours_report() {
+        let neighbours = "03749,2026,10,01,18,00,AAXX 01184 03749 25481 82109 10184 40210=\n";
+        assert!(matches!(
+            check(Some(neighbours), "wmo-03749", WT, "184;1021;51;4114"),
+            Outcome::Unavailable(_)
+        ));
+        let wrong_neighbour = "03749,2026,10,01,18,00,AAXX 01184 03749 25481 82109 10999 40999=\n";
+        let body = format!("{wrong_neighbour}{BODY}");
+        assert!(matches!(
+            check(Some(&body), "wmo-03749", WT, "184;1021;51;4114"),
+            Outcome::Match(_)
+        ));
+    }
+
+    #[test]
     fn check_compares_t_and_rounded_mslp() {
         assert_eq!(
             check(Some(BODY), "wmo-03749", WT, "184;1021;51;4114"),
@@ -299,9 +390,28 @@ mod tests {
             presence(Some(BODY), "wmo-03749", WT),
             Outcome::Present(_)
         ));
+        let none_around = |o: &Outcome| matches!(o, Outcome::Unavailable(r) if r == "Ogimet has no reports for this station around this hour");
+        // Nothing in the window at all: Ogimet can't tell us.
+        assert!(none_around(&presence(None, "wmo-03749", WT)));
+        // Reports only for another station: still can't tell.
+        let other = "03462,2026,10,01,18,00,AAXX 01184 03462 25481 82109 10184 40210=\n";
+        assert!(none_around(&presence(Some(other), "wmo-03749", WT)));
+        // The station reported either side of the hour but not at it.
+        let around = "03749,2026,10,01,18,00,AAXX 01184 03749 25481 82109 10184 40210=\n\
+                      03749,2026,10,01,20,00,AAXX 01204 03749 25481 82109 10184 40210=\n";
+        assert!(
+            matches!(presence(Some(around), "wmo-03749", WT), Outcome::Absent(_)),
+            "{:?}",
+            presence(Some(around), "wmo-03749", WT)
+        );
+        // A neighbouring report outside the window proves nothing.
+        let far = "03749,2026,10,01,23,00,AAXX 01234 03749 25481 82109 10184 40210=\n";
+        assert!(none_around(&presence(Some(far), "wmo-03749", WT)));
+        // The wanted hour, among neighbours, is still found.
+        let with_wanted = format!("{around}{BODY}");
         assert!(matches!(
-            presence(None, "wmo-03749", WT),
-            Outcome::Absent(_)
+            presence(Some(&with_wanted), "wmo-03749", WT),
+            Outcome::Present(_)
         ));
         let nil = "03749,2026,10,01,19,00,AAXX 01194 03749 NIL=\n";
         assert!(matches!(
