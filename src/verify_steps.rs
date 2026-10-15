@@ -667,9 +667,14 @@ pub fn verify_bundle_with<R: KeyResolver>(
                     .collect();
 
                 if computed_ids == receipt_ids {
+                    // The bundle's unsigned `results` (what a proof page
+                    // displays) must say exactly what the receipt signed.
                     steps.push(StepResult {
                         name: StepName::WinnerSelection,
-                        status: StepStatus::Pass,
+                        status: match check_bundle_results(bundle, &receipt_ids) {
+                            Ok(()) => StepStatus::Pass,
+                            Err(reason) => StepStatus::Fail(reason),
+                        },
                         detail: None,
                     });
                 } else {
@@ -1145,6 +1150,36 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
         status: StepStatus::Pass,
         detail: None,
     }
+}
+
+/// Part of step 7 (`WinnerSelection`): the bundle's unsigned `results`
+/// must equal the signed execution receipt's `results`, element by
+/// element: `results[i].entry_id == receipt.results[i]` and
+/// `results[i].position == i + 1`, with equal lengths.
+fn check_bundle_results(bundle: &ProofBundle, receipt_ids: &[&str]) -> Result<(), String> {
+    if bundle.results.len() != receipt_ids.len() {
+        return Err(format!(
+            "bundle results has {} entries, the signed execution receipt has {}",
+            bundle.results.len(),
+            receipt_ids.len()
+        ));
+    }
+    for (i, (result, receipt_id)) in bundle.results.iter().zip(receipt_ids).enumerate() {
+        if result.entry_id != *receipt_id {
+            return Err(format!(
+                "bundle results[{i}].entry_id ({}) does not match the signed execution receipt ({receipt_id})",
+                result.entry_id
+            ));
+        }
+        let expected_position = i as u64 + 1;
+        if u64::from(result.position) != expected_position {
+            return Err(format!(
+                "bundle results[{i}].position is {}, expected {expected_position}",
+                result.position
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Step 8 body (`DrandBlsSignature`). This step also owns the entropy
@@ -3346,6 +3381,63 @@ mod tests {
                 StepStatus::Fail(r) if r.contains("unknown drand chain")),
             "got {:?}",
             drand_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    // ── Bundle results bound to the signed receipt ───────────────────────
+
+    fn winner_step(report: &VerificationReport) -> &StepResult {
+        step_named(report, StepName::WinnerSelection)
+    }
+
+    #[test]
+    fn unsigned_results_swap_fails_winner_selection() {
+        let (json, _) = valid_signed_bundle();
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let first = val["results"][0]["entry_id"].clone();
+        let second = val["results"][1]["entry_id"].clone();
+        assert_ne!(first, second);
+        val["results"][0]["entry_id"] = second;
+        val["results"][1]["entry_id"] = first;
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(&winner_step(&report).status,
+                StepStatus::Fail(r) if r.contains("results[0]")),
+            "got {:?}",
+            winner_step(&report).status
+        );
+        assert_eq!(failing_steps(&report), vec![StepName::WinnerSelection]);
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn unsigned_results_position_change_fails_winner_selection() {
+        let (json, _) = valid_signed_bundle();
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(val["results"][1]["position"], 2);
+        val["results"][1]["position"] = serde_json::json!(3);
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(&winner_step(&report).status,
+                StepStatus::Fail(r) if r.contains("results[1]") && r.contains("position")),
+            "got {:?}",
+            winner_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn unsigned_results_length_change_fails_winner_selection() {
+        let (json, _) = valid_signed_bundle();
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        val["results"].as_array_mut().unwrap().pop();
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(&winner_step(&report).status,
+                StepStatus::Fail(r) if r.contains("results")),
+            "got {:?}",
+            winner_step(&report).status
         );
         assert!(!report.passed());
     }
