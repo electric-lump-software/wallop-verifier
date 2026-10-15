@@ -1079,3 +1079,125 @@ fn unknown_lock_schema_message_lists_6() {
         .to_string();
     assert!(lock.contains("\"6\""), "{lock}");
 }
+
+fn exec_v5_value() -> serde_json::Value {
+    serde_json::json!({
+        "drand_chain": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
+        "drand_randomness": "abc",
+        "drand_round": 32693812u64,
+        "drand_signature": "abc",
+        "drand_signature_algorithm": DRAND_SIGNATURE_ALGORITHM,
+        "draw_id": "22222222-2222-2222-2222-222222222222",
+        "entropy_composition": landobs_v1::ENTROPY_COMPOSITION,
+        "entry_hash": "abc",
+        "executed_at": "2026-10-01T20:00:05.000000Z",
+        "fair_pick_version": "0.2.1",
+        "jcs_version": JCS_VERSION,
+        "lock_receipt_hash": "abc",
+        "merkle_algorithm": MERKLE_ALGORITHM,
+        "operator_id": "11111111-1111-1111-1111-111111111111",
+        "operator_slug": "acme-prizes",
+        "results": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "schema_version": "5",
+        "seed": "abc",
+        "sequence": 42,
+        "signature_algorithm": SIGNATURE_ALGORITHM,
+        "signing_key_id": "deadbeef",
+        "wallop_core_version": "0.29.0",
+        "weather_fallback_reason": null,
+        "weather_observation_time": "2026-10-01T19:00:00.000000Z",
+        "weather_station": "wmo-03749",
+        "weather_value": "184;1021;51;4114"
+    })
+}
+
+fn exec_v5(edit: impl FnOnce(&mut serde_json::Value)) -> ExecutionReceiptV5 {
+    let mut v = exec_v5_value();
+    edit(&mut v);
+    match parse_execution_receipt(&v.to_string()).unwrap() {
+        ParsedExecutionReceipt::V5(p) => p,
+        other => panic!("expected V5, got {other:?}"),
+    }
+}
+
+#[test]
+fn exec_v5_accepts_weather_backup_and_fallback() {
+    assert!(validate_execution_receipt_tags_v5(&exec_v5(|_| {})).is_ok());
+    let backup = exec_v5(|v| v["weather_station"] = serde_json::json!("wmo-03462"));
+    assert!(validate_execution_receipt_tags_v5(&backup).is_ok());
+    let fallback = exec_v5(|v| {
+        v["weather_value"] = serde_json::Value::Null;
+        v["weather_observation_time"] = serde_json::Value::Null;
+        v["weather_fallback_reason"] = serde_json::json!("no_observation_by_deadline");
+    });
+    assert!(validate_execution_receipt_tags_v5(&fallback).is_ok());
+}
+
+#[test]
+fn exec_v5_rejects_v5_era_fallback_reasons() {
+    for reason in ["station_down", "stale", "unreachable"] {
+        let p = exec_v5(|v| v["weather_fallback_reason"] = serde_json::json!(reason));
+        assert!(
+            validate_execution_receipt_tags_v5(&p)
+                .unwrap_err()
+                .contains("weather_fallback_reason"),
+            "accepted {reason}"
+        );
+    }
+}
+
+#[test]
+fn exec_v5_rejects_stations_outside_the_list() {
+    let p = exec_v5(|v| v["weather_station"] = serde_json::json!("wmo-03772"));
+    assert!(
+        validate_execution_receipt_tags_v5(&p)
+            .unwrap_err()
+            .contains("weather_station")
+    );
+}
+
+#[test]
+fn exec_v5_rejects_null_station() {
+    let p = exec_v5(|v| v["weather_station"] = serde_json::Value::Null);
+    assert!(
+        validate_execution_receipt_tags_v5(&p)
+            .unwrap_err()
+            .contains("weather_station")
+    );
+}
+
+#[test]
+fn exec_v5_rejects_a_value_outside_the_grammar() {
+    for bad in [
+        "1013",
+        "-0;1021;51;4114",
+        "0184;1021;51;4114",
+        "184;1021;51",
+    ] {
+        let p = exec_v5(|v| v["weather_value"] = serde_json::json!(bad));
+        assert!(
+            validate_execution_receipt_tags_v5(&p)
+                .unwrap_err()
+                .contains("weather_value"),
+            "accepted {bad}"
+        );
+    }
+}
+
+#[test]
+fn exec_v5_rejects_the_forecast_tag() {
+    let p = exec_v5(|v| v["entropy_composition"] = serde_json::json!(ENTROPY_COMPOSITION));
+    assert!(
+        validate_execution_receipt_tags_v5(&p)
+            .unwrap_err()
+            .contains("entropy_composition")
+    );
+}
+
+#[test]
+fn unknown_exec_schema_message_lists_5() {
+    let exec = parse_execution_receipt(r#"{"schema_version":"99"}"#)
+        .unwrap_err()
+        .to_string();
+    assert!(exec.contains("\"5\""), "{exec}");
+}

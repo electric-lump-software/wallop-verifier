@@ -4,8 +4,8 @@ use crate::protocol::crypto;
 use crate::protocol::receipts::{
     ParsedExecutionReceipt, ParsedLockReceipt, lock_receipt_hash, parse_execution_receipt,
     parse_lock_receipt, validate_execution_receipt_tags, validate_execution_receipt_tags_v3,
-    validate_execution_receipt_tags_v4, validate_lock_receipt_tags, validate_lock_receipt_tags_v5,
-    validate_lock_receipt_tags_v6,
+    validate_execution_receipt_tags_v4, validate_execution_receipt_tags_v5,
+    validate_lock_receipt_tags, validate_lock_receipt_tags_v5, validate_lock_receipt_tags_v6,
 };
 use crate::{Entry, compute_seed, compute_seed_drand_only, draw, entry_hash};
 use serde::{Deserialize, Serialize};
@@ -52,9 +52,12 @@ pub enum StepName {
     /// dispatcher (terminal `UnknownSchemaVersion` on anything else), MUST
     /// pass the algorithm-identity-tag and `weather_station` charset
     /// validators, and every signed timestamp MUST be in canonical
-    /// RFC 3339 form (`chrono_parse_canonical`). The typed parsers and
-    /// validators ship in `protocol/receipts.rs`; this step is the entry
-    /// point that wires them into the verifier pipeline. Appended to the end of
+    /// RFC 3339 form (`chrono_parse_canonical`). It covers lock receipt
+    /// schema 4, 5 or 6 and execution receipt schema 2 to 5; under lock
+    /// schema 6 / execution schema 5 it also checks the Land Observations
+    /// tag pins (stations, fallback reason, `weather_value` grammar). The
+    /// typed parsers and validators ship in `protocol/receipts.rs`; this
+    /// step is the entry point that wires them into the verifier pipeline. Appended to the end of
     /// `StepName::all()` so external consumers pinning step ordinals are
     /// not broken; in pipeline execution order, this step runs FIRST and
     /// gates everything else.
@@ -366,6 +369,7 @@ pub fn verify_bundle_with<R: KeyResolver>(
             Some(ParsedExecutionReceipt::V2(r)) => (None, Some(r.executed_at)),
             Some(ParsedExecutionReceipt::V3(r)) => (Some(r.signing_key_id), Some(r.executed_at)),
             Some(ParsedExecutionReceipt::V4(r)) => (Some(r.signing_key_id), Some(r.executed_at)),
+            Some(ParsedExecutionReceipt::V5(r)) => (Some(r.signing_key_id), Some(r.executed_at)),
             None => (None, None),
         };
 
@@ -1162,6 +1166,27 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
                     name: StepName::BundleShape,
                     status: StepStatus::Fail(
                         "execution receipt schema_version=\"4\" must not carry inline \
+                         public_key_hex on the bundle wrapper (downgrade-relabel check)"
+                            .into(),
+                    ),
+                    detail: None,
+                };
+            }
+            (p.executed_at.clone(), p.weather_observation_time.clone())
+        }
+        ParsedExecutionReceipt::V5(p) => {
+            if let Err(e) = validate_execution_receipt_tags_v5(p) {
+                return StepResult {
+                    name: StepName::BundleShape,
+                    status: StepStatus::Fail(format!("exec receipt validation: {}", e)),
+                    detail: None,
+                };
+            }
+            if inline_exec_pk_present {
+                return StepResult {
+                    name: StepName::BundleShape,
+                    status: StepStatus::Fail(
+                        "execution receipt schema_version=\"5\" must not carry inline \
                          public_key_hex on the bundle wrapper (downgrade-relabel check)"
                             .into(),
                     ),
@@ -3782,3 +3807,7 @@ mod tests {
         assert!(report.passed(), "steps: {:?}", report.steps);
     }
 }
+
+#[cfg(test)]
+#[path = "verify_steps_landobs_tests.rs"]
+mod landobs_tests;

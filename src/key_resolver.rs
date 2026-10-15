@@ -192,6 +192,7 @@ fn signing_key_id_from_exec(payload_jcs: &str) -> Option<String> {
         ParsedExecutionReceipt::V2(_) => None,
         ParsedExecutionReceipt::V3(p) => Some(p.signing_key_id),
         ParsedExecutionReceipt::V4(p) => Some(p.signing_key_id),
+        ParsedExecutionReceipt::V5(p) => Some(p.signing_key_id),
     }
 }
 
