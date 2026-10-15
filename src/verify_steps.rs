@@ -125,7 +125,11 @@ impl fmt::Display for StepName {
 pub enum StepStatus {
     Pass,
     Fail(String),
+    /// The step could not run. Never counts as a pass.
     Skip(String),
+    /// The check genuinely does not apply to this bundle (e.g. no weather
+    /// on a drand-only draw). Does not block a pass on its own.
+    NotApplicable(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -255,10 +259,14 @@ impl VerificationReport {
     /// signatures genuinely verify over the bytes presented) while still
     /// failing the `BundleShape` step that catches the protocol violation.
     /// `passed()` correctly returns `false` in that case.
+    ///
+    /// Every step must be `Pass` or `NotApplicable`, and at least one must
+    /// be `Pass`. A `Skip` (a check that could not run) never counts as a
+    /// pass.
     pub fn passed(&self) -> bool {
         self.steps
             .iter()
-            .all(|s| matches!(s.status, StepStatus::Pass | StepStatus::Skip(_)))
+            .all(|s| matches!(s.status, StepStatus::Pass | StepStatus::NotApplicable(_)))
             && self
                 .steps
                 .iter()
@@ -659,34 +667,23 @@ pub fn verify_bundle_with<R: KeyResolver>(
         }
     }
 
-    // === Step 8: BLS drand verification ===
-    #[cfg(feature = "cli")]
-    {
-        match crate::drand::verify_drand_round(
-            &bundle.entropy.drand_chain_hash,
-            bundle.entropy.drand_round,
-            &bundle.entropy.drand_signature,
-            &bundle.entropy.drand_randomness,
-        ) {
-            Ok(()) => steps.push(StepResult {
-                name: StepName::DrandBlsSignature,
-                status: StepStatus::Pass,
-                detail: None,
-            }),
-            Err(e) => steps.push(StepResult {
-                name: StepName::DrandBlsSignature,
-                status: StepStatus::Fail(e.to_string()),
-                detail: None,
-            }),
-        }
-    }
-    #[cfg(not(feature = "cli"))]
-    {
-        steps.push(StepResult {
+    // === Step 8: BLS drand verification (every build, including WASM) ===
+    match crate::drand::verify_drand_round(
+        &bundle.entropy.drand_chain_hash,
+        bundle.entropy.drand_round,
+        &bundle.entropy.drand_signature,
+        &bundle.entropy.drand_randomness,
+    ) {
+        Ok(()) => steps.push(StepResult {
             name: StepName::DrandBlsSignature,
-            status: StepStatus::Skip("BLS verification requires cli feature".into()),
+            status: StepStatus::Pass,
             detail: None,
-        });
+        }),
+        Err(e) => steps.push(StepResult {
+            name: StepName::DrandBlsSignature,
+            status: StepStatus::Fail(e.to_string()),
+            detail: None,
+        }),
     }
 
     // === Step 10: Cross-receipt field consistency ===
@@ -1225,7 +1222,7 @@ fn check_weather_observation_window(bundle: &ProofBundle) -> StepResult {
         None => {
             return StepResult {
                 name: StepName::WeatherObservationWindow,
-                status: StepStatus::Skip("lock receipt has no weather_time".into()),
+                status: StepStatus::NotApplicable("lock receipt has no weather_time".into()),
                 detail: None,
             };
         }
@@ -1239,7 +1236,9 @@ fn check_weather_observation_window(bundle: &ProofBundle) -> StepResult {
         None => {
             return StepResult {
                 name: StepName::WeatherObservationWindow,
-                status: StepStatus::Skip("exec receipt has no weather_observation_time".into()),
+                status: StepStatus::NotApplicable(
+                    "exec receipt has no weather_observation_time".into(),
+                ),
                 detail: None,
             };
         }
@@ -1380,11 +1379,11 @@ fn check_temporal_binding(
     } else {
         // Every resolved key was Sentinel — i.e. self-consistency
         // mode end-to-end. The comparison is vacuous; surface it
-        // honestly as a Skip rather than a Pass that overstates the
-        // guarantee.
+        // honestly as NotApplicable rather than a Pass that overstates
+        // the guarantee.
         StepResult {
             name: StepName::TemporalBinding,
-            status: StepStatus::Skip(
+            status: StepStatus::NotApplicable(
                 "self-consistency mode; binding check is vacuous against bundle-embedded keys"
                     .into(),
             ),
@@ -1903,7 +1902,6 @@ mod tests {
         assert!(!report.passed());
     }
 
-    #[cfg(feature = "cli")]
     #[test]
     fn verify_bundle_bad_drand_chain() {
         let (json, _) = valid_signed_bundle();
@@ -2496,7 +2494,7 @@ mod tests {
     }
 
     #[test]
-    fn temporal_binding_skips_under_self_consistency_with_sentinel() {
+    fn temporal_binding_not_applicable_under_self_consistency() {
         // BundleEmbeddedResolver always returns Sentinel; under
         // SelfConsistencyOnly the comparison is vacuous — the bundle
         // is self-attesting and there's no out-of-band timestamp.
@@ -2505,8 +2503,8 @@ mod tests {
         let report = verify_bundle(&bundle);
         let step = temporal_binding_step(&report);
         assert!(
-            matches!(&step.status, StepStatus::Skip(reason) if reason.contains("self-consistency")),
-            "expected Skip under self-consistency, got {:?}",
+            matches!(&step.status, StepStatus::NotApplicable(reason) if reason.contains("self-consistency")),
+            "expected NotApplicable under self-consistency, got {:?}",
             step.status
         );
     }
@@ -2748,5 +2746,97 @@ mod tests {
             "expected malformed-timestamp Fail, got {:?}",
             step.status
         );
+    }
+
+    // ── A skip is never a pass; BLS runs in every build ──────────────────
+
+    fn report_of(statuses: Vec<StepStatus>) -> VerificationReport {
+        VerificationReport {
+            steps: statuses
+                .into_iter()
+                .map(|status| StepResult {
+                    name: StepName::EntryHash,
+                    status,
+                    detail: None,
+                })
+                .collect(),
+            operator_key_id: None,
+            infra_key_id: None,
+            mode: VerifierMode::SelfConsistencyOnly,
+        }
+    }
+
+    #[test]
+    fn a_skip_is_never_a_pass() {
+        let report = report_of(vec![StepStatus::Pass, StepStatus::Skip("not run".into())]);
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn not_applicable_does_not_block_a_pass() {
+        let report = report_of(vec![
+            StepStatus::Pass,
+            StepStatus::NotApplicable("no weather".into()),
+        ]);
+        assert!(report.passed());
+    }
+
+    #[test]
+    fn all_not_applicable_is_not_a_pass() {
+        let report = report_of(vec![StepStatus::NotApplicable("nothing".into())]);
+        assert!(!report.passed());
+    }
+
+    fn drand_step(report: &VerificationReport) -> &StepResult {
+        report
+            .steps
+            .iter()
+            .find(|s| s.name == StepName::DrandBlsSignature)
+            .unwrap()
+    }
+
+    #[test]
+    fn genuine_beacon_passes_drand_step_without_cli_feature() {
+        let (json, _) = valid_signed_bundle();
+        let report = verify_bundle(&ProofBundle::from_json(&json).unwrap());
+        assert_eq!(drand_step(&report).status, StepStatus::Pass);
+    }
+
+    #[test]
+    fn zero_signature_fails_drand_step_and_report() {
+        // Tamper only the bundle's entropy.drand_signature. A plain string
+        // replace would also hit the signed execution receipt and break its
+        // Ed25519 signature, so the report would fail for the wrong reason.
+        let (json, _) = valid_signed_bundle();
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            val["entropy"]["drand_signature"],
+            crate::_test_support::BEACON_SIGNATURE
+        );
+        val["entropy"]["drand_signature"] = serde_json::json!("00".repeat(48));
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(drand_step(&report).status, StepStatus::Fail(_)),
+            "got {:?}",
+            drand_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn drand_only_bundle_weather_window_is_not_applicable_and_passes() {
+        let (json, _) = crate::_test_support::build_valid_drand_only_bundle();
+        let report = verify_bundle(&ProofBundle::from_json(&json).unwrap());
+        let step = report
+            .steps
+            .iter()
+            .find(|s| s.name == StepName::WeatherObservationWindow)
+            .unwrap();
+        assert!(
+            matches!(step.status, StepStatus::NotApplicable(_)),
+            "got {:?}",
+            step.status
+        );
+        assert!(report.passed(), "steps: {:?}", report.steps);
     }
 }

@@ -168,6 +168,53 @@ pub fn build_valid_bundle(entries: &[Entry], weather: Option<&str>, winner_count
     .to_string()
 }
 
+/// Build a fully-signed drand-only bundle in the shape wallop_core emits
+/// when the weather fetch falls back (see the vendored
+/// `proof-bundle-drand-only.json` vector): the lock receipt still commits
+/// to a weather time and station, the execution receipt repeats the
+/// station with `weather_fallback_reason: "unreachable"` and null
+/// `weather_value` / `weather_observation_time`, and the bundle's entropy
+/// has no `weather_value`. Uses the genuine `BEACON_*`, so every step
+/// either passes or is not applicable.
+///
+/// Returned tuple: `(bundle_json, public_key_hex)`.
+#[doc(hidden)]
+pub fn build_valid_drand_only_bundle() -> (String, String) {
+    let entries = vec![
+        Entry {
+            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            weight: 1,
+        },
+        Entry {
+            id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
+            weight: 1,
+        },
+        Entry {
+            id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc".into(),
+            weight: 1,
+        },
+    ];
+    let sk = test_signing_key();
+    let pk_hex = hex::encode(sk.verifying_key().to_bytes());
+
+    // `build_valid_bundle(.., None, ..)` nulls the exec receipt's
+    // weather_station and has no fallback reason. Patch the exec payload
+    // to the real fallback shape and re-sign it. The lock receipt is
+    // untouched, so lock_receipt_hash still links.
+    let mut bundle: serde_json::Value =
+        serde_json::from_str(&build_valid_bundle(&entries, None, 2)).unwrap();
+    let mut exec: serde_json::Value =
+        serde_json::from_str(bundle["execution_receipt"]["payload_jcs"].as_str().unwrap()).unwrap();
+    exec["weather_station"] = serde_json::json!("middle-wallop");
+    exec["weather_fallback_reason"] = serde_json::json!("unreachable");
+    let exec_jcs = exec.to_string();
+    let exec_sig_hex = hex::encode(sk.sign(exec_jcs.as_bytes()).to_bytes());
+    bundle["execution_receipt"]["payload_jcs"] = serde_json::json!(exec_jcs);
+    bundle["execution_receipt"]["signature_hex"] = serde_json::json!(exec_sig_hex);
+
+    (bundle.to_string(), pk_hex)
+}
+
 /// Build a fully-signed, verifiable proof bundle in resolver-driven shape:
 /// lock receipt schema_version "5", execution receipt schema_version "4",
 /// no inline `public_key_hex` on either bundle wrapper.

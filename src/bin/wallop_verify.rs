@@ -473,6 +473,9 @@ fn run_verify(path: &str, pins: &PinConfig, mode: VerifierMode) -> ExitCode {
             StepStatus::Pass => println!("  {} {} PASS", name_str, dots),
             StepStatus::Fail(reason) => println!("  {} {} FAIL ({})", name_str, dots, reason),
             StepStatus::Skip(reason) => println!("  {} {} SKIP ({})", name_str, dots, reason),
+            StepStatus::NotApplicable(reason) => {
+                println!("  {} {} N/A ({})", name_str, dots, reason)
+            }
         }
     }
 
@@ -915,6 +918,9 @@ fn print_report(
             StepStatus::Pass => println!("  {} {} PASS", name_str, dots),
             StepStatus::Fail(reason) => println!("  {} {} FAIL ({})", name_str, dots, reason),
             StepStatus::Skip(reason) => println!("  {} {} SKIP ({})", name_str, dots, reason),
+            StepStatus::NotApplicable(reason) => {
+                println!("  {} {} N/A ({})", name_str, dots, reason)
+            }
         }
     }
 
