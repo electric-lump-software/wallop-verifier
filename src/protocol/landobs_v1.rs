@@ -73,7 +73,7 @@ pub const VIS_MIN: i64 = 0;
 pub const VIS_MAX: i64 = 10_000;
 
 /// Longest `weather_value` accepted, in bytes.
-pub const WEATHER_VALUE_MAX_LEN: usize = 32;
+const WEATHER_VALUE_MAX_LEN: usize = 32;
 
 /// A parsed `weather_value`: `"<t>;<mslp>;<rh>;<vis>"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,6 +222,7 @@ mod tests {
     fn latest_lock_fails_closed_on_underflow() {
         assert_eq!(latest_lock_at(i64::MIN), None);
     }
+
     #[test]
     fn grammar_accepts_canonical_values() {
         assert_eq!(
@@ -270,6 +271,12 @@ mod tests {
             "--1;1021;51;4114",
             "-;1021;51;4114",
             "1234567;1021;51;4114",
+            "184;1021;051;4114",
+            "184;1021;51;04114",
+            "00;1021;51;4114",
+            "-00;1021;51;4114",
+            "184;1021;51;-0",
+            "184;;51;4114",
         ] {
             assert!(parse_weather_value(bad).is_err(), "accepted {bad:?}");
         }
