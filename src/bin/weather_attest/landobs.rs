@@ -120,9 +120,37 @@ pub(crate) fn check(rows: &[Row], weather_time: &str, value: &str) -> Outcome {
     }
 }
 
+/// A row's `datetime` if it is exactly `YYYY-MM-DDTHH:MM:SSZ`. Stamps in
+/// that one fixed shape sort as text in time order.
+fn row_stamp(row: &Row) -> Option<&str> {
+    let text = row.get("datetime")?.get();
+    let stamp = text.strip_prefix('"')?.strip_suffix('"')?;
+    let shape_ok = stamp.len() == 20
+        && stamp.bytes().enumerate().all(|(i, b)| match i {
+            4 | 7 => b == b'-',
+            10 => b == b'T',
+            13 | 16 => b == b':',
+            19 => b == b'Z',
+            _ => b.is_ascii_digit(),
+        });
+    shape_ok.then_some(stamp)
+}
+
 /// Requires a `weather_time` that has passed `landobs_v1::parse_weather_time`.
+///
+/// ABSENT only when the rows reach back to (or before) the wanted hour, so
+/// a missing row means the record really lacks it. Otherwise the hour may
+/// simply have rolled off, and the record can't tell: UNAVAILABLE.
 pub(crate) fn presence(rows: &[Row], weather_time: &str) -> Outcome {
+    let want = format!("{}Z", &weather_time[..19]);
+    let reaches_back = rows
+        .iter()
+        .filter_map(row_stamp)
+        .any(|stamp| stamp <= want.as_str());
     match row_for(rows, weather_time) {
+        None if !reaches_back => {
+            Outcome::Unavailable("records no longer reach back to this hour".into())
+        }
         None => Outcome::Absent(format!("no row for {}", &weather_time[..16])),
         Some(row) => match row_to_value(row) {
             Ok(value) => Outcome::Present(value),
@@ -373,8 +401,42 @@ mod tests {
     #[test]
     fn presence_needs_a_valid_row() {
         assert!(matches!(presence(&rows(ROW), WT), Outcome::Present(_)));
-        assert!(matches!(presence(&rows("[]"), WT), Outcome::Absent(_)));
         let invalid = rows(r#"[{"datetime":"2026-10-01T19:00:00Z","temperature":18.38}]"#);
         assert!(matches!(presence(&invalid, WT), Outcome::Absent(_)));
+    }
+
+    #[test]
+    fn presence_is_absent_only_when_the_rows_reach_back_to_the_hour() {
+        let reaching = |r: &Outcome| matches!(r, Outcome::Unavailable(d) if d.contains("no longer reach back"));
+        // Nothing at all: the record can't tell.
+        assert!(
+            reaching(&presence(&rows("[]"), WT)),
+            "{:?}",
+            presence(&rows("[]"), WT)
+        );
+        // Every row is later than the wanted hour: it has rolled off.
+        let later = rows(&ROW.replace("19:00:00Z", "20:00:00Z"));
+        assert!(
+            reaching(&presence(&later, WT)),
+            "{:?}",
+            presence(&later, WT)
+        );
+        // Unreadable stamps prove nothing either.
+        let junk = rows(&ROW.replace("2026-10-01T19:00:00Z", "yesterday"));
+        assert!(reaching(&presence(&junk, WT)), "{:?}", presence(&junk, WT));
+        // The rows cover the hour (one earlier, one later) but lack it.
+        let covering = rows(&format!(
+            "[{},{}]",
+            &ROW.replace("19:00:00Z", "18:00:00Z")[1..ROW.len() - 1],
+            &ROW.replace("19:00:00Z", "20:00:00Z")[1..ROW.len() - 1]
+        ));
+        assert!(
+            matches!(presence(&covering, WT), Outcome::Absent(_)),
+            "{:?}",
+            presence(&covering, WT)
+        );
+        // A row at exactly the hour counts as reaching back.
+        let at_hour = rows(r#"[{"datetime":"2026-10-01T19:00:00Z"}]"#);
+        assert!(matches!(presence(&at_hour, WT), Outcome::Absent(_)));
     }
 }

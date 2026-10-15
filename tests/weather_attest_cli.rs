@@ -44,3 +44,27 @@ fn help_lists_the_subcommand() {
     let out = run(&["--help"], "");
     assert!(String::from_utf8_lossy(&out.stdout).contains("weather-attest"));
 }
+
+#[test]
+fn subcommand_help_explains_the_key_flags_and_exit_codes() {
+    let top = String::from_utf8_lossy(&run(&["--help"], "").stdout).into_owned();
+    assert!(
+        top.contains("Compare a bundle's weather details with public records"),
+        "{top}"
+    );
+    let out = run(&["weather-attest", "--help"], "");
+    let help = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for wanted in [
+        "WALLOP_METOFFICE_KEY",
+        "shell history",
+        "--mode",
+        "--pin-",
+        "no mismatch was found",
+        "not a failed verification",
+    ] {
+        assert!(help.contains(wanted), "{wanted:?} missing from: {help}");
+    }
+}

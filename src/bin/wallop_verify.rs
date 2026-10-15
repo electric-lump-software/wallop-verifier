@@ -139,15 +139,25 @@ enum Commands {
         #[cfg(feature = "tui")]
         record: Option<String>,
     },
-    /// Compare a schema 6 bundle's signed weather observation with public
-    /// records: Met Office Land Observations (within 48 hours) and the WMO
-    /// SYNOP via Ogimet. Informational only; never part of the verdict.
+    /// Compare a bundle's weather details with public records
+    ///
+    /// Checks the weather details in a schema 6 bundle's execution receipt
+    /// against Met Office Land Observations (which keeps about 48 hours)
+    /// and the WMO SYNOP via Ogimet. This is informational: it does not
+    /// check signatures and never changes a verification result. Run
+    /// `wallop-verify <BUNDLE>` to verify the bundle. Top-level flags such
+    /// as --mode and --pin-* do not apply to this command.
+    ///
+    /// Exit status: 0 means no mismatch was found, not that the weather is
+    /// confirmed. 1 means a public record disagrees with the receipt, not a
+    /// failed verification. 2 means the bundle could not be read or is not
+    /// schema 6.
     WeatherAttest {
         /// Path to proof bundle JSON file, or "-" for stdin
         bundle: String,
-        /// Met Office DataHub API key for Land Observations. Also read from
-        /// WALLOP_METOFFICE_KEY. Without it, that check is reported as
-        /// unavailable.
+        /// Met Office DataHub API key for Land Observations. Prefer setting
+        /// WALLOP_METOFFICE_KEY instead: a flag shows in `ps` and shell
+        /// history. Without a key, that check is reported as unavailable.
         #[arg(long, value_name = "KEY")]
         metoffice_key: Option<String>,
     },

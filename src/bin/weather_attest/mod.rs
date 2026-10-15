@@ -33,8 +33,10 @@ pub(crate) enum Outcome {
     Absent(String),
 }
 
-/// Land Observations keeps roughly 48 hours of rows.
-const LANDOBS_RETENTION_SECS: i64 = 48 * 3600;
+/// Land Observations keeps roughly 48 hours of rows. Look no further back
+/// than 46, so an hour on the edge of rolling off is reported unavailable
+/// rather than missing.
+const LANDOBS_RETENTION_SECS: i64 = 46 * 3600;
 
 /// One labelled result in the report.
 #[derive(Debug)]
@@ -115,11 +117,12 @@ pub(crate) fn attest(
     now_unix: i64,
 ) -> Vec<Line> {
     let rows_for = |station: &str| -> Result<Vec<landobs::Row>, String> {
-        let client =
-            landobs.ok_or_else(|| "no Met Office key given (--metoffice-key)".to_string())?;
+        let client = landobs.ok_or_else(|| {
+            "no Met Office key: pass --metoffice-key or set WALLOP_METOFFICE_KEY".to_string()
+        })?;
         if now_unix - input.weather_time_unix > LANDOBS_RETENTION_SECS {
             return Err(
-                "Land Observations keeps 48 hours and this observation hour is older".into(),
+                "Land Observations only keeps about 48 hours, and this hour is older".into(),
             );
         }
         let geohash = landobs::geohash_for(station)
@@ -233,7 +236,7 @@ pub(crate) fn run(path: &str, metoffice_key: Option<&str>) -> ExitCode {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let lines = attest(&input, landobs.as_ref(), &ogimet, now_unix);
-    print_report(&input, &lines);
+    print!("{}", report(&input, &lines));
     if has_mismatch(&lines) {
         ExitCode::from(1)
     } else {
@@ -241,42 +244,67 @@ pub(crate) fn run(path: &str, metoffice_key: Option<&str>) -> ExitCode {
     }
 }
 
-fn print_report(input: &AttestInput, lines: &[Line]) {
-    println!("wallop-verify {} weather-attest", env!("CARGO_PKG_VERSION"));
-    println!();
-    println!("  Draw ................ {}", input.draw_id);
-    println!("  Observation hour .... {}", input.weather_time);
+/// The report `run` prints, as text.
+fn report(input: &AttestInput, lines: &[Line]) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "wallop-verify {} weather-attest",
+        env!("CARGO_PKG_VERSION")
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(out, "  Draw ................ {}", input.draw_id);
+    let _ = writeln!(out, "  Observation hour .... {}", input.weather_time);
     match &input.value {
         Some(value) => {
-            println!(
+            let _ = writeln!(
+                out,
                 "  Station used ........ {} ({})",
                 input.station,
                 station_name(&input.station)
             );
-            println!("  Weather value ....... {value}");
+            let _ = writeln!(out, "  Weather value ....... {value}");
         }
-        None => println!(
-            "  Station used ........ none: drand only ({})",
-            input
-                .fallback_reason
-                .as_deref()
-                .unwrap_or("no reason given")
-        ),
+        None => {
+            let _ = writeln!(
+                out,
+                "  Station used ........ none, drand only (receipt reason: {})",
+                input
+                    .fallback_reason
+                    .as_deref()
+                    .unwrap_or("no reason given")
+            );
+        }
     }
-    println!();
+    let _ = writeln!(out);
     for line in lines {
-        println!("  {}", render_line(line));
+        let _ = writeln!(out, "  {}", render_line(line));
     }
-    println!();
-    println!("  These lines compare the signed weather value with public records.");
-    println!("  They are not part of verification and never change its result.");
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "  These lines check the weather details in this bundle's execution receipt"
+    );
+    let _ = writeln!(
+        out,
+        "  against public records. This command does not check signatures; run"
+    );
+    let _ = writeln!(out, "  `wallop-verify <BUNDLE>` for that.");
     if lines
         .iter()
         .any(|l| matches!(l.outcome, Outcome::Present(_)))
     {
-        println!("  PRESENT means the record holds that hour now. It may have arrived after the");
-        println!("  fetch deadline, so on its own it does not show an observation was withheld.");
+        let _ = writeln!(
+            out,
+            "  PRESENT means the record holds that hour now. It may have arrived after the"
+        );
+        let _ = writeln!(
+            out,
+            "  fetch deadline, so on its own it does not show an observation was withheld."
+        );
     }
+    out
 }
 
 #[cfg(test)]
@@ -401,17 +429,27 @@ mod tests {
             WT_UNIX + 3600,
         );
         assert!(
-            matches!(&no_key[0].outcome, Outcome::Unavailable(r) if r.contains("--metoffice-key"))
+            matches!(&no_key[0].outcome, Outcome::Unavailable(r) if r == "no Met Office key: pass --metoffice-key or set WALLOP_METOFFICE_KEY")
         );
         let landobs = http::LandObsClient::new(&server.url(), "k");
         let old = attest(
             &input("wmo-03749", Some("184;1021;51;4114")),
             Some(&landobs),
             &ogimet(&server),
-            WT_UNIX + 48 * 3600 + 1,
+            WT_UNIX + 46 * 3600 + 1,
         );
-        assert!(matches!(&old[0].outcome, Outcome::Unavailable(r) if r.contains("48 hours")));
+        assert!(
+            matches!(&old[0].outcome, Outcome::Unavailable(r) if r == "Land Observations only keeps about 48 hours, and this hour is older")
+        );
         assert!(matches!(old[1].outcome, Outcome::Match(_)));
+        server.mock("GET", "/gcnfur").with_body(ROW_03749).create();
+        let edge = attest(
+            &input("wmo-03749", Some("184;1021;51;4114")),
+            Some(&landobs),
+            &ogimet(&server),
+            WT_UNIX + 46 * 3600,
+        );
+        assert!(matches!(edge[0].outcome, Outcome::Match(_)), "{edge:?}");
     }
 
     #[test]
@@ -469,8 +507,9 @@ mod tests {
     #[test]
     fn fallback_reports_both_stations() {
         let mut server = mockito::Server::new();
-        server.mock("GET", "/gcnfur").with_body("[]").create();
-        server.mock("GET", "/gcrem9").with_body("[]").create();
+        let earlier = ROW_03749.replace("19:00:00Z", "18:00:00Z");
+        server.mock("GET", "/gcnfur").with_body(&earlier).create();
+        server.mock("GET", "/gcrem9").with_body(&earlier).create();
         mock_synop(&mut server, "03749", "");
         mock_synop(&mut server, "03462", "");
         let landobs = http::LandObsClient::new(&server.url(), "k");
@@ -527,5 +566,59 @@ mod tests {
         let s = render_line(&line);
         assert!(s.starts_with("SYNOP via Ogimet, wmo-03749 ."), "{s}");
         assert!(s.ends_with(" MATCH (t 184, mslp 1021)"), "{s}");
+    }
+    #[test]
+    fn fallback_with_records_that_no_longer_reach_back_is_unavailable() {
+        let mut server = mockito::Server::new();
+        server.mock("GET", "/gcnfur").with_body("[]").create();
+        server.mock("GET", "/gcrem9").with_body("[]").create();
+        mock_synop(&mut server, "03749", "");
+        mock_synop(&mut server, "03462", "");
+        let landobs = http::LandObsClient::new(&server.url(), "k");
+        let lines = attest(
+            &input("wmo-03749", None),
+            Some(&landobs),
+            &ogimet(&server),
+            WT_UNIX + 3600,
+        );
+        let land: Vec<_> = lines
+            .iter()
+            .filter(|l| l.label.starts_with("Land"))
+            .collect();
+        assert_eq!(land.len(), 2);
+        assert!(
+            land.iter()
+                .all(|l| matches!(l.outcome, Outcome::Unavailable(_))),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn report_names_the_receipt_and_never_claims_a_signature_check() {
+        let lines = vec![Line {
+            label: "SYNOP via Ogimet, wmo-03749".into(),
+            outcome: Outcome::Absent("no SYNOP for this hour".into()),
+        }];
+        let fallback = report(&input("wmo-03749", None), &lines);
+        assert!(
+            fallback.contains("Station used ........ none, drand only (receipt reason: no_observation_by_deadline)"),
+            "{fallback}"
+        );
+        assert!(!fallback.contains("signed weather value"), "{fallback}");
+        let footer = "These lines check the weather details in this bundle's execution receipt against public records. This command does not check signatures; run `wallop-verify <BUNDLE>` for that.";
+        let flat = fallback.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.contains(footer), "{fallback}");
+        let used = report(&input("wmo-03749", Some("184;1021;51;4114")), &lines);
+        assert!(
+            used.contains("Station used ........ wmo-03749 (Middle Wallop)"),
+            "{used}"
+        );
+        assert!(
+            used.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains(footer),
+            "{used}"
+        );
     }
 }

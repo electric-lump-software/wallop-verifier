@@ -149,7 +149,7 @@ pub(crate) fn check(body: Option<&str>, station: &str, weather_time: &str, value
             (Some(t), Some(p)) => {
                 let mslp = (p + 5) / 10;
                 if t == expected.t && mslp == expected.mslp {
-                    Outcome::Match(format!("t {t}, mslp {mslp}"))
+                    Outcome::Match(format!("t, mslp only: t {t}, mslp {mslp}"))
                 } else {
                     Outcome::Mismatch(format!(
                         "SYNOP t {t}, mslp {mslp}; receipt t {}, mslp {}",
@@ -266,10 +266,10 @@ mod tests {
 
     #[test]
     fn check_compares_t_and_rounded_mslp() {
-        assert!(matches!(
+        assert_eq!(
             check(Some(BODY), "wmo-03749", WT, "184;1021;51;4114"),
-            Outcome::Match(_)
-        ));
+            Outcome::Match("t, mslp only: t 184, mslp 1021".into())
+        );
         assert!(matches!(
             check(Some(BODY), "wmo-03749", WT, "183;1021;51;4114"),
             Outcome::Mismatch(_)
