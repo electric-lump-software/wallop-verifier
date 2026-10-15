@@ -12,9 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The drand step was compiled only into the CLI build, so the WASM verifier on the proof page skipped the BLS signature check, and a skipped check still counted as a pass. It also checked the wrong copy of the beacon. Both are fixed.
 
 - **Drand BLS verification in every build, including WASM.** The beacon signature is checked against the pinned quicknet chain wherever the verifier runs. Before, browser verification skipped it.
-- **The drand step verifies the signed beacon.** It reads `drand_chain`, `drand_round`, `drand_signature` and `drand_randomness` from the signed execution receipt, which is what the seed is derived from, and fails if any is missing. Before, it verified the bundle's unsigned `entropy` block, so a genuine beacon for any round placed there passed whatever the receipt said. The `entropy` block (its drand fields and `weather_value`) must now equal the receipt, or the step fails. If the execution receipt signature fails, the step is skipped, and so the report fails.
+- **The drand step verifies the signed beacon.** It reads `drand_chain`, `drand_round`, `drand_signature` and `drand_randomness` from the signed execution receipt, which is what the seed is derived from, and fails if any is missing. Before, it verified the bundle's unsigned `entropy` block, so a genuine beacon for any round placed there passed whatever the receipt said. The `entropy` block (its drand fields and `weather_value`) must now equal the receipt, or the step fails. If the execution receipt signature fails, the step is skipped, and so the report fails. The selftest TUI no longer forces this step to a skip.
 - **Weather observation window.** The step is waived (`NotApplicable`) only when the execution receipt carries no weather at all. A weather value without an observation time, or an observation time without a value, now fails. Before, a missing observation time waived the check even when a weather value fed the seed.
-- **`verify_full` checks drand.** It now verifies the drand BLS signature and randomness, and that the lock and execution receipts name the same round and chain. A receipt missing `drand_round` or `drand_chain`, or an execution receipt missing `drand_signature`, is now an `Err`, as other missing fields already were.
+- **`verify_full` checks drand.** It now verifies the drand BLS signature and randomness, and that the lock and execution receipts name the same round and chain. A receipt missing `drand_round` or `drand_chain`, or an execution receipt missing `drand_signature`, is now an `Err`, as other missing fields already were. An execution receipt `weather_value` that is present but neither a string nor null is also an `Err`; before, it was read as a drand-only draw.
 
 ### Changed — **breaking:** a skipped check never counts as a pass
 
@@ -23,7 +23,8 @@ The drand step was compiled only into the CLI build, so the WASM verifier on the
 
 ### Added
 
-- `verify_drand_wasm(chain_hash, round, signature_hex, randomness_hex) -> bool`: the drand check on its own, so the proof page can show it as a separate line. True only if the chain is the pinned quicknet chain, the BLS signature is valid for `round`, and `sha256(signature) == randomness`. `round` is a `u64`, so JavaScript passes a `BigInt`.
+- `verify_bundle_wasm(bundle_json) -> bool`: verifies a whole proof bundle in the browser, running the full step pipeline in self-consistency mode with the bundle's embedded keys. These are the same checks as the CLI's default mode, drand included. It is the gate the proof page should use for its green result. A bundle that fails to parse is an error.
+- `verify_drand_wasm(chain_hash, round, signature_hex, randomness_hex) -> bool`: the drand check on its own, so the proof page can show it as a separate line. True only if the chain is the pinned quicknet chain, the BLS signature is valid for `round`, and `sha256(signature) == randomness`. `round` is a `u64`, so JavaScript passes a `BigInt`. Pass the values from the signed execution receipt, never from unsigned page data, and pass hex in lower case: an upper-case chain hash or randomness is rejected.
 - `Cargo.toml` version bump 0.16.1 → 0.17.0.
 
 The WASM bundle is larger, since the BLS pairing code is now linked in.

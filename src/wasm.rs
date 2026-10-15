@@ -6,7 +6,7 @@ use crate::bundle::ProofBundle;
 use crate::key_resolver::{InsertedAt, KeyClass, KeyResolver, ResolutionError, ResolvedKey};
 use crate::protocol;
 use crate::protocol::receipts::{ExecutionReceiptV2, LockReceiptV4};
-use crate::verify_steps::{VerifierMode, verify_bundle_with};
+use crate::verify_steps::{VerifierMode, verify_bundle, verify_bundle_with};
 
 /// WASM entry point for draw.
 #[wasm_bindgen]
@@ -197,6 +197,15 @@ pub fn anchor_root_wasm(op_root_hex: &str, exec_root_hex: &str) -> Result<String
 /// show it as a separate line. True iff the chain is the pinned quicknet
 /// chain, the BLS signature is valid for `round`, and
 /// sha256(signature) == randomness.
+///
+/// Pass every value from the signed execution receipt (`drand_chain`,
+/// `drand_round`, `drand_signature`, `drand_randomness`), never from
+/// unsigned page data such as the bundle's `entropy` block: a genuine
+/// beacon for some other round proves nothing about this draw.
+///
+/// Hex inputs must be lower case, as the receipt carries them. The chain
+/// hash and randomness are compared exactly, so upper case is rejected
+/// (fails closed).
 #[wasm_bindgen]
 pub fn verify_drand_wasm(
     chain_hash: &str,
@@ -205,6 +214,21 @@ pub fn verify_drand_wasm(
     randomness_hex: &str,
 ) -> bool {
     crate::drand::verify_drand_round(chain_hash, round, signature_hex, randomness_hex).is_ok()
+}
+
+/// Verify a whole proof bundle in the browser: the full step pipeline in
+/// self-consistency mode, using the keys embedded in the bundle. These are
+/// the same checks as the CLI's default mode, including the drand BLS
+/// signature and the entropy binding.
+///
+/// This is the gate the proof page should use for its green result.
+/// Returns `true` iff the report passes (every step `Pass` or
+/// `NotApplicable`, at least one `Pass`). A bundle that fails to parse is
+/// an `Err`.
+#[wasm_bindgen]
+pub fn verify_bundle_wasm(bundle_json: &str) -> Result<bool, JsError> {
+    let bundle = ProofBundle::from_json(bundle_json).map_err(|e| JsError::new(&e))?;
+    Ok(verify_bundle(&bundle).passed())
 }
 
 /// WASM entry point for verify_full.
@@ -396,5 +420,43 @@ mod wasm_drand_export_tests {
             &"00".repeat(48),
             BEACON_RANDOMNESS
         ));
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_bundle_export_tests {
+    use super::verify_bundle_wasm;
+    use crate::_test_support::{BEACON_SIGNATURE, build_valid_bundle, resign_exec};
+    use crate::Entry;
+    use wasm_bindgen_test::*;
+
+    fn entries() -> Vec<Entry> {
+        ["a", "b", "c"]
+            .iter()
+            .map(|id| Entry {
+                id: (*id).into(),
+                weight: 1,
+            })
+            .collect()
+    }
+
+    #[wasm_bindgen_test]
+    fn valid_bundle_passes() {
+        let json = build_valid_bundle(&entries(), Some("1013"), 2);
+        assert!(verify_bundle_wasm(&json).unwrap());
+    }
+
+    #[wasm_bindgen_test]
+    fn zero_drand_signature_fails() {
+        // Zero signature in both the re-signed execution receipt and the
+        // entropy block, so only the BLS check itself can reject it.
+        let zero = "00".repeat(48);
+        let json = build_valid_bundle(&entries(), Some("1013"), 2);
+        let mut val = resign_exec(&json, |exec| {
+            assert_eq!(exec["drand_signature"], BEACON_SIGNATURE);
+            exec["drand_signature"] = serde_json::json!(zero.clone());
+        });
+        val["entropy"]["drand_signature"] = serde_json::json!(zero);
+        assert!(!verify_bundle_wasm(&val.to_string()).unwrap());
     }
 }
