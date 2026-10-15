@@ -117,6 +117,14 @@ fn every_negative_case_fails_at_exactly_its_expected_steps() {
         V6_NEGATIVE_CASES.len(),
         "one reason per case"
     );
+    let mut names: Vec<&str> = NEGATIVE_CASE_REASONS.iter().map(|(n, _)| *n).collect();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(
+        names.len(),
+        NEGATIVE_CASE_REASONS.len(),
+        "case names in NEGATIVE_CASE_REASONS are unique"
+    );
     for (name, steps) in V6_NEGATIVE_CASES {
         let (json, pk_hex, kid) = v6_negative_bundle(name);
         let report = verify_json(&json, &pk_hex, &kid);
