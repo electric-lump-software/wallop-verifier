@@ -21,7 +21,7 @@ wasm-bindgen = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 serde_json = "1"
-drand-verify = { version = "0.6", optional = true }
+drand-verify = "0.6"
 clap = { version = "4", features = ["derive"], optional = true }
 ratatui = { version = "0.30", optional = true }
 crossterm = { version = "0.29", optional = true }
@@ -40,7 +40,7 @@ serde_jcs = { version = "0.2", optional = true }
 
 [features]
 default = []
-cli = ["clap", "drand-verify", "dep:ureq", "dep:serde_jcs"]
+cli = ["clap", "dep:ureq", "dep:serde_jcs"]
 tui = ["cli", "dep:ratatui", "dep:crossterm"]
 
 [[bin]]
@@ -51,6 +51,10 @@ required-features = ["cli"]
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
 ed25519-dalek = { version = "2", features = ["std"] }
+
+# Native-only: mockito pulls in tokio/mio, which do not build for wasm32,
+# and would stop `wasm-pack test` compiling the test harness.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 # Local mock HTTP server for resolver tests. Spawns an in-test TCP
 # listener and serves canned JSON responses against the shapes the
 # tier-2 / tier-1 resolvers consume.

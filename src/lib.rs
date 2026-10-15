@@ -7,7 +7,6 @@ mod wasm;
 #[cfg(feature = "cli")]
 pub mod anchors;
 
-#[cfg(feature = "cli")]
 pub mod drand;
 
 /// Internal catalog infrastructure for the `wallop-verify selftest` command.
