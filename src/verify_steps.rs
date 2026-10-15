@@ -36,8 +36,8 @@ pub enum StepName {
     /// valid on the pinned quicknet chain, `sha256(signature) ==
     /// randomness`, the bundle's `entropy` block equal to the receipt, and
     /// the round published strictly after the lock receipt's `locked_at`.
-    /// Under lock v6 / execution v5, also that the execution receipt's
-    /// `executed_at` is not before the round published.
+    /// Under lock v6 or execution v5 (either), also that the execution
+    /// receipt's `executed_at` is not before the round published.
     DrandBlsSignature,
     /// Cross-receipt field consistency — the cross-checked fields listed in
     /// spec §4.2.5 MUST be byte-identical. Bundle-envelope `draw_id` MUST
@@ -771,11 +771,11 @@ pub fn verify_bundle_with<R: KeyResolver>(
 
     // === Step 10: Cross-receipt field consistency ===
     //
-    // Every field duplicated across the lock and execution receipts MUST be
-    // byte-identical. Without this, an infrastructure-level attacker signing
-    // a fraudulent exec receipt can pair it with a legitimate lock from a
-    // different draw — `lock_receipt_hash` binds lock bytes INTO the exec
-    // but does not bind the exec's own duplicated fields back to the lock.
+    // The cross-checked fields below MUST be byte-identical. Without this,
+    // an infrastructure-level attacker signing a fraudulent exec receipt
+    // can pair it with a legitimate lock from a different draw —
+    // `lock_receipt_hash` binds lock bytes INTO the exec but does not bind
+    // the exec's own duplicated fields back to the lock.
     //
     // Fields checked (spec §4.2.5): draw_id, operator_id, sequence,
     // drand_chain, drand_round, weather_station. Bundle envelope draw_id
@@ -784,8 +784,9 @@ pub fn verify_bundle_with<R: KeyResolver>(
     // tag's station list (`check_landobs_stations`). See
     // `StepName::ReceiptFieldConsistency`. signing_key_id deliberately NOT
     // checked (lock = operator key, exec = infra key; different by design).
-    // operator_slug NOT checked (derivative of operator_id). Algorithm identity tags NOT
-    // cross-checked (validated per-receipt against pinned values already).
+    // operator_slug NOT checked (derivative of operator_id). Algorithm
+    // identity tags NOT cross-checked (validated per-receipt against pinned
+    // values already).
     steps.push(check_receipt_field_consistency(bundle));
 
     // === Step 11: Weather observation window ===
@@ -1406,11 +1407,13 @@ fn check_drand_beacon(bundle: &ProofBundle, exec: &serde_json::Value) -> Result<
     Ok(())
 }
 
-/// `executed_at` (canonical RFC 3339) must not be earlier than the quicknet
-/// publish time of `round`. Whole seconds suffice: for a whole number P,
-/// `executed_at >= P` iff `floor(executed_at) >= P`.
+/// `executed_at` (canonical RFC 3339, parsed with
+/// `chrono_parse_canonical_strict`, so a time that would normalise is
+/// rejected) must not be earlier than the quicknet publish time of `round`.
+/// Whole seconds suffice: for a whole number P, `executed_at >= P` iff
+/// `floor(executed_at) >= P`.
 pub(crate) fn drand_round_before_execution(round: u64, executed_at: &str) -> Result<(), String> {
-    let executed = chrono_parse_canonical(executed_at)
+    let executed = chrono_parse_canonical_strict(executed_at)
         .map_err(|e| format!("execution receipt executed_at ({executed_at}): {e}"))?;
     let published = crate::drand::quicknet_round_time(round)
         .ok_or_else(|| format!("drand round {round} has no quicknet publish time"))?;
@@ -1479,12 +1482,16 @@ fn check_landobs_stations(
     exec: &serde_json::Value,
 ) -> Result<(), String> {
     use crate::protocol::landobs_v1::{PRIMARY_STATION, STATIONS};
-    // A station renders as its quoted string, or `missing` when absent or
-    // not a string.
+    // A station renders as its quoted string, or `missing or not a string`.
     fn station(receipt: &serde_json::Value) -> Option<&str> {
         receipt.get("weather_station").and_then(|v| v.as_str())
     }
-    let render = |s: Option<&str>| s.map_or_else(|| "missing".to_string(), |s| format!("{s:?}"));
+    let render = |s: Option<&str>| {
+        s.map_or_else(
+            || "missing or not a string".to_string(),
+            |s| format!("{s:?}"),
+        )
+    };
     let lock_station = station(lock);
     if lock_station != Some(PRIMARY_STATION) {
         return Err(format!(

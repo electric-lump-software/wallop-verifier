@@ -636,8 +636,8 @@ pub const V6_NEGATIVE_CASES: &[(&str, &[&str])] = &[
 ];
 
 /// The signed bundle for one case in `V6_NEGATIVE_CASES`. Each case changes
-/// `V6Params::weather()` (or `fallback()`) and re-signs, so the named check
-/// is what fails. Returns `(bundle_json, public_key_hex, signing_key_id)`.
+/// `V6Params::weather()` (or `fallback()`) and re-signs, so exactly the
+/// steps listed in `V6_NEGATIVE_CASES` fail. Returns `(bundle_json, public_key_hex, signing_key_id)`.
 #[doc(hidden)]
 pub fn v6_negative_bundle(name: &str) -> (String, String, String) {
     let wt = landobs_v1::weather_time_for_round(BEACON_V6_ROUND)

@@ -534,4 +534,18 @@ mod wasm_resolved_keys_gate_tests {
             .unwrap()
         );
     }
+
+    #[wasm_bindgen_test]
+    fn v6_execution_before_round_published_fails_the_browser_gate() {
+        use crate::_test_support::v6_negative_bundle;
+        let (json, pk_hex, kid) = v6_negative_bundle("executed_before_round_published");
+        assert!(
+            !verify_bundle_with_resolved_keys_wasm(
+                &json,
+                resolved_keys(&pk_hex, &kid),
+                "attestable"
+            )
+            .unwrap()
+        );
+    }
 }

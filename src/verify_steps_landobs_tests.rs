@@ -522,7 +522,11 @@ fn station_errors_name_the_station_without_option_debug_text() {
     let exec = serde_json::json!({"weather_station": "wmo-03749", "weather_value": "x"});
     assert_eq!(
         check_landobs_stations(&serde_json::json!({}), &exec).unwrap_err(),
-        "lock weather_station missing is not the primary station wmo-03749"
+        "lock weather_station missing or not a string is not the primary station wmo-03749"
+    );
+    assert_eq!(
+        check_landobs_stations(&serde_json::json!({"weather_station": 3749}), &exec).unwrap_err(),
+        "lock weather_station missing or not a string is not the primary station wmo-03749"
     );
     assert_eq!(
         check_landobs_stations(&serde_json::json!({"weather_station": "wmo-03462"}), &exec)
@@ -537,7 +541,7 @@ fn station_errors_name_the_station_without_option_debug_text() {
     );
     assert_eq!(
         check_landobs_stations(&lock, &serde_json::json!({"weather_value": "x"})).unwrap_err(),
-        "exec weather_station missing is not one of \"wmo-03749\", \"wmo-03462\""
+        "exec weather_station missing or not a string is not one of \"wmo-03749\", \"wmo-03462\""
     );
 }
 
@@ -595,6 +599,25 @@ fn v6_execution_before_publication_fails() {
         ..V6Params::weather()
     };
     assert_step_fails(&run(&p), StepName::DrandBlsSignature, "before drand round");
+}
+
+#[test]
+fn v6_normalising_executed_at_fails_the_drand_step() {
+    // 09-31 is not a date; read leniently it becomes 10-01 20:00:05, five
+    // seconds after the round published.
+    assert_eq!(
+        format_canonical(published() + 5, 0),
+        "2026-10-01T20:00:05.000000Z"
+    );
+    let p = V6Params {
+        executed_at: "2026-09-31T20:00:05.000000Z".into(),
+        ..V6Params::weather()
+    };
+    assert_step_fails(
+        &run(&p),
+        StepName::DrandBlsSignature,
+        "execution receipt executed_at (2026-09-31T20:00:05.000000Z)",
+    );
 }
 
 #[test]

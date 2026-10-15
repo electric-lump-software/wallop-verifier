@@ -40,8 +40,83 @@ fn failing_steps(report: &VerificationReport) -> Vec<String> {
     got
 }
 
+/// For each case in `V6_NEGATIVE_CASES`, a substring of one failing step's
+/// message, so each case fails for the reason its name gives.
+const NEGATIVE_CASE_REASONS: &[(&str, &str)] = &[
+    ("weather_time_not_whole_hour", "is not a whole UTC hour"),
+    ("weather_time_not_calendar", "is not a valid calendar time"),
+    (
+        "weather_time_not_derived_from_round",
+        "is not the observation hour for drand round",
+    ),
+    (
+        "locked_at_after_latest_lock_at",
+        "is later than weather_time minus 46 minutes",
+    ),
+    (
+        "round_published_before_lock",
+        "not after lock receipt locked_at",
+    ),
+    (
+        "lock_station_not_first_in_tag",
+        "is not the primary station",
+    ),
+    ("exec_station_not_in_tag", "\"wmo-03772\" is not one of"),
+    (
+        "backup_named_on_fallback",
+        "a fallback execution receipt must name the primary station",
+    ),
+    (
+        "observation_time_not_weather_time",
+        "weather_observation_time 2026-10-01T20:00:00.000000Z must equal lock weather_time",
+    ),
+    (
+        "partial_fallback_value_null_reason_null",
+        "it has weather_value null, weather_observation_time null, weather_fallback_reason null",
+    ),
+    (
+        "partial_fallback_reason_set_value_set",
+        "it has weather_value set, weather_observation_time set, weather_fallback_reason set",
+    ),
+    ("value_grammar_minus_zero", "weather_value t is -0"),
+    ("value_grammar_leading_zero", "has a leading zero"),
+    ("value_grammar_three_parts", "must have 4 parts"),
+    ("value_out_of_bounds", "is outside [-900, 600]"),
+    (
+        "v5_reason_in_v6_exec",
+        "weather_fallback_reason \"unreachable\" is not \"no_observation_by_deadline\"",
+    ),
+    (
+        "wrong_entropy_composition",
+        "lock receipt validation: unknown entropy_composition",
+    ),
+    (
+        "wrong_entropy_composition_exec",
+        "exec receipt validation: unknown entropy_composition",
+    ),
+    ("lock_v6_with_exec_v4", "must be used together"),
+    ("lock_v5_with_exec_v5", "must be used together"),
+    (
+        "inline_key_on_lock_v6",
+        "lock receipt schema_version=\"6\" must not carry inline public_key_hex",
+    ),
+    (
+        "inline_key_on_exec_v5",
+        "execution receipt schema_version=\"5\" must not carry inline public_key_hex",
+    ),
+    (
+        "executed_before_round_published",
+        "is before drand round 32693812 was published",
+    ),
+];
+
 #[test]
 fn every_negative_case_fails_at_exactly_its_expected_steps() {
+    assert_eq!(
+        NEGATIVE_CASE_REASONS.len(),
+        V6_NEGATIVE_CASES.len(),
+        "one reason per case"
+    );
     for (name, steps) in V6_NEGATIVE_CASES {
         let (json, pk_hex, kid) = v6_negative_bundle(name);
         let report = verify_json(&json, &pk_hex, &kid);
@@ -49,6 +124,28 @@ fn every_negative_case_fails_at_exactly_its_expected_steps() {
         let mut want: Vec<String> = steps.iter().map(|s| s.to_string()).collect();
         want.sort();
         assert_eq!(failing_steps(&report), want, "{name}: {:?}", report.steps);
+
+        // Every step outside the expected set passes.
+        for step in &report.steps {
+            if !matches!(step.status, StepStatus::Fail(_)) {
+                assert_eq!(step.status, StepStatus::Pass, "{name}: {}", step.name);
+            }
+        }
+
+        // And at least one failing step fails for the named reason.
+        let reason = NEGATIVE_CASE_REASONS
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("{name} has no expected reason"))
+            .1;
+        assert!(
+            report
+                .steps
+                .iter()
+                .any(|s| matches!(&s.status, StepStatus::Fail(m) if m.contains(reason))),
+            "{name}: no failing step says {reason:?}: {:?}",
+            report.steps
+        );
     }
 }
 
