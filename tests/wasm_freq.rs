@@ -2,9 +2,9 @@
 //! full bundles through verify_bundle_with.
 #![cfg(target_arch = "wasm32")]
 
-use wallop_verifier::_test_support::{FreqParams, MockResolver, build_freq_bundle};
+use wallop_verifier::_test_support::{FreqParams, MockResolver, build_freq_bundle, resign_exec};
 use wallop_verifier::bundle::ProofBundle;
-use wallop_verifier::verify_steps::{VerifierMode, verify_bundle_with};
+use wallop_verifier::verify_steps::{StepName, StepStatus, VerifierMode, verify_bundle_with};
 use wasm_bindgen_test::*;
 
 fn report(p: &FreqParams) -> wallop_verifier::verify_steps::VerificationReport {
@@ -48,10 +48,43 @@ fn a_late_frequency_lock_fails_in_wasm() {
 }
 
 #[wasm_bindgen_test]
-fn a_weather_seed_over_a_frequency_value_fails_in_wasm() {
+fn a_drand_only_seed_over_a_frequency_value_fails_in_wasm() {
     let p = FreqParams {
         seed_from: Some(None),
         ..FreqParams::value()
     };
     assert!(!report(&p).passed());
+}
+
+/// The weather seed (`compute_seed`) over the signed `freq_value`, re-signed
+/// so only the seed step can refuse it.
+#[wasm_bindgen_test]
+fn a_weather_seed_over_a_frequency_value_fails_in_wasm() {
+    let (json, pk_hex, kid) = build_freq_bundle(&FreqParams::value());
+    let bundle = resign_exec(&json, |exec| {
+        let seed = wallop_verifier::compute_seed(
+            exec["entry_hash"].as_str().unwrap(),
+            exec["drand_randomness"].as_str().unwrap(),
+            exec["freq_value"].as_str().unwrap(),
+        )
+        .0;
+        exec["seed"] = serde_json::json!(hex::encode(seed));
+    });
+    let pk: [u8; 32] = hex::decode(pk_hex).unwrap().try_into().unwrap();
+    let r = verify_bundle_with(
+        &ProofBundle::from_json(&bundle.to_string()).unwrap(),
+        &MockResolver::new(&kid, pk),
+        VerifierMode::Attestable,
+    );
+    let seed_step = r
+        .steps
+        .iter()
+        .find(|s| s.name == StepName::SeedRecomputation)
+        .unwrap();
+    assert!(
+        matches!(&seed_step.status, StepStatus::Fail(m) if m.contains("drand + grid frequency")),
+        "{:?}",
+        r.steps
+    );
+    assert!(!r.passed());
 }

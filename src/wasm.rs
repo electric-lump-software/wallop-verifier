@@ -593,3 +593,108 @@ mod wasm_resolved_keys_gate_tests {
         );
     }
 }
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_freq_export_tests {
+    use super::{compute_seed_freq_wasm, verify_freq_wasm, verify_wasm};
+    use crate::_test_support::BEACON_FREQ_RANDOMNESS;
+    use crate::{
+        Entry, compute_seed, compute_seed_drand_only, compute_seed_freq, draw, entry_hash,
+    };
+    use wasm_bindgen_test::*;
+
+    const VALUE: &str = "50018;50012;49983;49980;49953;49912;49883;49887";
+    const DRAW_ID: &str = "22222222-2222-2222-2222-222222222222";
+
+    /// `compute_seed_freq_wasm` against core's frequency seed vector, through
+    /// the JavaScript-facing value it returns.
+    #[wasm_bindgen_test]
+    fn compute_seed_freq_wasm_matches_the_core_vector() {
+        let js = compute_seed_freq_wasm(&"ab".repeat(32), BEACON_FREQ_RANDOMNESS, VALUE).unwrap();
+        let out: serde_json::Value = serde_wasm_bindgen::from_value(js).unwrap();
+        assert_eq!(
+            out["seed"],
+            "ab4a8f4bba2b29e391e185625a5b963d026c9f8d3f84bd116aeeae31e864b295"
+        );
+        assert_eq!(
+            out["jcs"],
+            format!(
+                r#"{{"drand_randomness":"{BEACON_FREQ_RANDOMNESS}","entry_hash":"{}","freq_value":"{VALUE}"}}"#,
+                "ab".repeat(32)
+            )
+        );
+    }
+
+    /// `verify_freq_wasm` accepts winners drawn from the frequency seed (or,
+    /// with no value, the drand-only seed) and nothing else; `verify_wasm`
+    /// never accepts a frequency seed.
+    #[wasm_bindgen_test]
+    fn verify_freq_wasm_checks_the_frequency_seed() {
+        // Enough entries that the three seeds pick different winners.
+        let entries: Vec<Entry> = (0..20)
+            .map(|i| Entry {
+                id: format!("{i:08x}-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                weight: 1,
+            })
+            .collect();
+        let (ehash, _) = entry_hash(DRAW_ID, &entries);
+        let (seed, _) = compute_seed_freq(&ehash, BEACON_FREQ_RANDOMNESS, VALUE);
+        let winners = draw(&entries, &seed, 3).unwrap();
+        let (drand_seed, _) = compute_seed_drand_only(&ehash, BEACON_FREQ_RANDOMNESS);
+        let drand_winners = draw(&entries, &drand_seed, 3).unwrap();
+        let (weather_seed, _) = compute_seed(&ehash, BEACON_FREQ_RANDOMNESS, VALUE);
+        let weather_winners = draw(&entries, &weather_seed, 3).unwrap();
+        assert_ne!(winners, drand_winners);
+        assert_ne!(winners, weather_winners);
+        let js = |v: &dyn erased::Ser| v.to_js();
+        let call = |value: Option<&str>, expected: &[fair_pick_rs::Winner]| {
+            verify_freq_wasm(
+                DRAW_ID,
+                js(&entries),
+                BEACON_FREQ_RANDOMNESS,
+                value.map(str::to_string),
+                3,
+                js(&expected.to_vec()),
+            )
+            .unwrap()
+        };
+        assert!(call(Some(VALUE), &winners));
+        assert!(call(None, &drand_winners));
+        assert!(!call(None, &winners));
+        assert!(!call(Some(VALUE), &drand_winners));
+        assert!(
+            !verify_wasm(
+                DRAW_ID,
+                js(&entries),
+                BEACON_FREQ_RANDOMNESS,
+                Some(VALUE.into()),
+                3,
+                js(&winners),
+            )
+            .unwrap()
+        );
+        assert!(
+            verify_wasm(
+                DRAW_ID,
+                js(&entries),
+                BEACON_FREQ_RANDOMNESS,
+                Some(VALUE.into()),
+                3,
+                js(&weather_winners),
+            )
+            .unwrap()
+        );
+        assert!(!call(Some(VALUE), &weather_winners));
+    }
+
+    mod erased {
+        pub trait Ser {
+            fn to_js(&self) -> wasm_bindgen::JsValue;
+        }
+        impl<T: serde::Serialize> Ser for T {
+            fn to_js(&self) -> wasm_bindgen::JsValue {
+                serde_wasm_bindgen::to_value(self).unwrap()
+            }
+        }
+    }
+}
