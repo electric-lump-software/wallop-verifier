@@ -156,15 +156,12 @@ pub fn format_freq_start(secs: i64) -> String {
 /// a whole multiple of 15 seconds, and a real calendar time (the string must
 /// equal its own canonical rendering). Returns unix seconds.
 pub fn parse_freq_start(s: &str) -> Result<i64, String> {
-    let t = crate::verify_steps::chrono_parse_canonical(s)?;
+    let t = crate::verify_steps::chrono_parse_canonical_strict(s)?;
     let secs = t.timestamp();
     if t.subsec_micros() != 0 || secs.rem_euclid(SPACING_SECS) != 0 {
         return Err(format!(
             "{s} is not a whole multiple of {SPACING_SECS} seconds"
         ));
-    }
-    if format_freq_start(secs) != s {
-        return Err(format!("{s} is not a valid calendar time"));
     }
     Ok(secs)
 }
@@ -456,6 +453,10 @@ mod tests {
                 .unwrap_err()
                 .contains("multiple of 15")
         );
+        for bad in ["2026-10-14T19:53:60.000000Z", "2026-09-31T19:54:00.000000Z"] {
+            let err = parse_freq_start(bad).unwrap_err();
+            assert!(err.contains("valid calendar time"), "{bad}: {err}");
+        }
     }
 
     #[test]
