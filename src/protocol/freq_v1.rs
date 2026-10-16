@@ -238,8 +238,10 @@ pub fn reading_from_text(text: &str) -> Result<u32, String> {
 /// The row rule, identical to core's. `rows_from_body` turns an Elexon
 /// body's `data` list into rows:
 ///
+/// * a body that repeats a key in any object, at any depth, is refused
+///   whole (a first-wins and a last-wins reader would see different
+///   values, so the bytes would not prove one window);
 /// * a list item that is not a JSON object is dropped;
-/// * an object with a repeated key keeps the last value for that key;
 /// * an object whose `measurementTime` is missing or not a JSON string is
 ///   dropped (it matches no reading time);
 /// * every other object is a row, with `frequency` exactly as its JSON
@@ -277,16 +279,30 @@ pub fn window_from_rows(rows: &[(String, String)], freq_start: i64) -> Result<St
         .join(";"))
 }
 
+/// True when every one of the window's 8 reading times has at least one
+/// row, whatever the rows hold. Elexon does not revise FREQ readings, so
+/// with every time present the window is decided by the record: an invalid
+/// window then is not missing data.
+pub fn rows_at_every_reading_time(rows: &[(String, String)], freq_start: i64) -> bool {
+    (0..READINGS as i64).all(|i| {
+        freq_start
+            .checked_add(SPACING_SECS * i)
+            .and_then(|at| elexon_stamp(at).ok())
+            .is_some_and(|stamp| rows.iter().any(|(t, _)| *t == stamp))
+    })
+}
+
 /// An Elexon FREQ response body (`{"data": [...]}`) as rows for
-/// `window_from_rows`, under core's row rule: an item that is not a JSON
-/// object is dropped; an object with a repeated key keeps the last value;
-/// an object whose `measurementTime` is missing or not a JSON string is
+/// `window_from_rows`, under core's row rule: a body that repeats a key in
+/// any object, at any depth, is refused; an item that is not a JSON object
+/// is dropped; an object whose `measurementTime` is missing or not a JSON string is
 /// dropped; every other object is a row whose `frequency` is its exact JSON
 /// source text (`49.98`, `"49.98"`, `null`), or `""` when it has none, so a
 /// matching row without a reading still counts (invalid, or a duplicate).
 ///
-/// `Err` only when the body is not a JSON object with a `data` list.
-pub fn rows_from_body(body: &[u8]) -> Result<Vec<(String, String)>, String> {
+/// `Err` when the body is not a JSON object with a `data` list, or when it
+/// repeats a key (`duplicate key "..."`).
+pub fn rows_from_body(body_bytes: &[u8]) -> Result<Vec<(String, String)>, String> {
     use serde_json::value::RawValue;
     use std::collections::HashMap;
 
@@ -295,14 +311,23 @@ pub fn rows_from_body(body: &[u8]) -> Result<Vec<(String, String)>, String> {
         #[serde(borrow)]
         data: Vec<&'a RawValue>,
     }
-    let body: Body = serde_json::from_slice(body).map_err(|e| {
+    let not_freq = |e: &dyn std::fmt::Display| {
         format!("not an Elexon FREQ response (a JSON object with a data list): {e}")
+    };
+    // First, so a repeated top-level `data` is reported as a repeated key.
+    super::refuse_duplicate_keys(body_bytes).map_err(|e| {
+        if e.starts_with(super::DUPLICATE_KEY) {
+            e
+        } else {
+            not_freq(&e)
+        }
     })?;
+    let body: Body = serde_json::from_slice(body_bytes).map_err(|e| not_freq(&e))?;
     Ok(body
         .data
         .into_iter()
         .filter_map(|item| {
-            // Deserialising into a map keeps the last value of a repeated key.
+            // No key repeats (checked above), so the map holds every field.
             let row: HashMap<String, &RawValue> = serde_json::from_str(item.get()).ok()?;
             let time: String = serde_json::from_str(row.get("measurementTime")?.get()).ok()?;
             let frequency = row.get("frequency").map_or("", |v| v.get());
@@ -571,10 +596,10 @@ mod tests {
         let rows = rows_from_body(
             br#"{"data":[1,"x",null,[],true,{"frequency":50.1},{"measurementTime":7,"frequency":50.1},
             {"measurementTime":null,"frequency":50.1},
-            {"measurementTime":"a","frequency":49.98,"frequency":"50"},
+            {"measurementTime":"a","frequency":"50"},
             {"measurementTime":"b"},
             {"measurementTime":"c","frequency":null},
-            {"measurementTime":"x","measurementTime":"d", "frequency" :  49.987 },
+            {"measurementTime":"d", "frequency" :  49.987 },
             {"measurementTime":"e","frequency":4.9987e1}],"metadata":{}}"#,
         )
         .unwrap();
@@ -604,6 +629,67 @@ mod tests {
                 String::from_utf8_lossy(bad)
             );
         }
+    }
+
+    #[test]
+    fn rows_from_body_refuses_a_repeated_key_at_any_depth() {
+        for bad in [
+            r#"{"data":[],"data":[{"measurementTime":"a","frequency":50.1}]}"#,
+            r#"{"data":[{"measurementTime":"a","frequency":50.999,"frequency":49.883}]}"#,
+            r#"{"data":[{"measurementTime":"x","measurementTime":"a","frequency":50.1}]}"#,
+            r#"{"data":[{"measurementTime":"a","fr\u0065quency":1,"frequency":50.1}]}"#,
+            r#"{"data":[{"measurementTime":"a","frequency":50.1,"x":1,"x":1}]}"#,
+            r#"{"data":[[{"k":1,"k":2}]]}"#,
+            r#"{"data":[{"measurementTime":"a","extra":{"deep":[{"k":1,"k":1}]}}]}"#,
+            r#"{"data":[],"metadata":{"k":1,"k":2}}"#,
+        ] {
+            let err = rows_from_body(bad.as_bytes()).expect_err(bad);
+            assert!(err.starts_with("duplicate key \""), "{bad}: {err}");
+        }
+        // Equal values under different keys, and equal keys in different
+        // objects, are not repeats.
+        assert_eq!(
+            rows_from_body(
+                br#"{"data":[{"measurementTime":"a","frequency":1,"f":1},{"measurementTime":"a","frequency":1}],"metadata":{"data":1}}"#
+            )
+            .map(|r| r.len()),
+            Ok(2)
+        );
+    }
+
+    #[test]
+    fn refuse_duplicate_keys_keeps_numbers_as_text() {
+        assert_eq!(
+            crate::protocol::refuse_duplicate_keys(br#"{"a":1e999,"b":[-0.0,"x\"y",null,true]}"#),
+            Ok(())
+        );
+        assert_eq!(
+            crate::protocol::refuse_duplicate_keys(br#"{"a":1,"a":2}"#),
+            Err(r#"duplicate key "a""#.to_string())
+        );
+        for bad in [&b"{"[..], b"{} {}", b"", b"[1,]"] {
+            assert!(crate::protocol::refuse_duplicate_keys(bad).is_err());
+        }
+    }
+
+    #[test]
+    fn rows_at_every_reading_time_needs_a_row_at_each_of_the_8_times() {
+        let start = PUB - 360;
+        let all = rows(&REAL_TEXT);
+        assert!(rows_at_every_reading_time(&all, start));
+        let mut junk = all.clone();
+        for row in &mut junk {
+            row.1 = "0".into();
+        }
+        assert!(rows_at_every_reading_time(&junk, start));
+        for i in 0..READINGS {
+            let mut gap = all.clone();
+            gap.remove(i);
+            gap.push((stamp(start + 120), "50.001".into()));
+            assert!(!rows_at_every_reading_time(&gap, start), "{i}");
+        }
+        assert!(!rows_at_every_reading_time(&all, start + 15));
+        assert!(!rows_at_every_reading_time(&all, i64::MAX));
     }
 
     #[test]

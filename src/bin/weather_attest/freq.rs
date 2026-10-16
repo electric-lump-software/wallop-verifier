@@ -72,12 +72,17 @@ impl FreqAttestInput {
 ///
 /// - value signed, Elexon's window equal: `MATCH`;
 /// - value signed, Elexon's window valid but different: `MISMATCH`;
-/// - value signed, no valid window now, or any fetch error: `UNAVAILABLE`;
+/// - value signed, Elexon has a row at all 8 reading times but the window
+///   is invalid (a 0, out of bounds, a duplicate, malformed or stuck):
+///   `MISMATCH`. Elexon does not revise readings, so this contradicts the
+///   receipt; it is not missing data;
+/// - value signed, a reading time with no row, or any fetch or parse
+///   error: `UNAVAILABLE`;
 /// - fallback signed: `PRESENT` if Elexon now holds a valid window,
 ///   `ABSENT` if it does not, `UNAVAILABLE` on a fetch error.
 ///
-/// Only a valid window that differs from the signed one is a mismatch: a
-/// response that can't be read or holds no valid window never is.
+/// A response that can't be read, or lacks a reading time, is never a
+/// mismatch.
 pub(crate) fn attest(input: &FreqAttestInput, client: &http::ElexonClient) -> Vec<Line> {
     let label = format!("Elexon FREQ from {} UTC", &input.freq_start[11..19]);
     let outcome = match client.fetch(
@@ -94,6 +99,13 @@ pub(crate) fn attest(input: &FreqAttestInput, client: &http::ElexonClient) -> Ve
             }
             (Ok(now), Some(signed)) => {
                 Outcome::Mismatch(format!("Elexon has {now}, the receipt has {signed}"))
+            }
+            (Err(e), Some(signed))
+                if freq_v1::rows_at_every_reading_time(&rows, input.freq_start_unix) =>
+            {
+                Outcome::Mismatch(format!(
+                    "Elexon has all 8 reading times but no valid window ({e}), the receipt has {signed}"
+                ))
             }
             (Err(e), Some(_)) => {
                 Outcome::Unavailable(format!("Elexon has no valid window now: {e}"))
@@ -167,8 +179,8 @@ pub(crate) fn report(input: &FreqAttestInput, lines: &[Line]) -> String {
     out
 }
 
-/// The exit status for `lines`: 1 when Elexon's valid window differs from
-/// the signed one, else 0 (no mismatch was found, which is not a
+/// The exit status for `lines`: 1 on a mismatch (Elexon's record
+/// contradicts the signed window), else 0 (no mismatch was found, which is not a
 /// confirmation). Unusable input exits 2 before any lookup.
 pub(crate) fn exit_status(lines: &[Line]) -> u8 {
     if has_mismatch(lines) { 1 } else { 0 }
@@ -328,26 +340,76 @@ mod tests {
     }
 
     #[test]
-    fn no_valid_window_now_is_unavailable_never_a_match_or_mismatch() {
+    fn an_invalid_window_with_all_8_times_is_a_mismatch() {
         let mut zero = REAL_TEXT;
         zero[2] = "0";
+        let mut high = REAL_TEXT;
+        high[4] = "53.000";
+        let mut low = REAL_TEXT;
+        low[4] = "46.999";
         let mut quoted = REAL_TEXT;
         quoted[2] = "\"50.012\"";
-        let mut missing_body = body(&REAL_TEXT);
-        missing_body = missing_body.replace(r#""frequency":49.983"#, r#""x":1"#);
-        let duplicate_body = body(&REAL_TEXT).replace(
+        let stuck = ["50.001"; 8];
+        let no_reading = body(&REAL_TEXT).replace(r#""frequency":49.983"#, r#""x":1"#);
+        let duplicate = body(&REAL_TEXT).replace(
             r#"{"data":["#,
-            r#"{"data":[{"measurementTime":"2026-10-14T19:54:45Z"},"#,
+            r#"{"data":[{"measurementTime":"2026-10-14T19:54:45Z","frequency":49.983},"#,
         );
         for b in [
             body(&zero),
+            body(&high),
+            body(&low),
             body(&quoted),
-            missing_body,
-            duplicate_body,
+            body(&stuck),
+            no_reading,
+            duplicate,
+        ] {
+            let o = outcome(Some(REAL), 200, &b);
+            assert!(
+                matches!(&o, Outcome::Mismatch(d) if d.contains("all 8") && d.contains(REAL)),
+                "{b}: {o:?}"
+            );
+            let lines = vec![Line {
+                label: "x".into(),
+                outcome: o,
+            }];
+            assert_eq!(exit_status(&lines), 1);
+        }
+    }
+
+    #[test]
+    fn a_missing_reading_time_is_unavailable_never_a_match_or_mismatch() {
+        // A row at another time does not stand in for the missing one.
+        let off_window = body(&REAL_TEXT[..7]).replace(
+            r#"{"data":["#,
+            r#"{"data":[{"measurementTime":"2026-10-14T19:56:00Z","frequency":50.5},"#,
+        );
+        let mut zero = REAL_TEXT;
+        zero[2] = "0";
+        for b in [
             body(&REAL_TEXT[..7]),
+            body(&zero[..7]),
+            off_window,
+            r#"{"data":[]}"#.to_string(),
         ] {
             let o = outcome(Some(REAL), 200, &b);
             assert!(matches!(o, Outcome::Unavailable(_)), "{b}: {o:?}");
+        }
+    }
+
+    #[test]
+    fn a_body_with_a_repeated_key_is_unavailable() {
+        let b = body(&REAL_TEXT).replacen(
+            r#""frequency":49.883"#,
+            r#""frequency":50.999,"frequency":49.883"#,
+            1,
+        );
+        for value in [Some(REAL), None] {
+            let o = outcome(value, 200, &b);
+            assert!(
+                matches!(&o, Outcome::Unavailable(d) if d.contains("duplicate key")),
+                "{o:?}"
+            );
         }
     }
 

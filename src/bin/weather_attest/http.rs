@@ -56,7 +56,9 @@ impl LandObsClient {
     pub(crate) fn new(base_url: &str, key: &str) -> Self {
         // ureq re-sends custom headers on a redirect, so never follow one:
         // the key must only ever go to `base_url`. Over https, refuse any
-        // downgrade too (tests run against plain-http mock servers).
+        // downgrade too (tests run against plain-http mock servers);
+        // that relies on the caller passing the pinned https
+        // `LANDOBS_BASE_URL`.
         let agent = ureq::AgentBuilder::new()
             .timeout(TIMEOUT)
             .redirects(0)
@@ -86,8 +88,13 @@ impl LandObsClient {
             ));
         }
         let bytes = read_capped(response, "Land Observations")?;
-        serde_json::from_slice(&bytes)
-            .map_err(|e| format!("Land Observations response is not a list of rows: {e}"))
+        let rows = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("Land Observations response is not a list of rows: {e}"))?;
+        // A repeated key would let first-wins and last-wins readers see
+        // different observations in the same bytes, as for Elexon.
+        wallop_verifier::protocol::refuse_duplicate_keys(&bytes)
+            .map_err(|e| format!("Land Observations response: {e}"))?;
+        Ok(rows)
     }
 }
 
@@ -99,7 +106,9 @@ pub(crate) struct ElexonClient {
 impl ElexonClient {
     pub(crate) fn new(base_url: &str) -> Self {
         // Never follow a redirect, and over https refuse any downgrade
-        // (tests run against plain-http mock servers).
+        // (tests run against plain-http mock servers). `https_only` is
+        // decided from `base_url`, so it holds only because `run` passes
+        // the pinned `ELEXON_BASE_URL`, which is https (a test pins that).
         let agent = ureq::AgentBuilder::new()
             .timeout(TIMEOUT)
             .redirects(0)
@@ -165,8 +174,16 @@ impl OgimetClient {
         min_gap: Duration,
         sleep: Box<dyn Fn(Duration)>,
     ) -> Self {
+        // As for Elexon: never follow a redirect, and over https refuse
+        // any downgrade, which relies on the caller passing the pinned
+        // https `OGIMET_BASE_URL` (tests run against plain-http mocks).
+        let agent = ureq::AgentBuilder::new()
+            .timeout(TIMEOUT)
+            .redirects(0)
+            .https_only(base_url.starts_with("https://"))
+            .build();
         Self {
-            agent: ureq::AgentBuilder::new().timeout(TIMEOUT).build(),
+            agent,
             base_url: base_url.trim_end_matches('/').to_string(),
             min_gap,
             last_request: Cell::new(None),
@@ -176,8 +193,9 @@ impl OgimetClient {
 
     /// The SYNOP lines for WMO `block` from `begin` to `end` inclusive
     /// (each `YYYYMMDDHHmm`).
-    /// `Ok(None)` when the response is empty; anything else, including an
-    /// error page, is returned as text for the caller to parse.
+    /// `Ok(None)` when the response is empty; a redirect is an `Err` (it
+    /// is never followed); anything else, including an error page, is
+    /// returned as text for the caller to parse.
     pub(crate) fn fetch(
         &self,
         block: &str,
@@ -200,6 +218,9 @@ impl OgimetClient {
             .set("User-Agent", USER_AGENT)
             .call()
             .map_err(|e| describe("Ogimet", e))?;
+        if (300..400).contains(&response.status()) {
+            return Err(format!("Ogimet returned HTTP {}", response.status()));
+        }
         let body = String::from_utf8_lossy(&read_capped(response, "Ogimet")?).into_owned();
         Ok(if body.trim().is_empty() {
             None
@@ -438,6 +459,69 @@ mod tests {
         let waits = slept.borrow();
         assert_eq!(waits.len(), 1);
         assert!(waits[0] > Duration::from_secs(19), "{waits:?}");
+    }
+
+    #[test]
+    fn ogimet_is_https_and_never_follows_a_redirect() {
+        assert!(OGIMET_BASE_URL.starts_with("https://"));
+        let mut server = mockito::Server::new();
+        let target = server
+            .mock("GET", "/elsewhere")
+            .with_status(200)
+            .with_body("x")
+            .expect(0)
+            .create();
+        server
+            .mock("GET", "/cgi-bin/getsynop")
+            .match_query(Matcher::Any)
+            .with_status(302)
+            .with_header("location", &format!("{}/elsewhere", server.url()))
+            .with_body("redirect page")
+            .create();
+        let client = OgimetClient::with_pacing(&server.url(), Duration::ZERO, Box::new(|_| {}));
+        let err = client
+            .fetch("03749", "202610011900", "202610011900")
+            .unwrap_err();
+        assert_eq!(err, "Ogimet returned HTTP 302");
+        target.assert();
+    }
+
+    #[test]
+    fn https_clients_refuse_a_plain_http_url() {
+        // Nothing listens on port 9; https_only refuses before connecting.
+        let refused = |agent: &ureq::Agent| {
+            let err = agent.get("http://127.0.0.1:9/").call().unwrap_err();
+            matches!(&err, ureq::Error::Transport(t)
+                if t.kind() == ureq::ErrorKind::InsecureRequestHttpsOnly)
+        };
+        assert!(refused(&ElexonClient::new("https://127.0.0.1:9").agent));
+        assert!(refused(
+            &OgimetClient::with_pacing("https://127.0.0.1:9", Duration::ZERO, Box::new(|_| {}))
+                .agent
+        ));
+        assert!(refused(
+            &LandObsClient::new("https://127.0.0.1:9", "k").agent
+        ));
+        assert!(!refused(&OgimetClient::new("http://127.0.0.1:9").agent));
+    }
+
+    #[test]
+    fn landobs_refuses_a_body_with_a_repeated_key() {
+        for body in [
+            r#"[{"datetime":"2026-10-01T19:00:00Z","temperature":1,"temperature":18.38}]"#,
+            r#"[{"datetime":"2026-10-01T19:00:00Z","datetime":"2026-10-01T18:00:00Z"}]"#,
+        ] {
+            let mut server = mockito::Server::new();
+            server
+                .mock("GET", "/gcnfur")
+                .with_status(200)
+                .with_body(body)
+                .create();
+            let err = LandObsClient::new(&server.url(), "k")
+                .fetch("gcnfur")
+                .unwrap_err();
+            assert!(err.contains("duplicate key"), "{body}: {err}");
+        }
     }
 
     #[test]

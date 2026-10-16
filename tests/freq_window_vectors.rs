@@ -6,7 +6,8 @@
 //! failure if it is missing once any v6 vector is vendored; before that,
 //! `WALLOP_FREQ_WINDOW_VECTORS` or `WALLOP_CORE_VECTORS_DIR`. It prints which
 //! file it used. Each body goes through `freq_v1::rows_from_body`, the parser
-//! `weather-attest` uses, so the row rule is checked end to end.
+//! `weather-attest` uses, so the row rule is checked end to end; a body it
+//! refuses (a repeated key) must be one core calls invalid.
 
 use wallop_verifier::protocol::freq_v1::{
     format_freq_start, parse_freq_start, rows_from_body, window_from_rows,
@@ -25,6 +26,7 @@ fn expected_fragment(reason: &str) -> &'static str {
     match reason {
         "missing" => "no reading for",
         "duplicate" => "more than one reading for",
+        "duplicate_key" => "duplicate key \"",
         "zero" => "reading is 0",
         "out_of_bounds" => "is outside [",
         "invalid" => "",
@@ -47,9 +49,9 @@ fn freq_window_vectors_match_core() {
     let (mut valid, mut invalid) = (0, 0);
     for case in cases {
         let name = case["name"].as_str().expect("name");
-        let rows = rows_from_body(case["body"].as_str().expect("body").as_bytes())
-            .unwrap_or_else(|e| panic!("{name}: {e}"));
-        let got = window_from_rows(&rows, start);
+        // A body that repeats a key is refused whole (`duplicate_key`).
+        let got = rows_from_body(case["body"].as_str().expect("body").as_bytes())
+            .and_then(|rows| window_from_rows(&rows, start));
         match (&case["value"], &case["invalid"]) {
             (serde_json::Value::String(value), serde_json::Value::Null) => {
                 assert_eq!(got.as_deref(), Ok(value.as_str()), "{name}");
@@ -63,7 +65,14 @@ fn freq_window_vectors_match_core() {
                     "{name}: core says {reason}, got {err:?}"
                 );
                 if reason == "invalid" {
-                    for other in ["missing", "duplicate", "zero", "out_of_bounds", "stuck"] {
+                    for other in [
+                        "missing",
+                        "duplicate",
+                        "duplicate_key",
+                        "zero",
+                        "out_of_bounds",
+                        "stuck",
+                    ] {
                         assert!(
                             !err.contains(expected_fragment(other)),
                             "{name}: core says invalid, got {err:?}"
