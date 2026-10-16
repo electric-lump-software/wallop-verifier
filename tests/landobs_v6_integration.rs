@@ -133,9 +133,27 @@ fn every_negative_case_fails_at_exactly_its_expected_steps() {
         want.sort();
         assert_eq!(failing_steps(&report), want, "{name}: {:?}", report.steps);
 
-        // Every step outside the expected set passes.
+        // Every step outside the expected set passes, except that a pair
+        // with no seed rule skips the seed and winner steps (a Skip never
+        // passes the report).
         for step in &report.steps {
-            if !matches!(step.status, StepStatus::Fail(_)) {
+            if matches!(step.status, StepStatus::Fail(_)) {
+                continue;
+            }
+            let no_seed_rule = matches!(
+                &step.status,
+                StepStatus::Skip(r) if r.starts_with("no seed rule for this tag pair")
+            );
+            if no_seed_rule {
+                assert!(
+                    matches!(
+                        step.name,
+                        StepName::SeedRecomputation | StepName::WinnerSelection
+                    ),
+                    "{name}: {} skipped",
+                    step.name
+                );
+            } else {
                 assert_eq!(step.status, StepStatus::Pass, "{name}: {}", step.name);
             }
         }

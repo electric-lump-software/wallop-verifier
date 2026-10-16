@@ -637,6 +637,25 @@ fn legacy_v4_exec_before_publication_still_passes_the_drand_step() {
     );
 }
 
+/// The seed and winner steps, which a pair with no seed rule skips.
+fn is_seed_step(name: StepName) -> bool {
+    matches!(
+        name,
+        StepName::SeedRecomputation | StepName::WinnerSelection
+    )
+}
+
+/// A pair with no seed rule skips the seed and winner steps: never a pass,
+/// never a guessed derivation.
+fn assert_no_seed_rule_skip(step: &StepResult, case: &str) {
+    assert!(
+        matches!(&step.status, StepStatus::Skip(r) if r.starts_with("no seed rule for this tag pair")),
+        "{case}: {} is {:?}",
+        step.name,
+        step.status
+    );
+}
+
 #[test]
 fn mismatched_schema_pairs_fail_exactly_shape_window_and_consistency() {
     let forecast = crate::protocol::receipts::ENTROPY_COMPOSITION.to_string();
@@ -665,6 +684,8 @@ fn mismatched_schema_pairs_fail_exactly_shape_window_and_consistency() {
                     step.name,
                     step.status
                 );
+            } else if is_seed_step(step.name) {
+                assert_no_seed_rule_skip(step, &format!("{p:?}"));
             } else {
                 assert_eq!(step.status, StepStatus::Pass, "{p:?}: {}", step.name);
             }
@@ -770,7 +791,9 @@ fn assert_fails_closed(report: &VerificationReport, case: &str) {
     assert_eq!(failing(report), FAILS_CLOSED, "{case}: {:?}", report.steps);
     assert!(!report.passed(), "{case}");
     for step in &report.steps {
-        if !FAILS_CLOSED.contains(&step.name) {
+        if is_seed_step(step.name) {
+            assert_no_seed_rule_skip(step, case);
+        } else if !FAILS_CLOSED.contains(&step.name) {
             assert!(
                 matches!(step.status, StepStatus::Pass | StepStatus::NotApplicable(_)),
                 "{case}: {} is {:?}",

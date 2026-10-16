@@ -292,17 +292,19 @@ fn the_seed_input_is_chosen_by_the_pair_from_the_signed_receipt() {
     );
     // A non-string value is malformed, never "no frequency".
     let e = exec(freq, serde_json::json!({"freq_value": 50012}));
-    assert!(
-        SeedInput::from_receipts(&lock(freq), &e)
-            .unwrap_err()
-            .contains("freq_value is neither a string nor null")
-    );
+    assert!(matches!(
+        SeedInput::from_receipts(&lock(freq), &e),
+        Err(SeedError::Invalid(r)) if r.contains("freq_value is neither a string nor null")
+    ));
     // A weather value under the frequency pair is refused, never used.
     let e = exec(
         freq,
         serde_json::json!({"weather_value": "141;1025;85;2432"}),
     );
-    assert!(SeedInput::from_receipts(&lock(freq), &e).is_err());
+    assert!(matches!(
+        SeedInput::from_receipts(&lock(freq), &e),
+        Err(SeedError::Invalid(_))
+    ));
     let e = exec(
         freq,
         serde_json::json!({"weather_value": null, "freq_value": v}),
@@ -325,12 +327,33 @@ fn the_seed_input_is_chosen_by_the_pair_from_the_signed_receipt() {
         SeedInput::from_receipts(&lock(landobs), &e),
         Ok(SeedInput::Weather("141;1025;85;2432"))
     );
-    // A mismatched pair never takes the frequency seed.
-    let e = exec(freq, serde_json::json!({"freq_value": v}));
-    assert_eq!(
-        SeedInput::from_receipts(&lock(landobs), &e),
-        Ok(SeedInput::DrandOnly)
-    );
+    // A mismatched or unknown pair has no seed rule at all.
+    for (l, e) in [
+        (
+            lock(landobs),
+            exec(freq, serde_json::json!({"freq_value": v})),
+        ),
+        (
+            lock(freq),
+            exec(
+                landobs,
+                serde_json::json!({"weather_value": "141;1025;85;2432"}),
+            ),
+        ),
+        (
+            lock("drand-quicknet+elexon-freq-v2"),
+            exec(freq, serde_json::json!({"freq_value": v})),
+        ),
+        (lock(freq), exec("", serde_json::json!({"freq_value": v}))),
+    ] {
+        assert!(
+            matches!(
+                SeedInput::from_receipts(&l, &e),
+                Err(SeedError::NoRule(r)) if r.starts_with("no seed rule for this tag pair")
+            ),
+            "{l} {e}"
+        );
+    }
 
     let (eh, r) = (
         "ab".repeat(32),
@@ -563,6 +586,82 @@ fn an_inline_key_on_a_freq_receipt_wrapper_fails_shape() {
         let report = run_json(&v.to_string(), &pk, &kid);
         let reason = fail_reason(&report, StepName::BundleShape);
         assert!(reason.contains("downgrade-relabel"), "{wrapper}: {reason}");
+        assert!(!report.passed());
+    }
+}
+
+fn skipped(report: &VerificationReport, name: StepName) -> String {
+    match status(report, name) {
+        StepStatus::Skip(r) => r.clone(),
+        other => panic!("{name}: expected a skip, got {other:?}"),
+    }
+}
+
+/// A pair with no seed rule skips the seed and winner steps (never a
+/// pass), while the pairing steps fail it, so the bundle fails.
+#[test]
+fn a_mismatched_pair_skips_the_seed_and_winner_steps_and_fails() {
+    let p = FreqParams {
+        exec_entropy_composition: crate::protocol::landobs_v1::ENTROPY_COMPOSITION.into(),
+        ..FreqParams::value()
+    };
+    let (json, pk, kid) = build_freq_bundle(&p);
+    // Re-sign the exec as a well-formed Land Observations v5 receipt, so
+    // both receipts are valid known pairs that differ.
+    let v = crate::_test_support::resign_exec(&json, |exec| {
+        let o = exec.as_object_mut().unwrap();
+        o.remove("freq_value");
+        o.remove("freq_fallback_reason");
+        exec["weather_station"] = serde_json::json!("wmo-03749");
+        exec["weather_fallback_reason"] = serde_json::json!("no_observation_by_deadline");
+    });
+    let mut v = v;
+    v["entropy"].as_object_mut().unwrap().remove("freq_value");
+    let report = run_json(&v.to_string(), &pk, &kid);
+    assert_eq!(status(&report, StepName::ExecSignature), &StepStatus::Pass);
+    for step in [StepName::SeedRecomputation, StepName::WinnerSelection] {
+        let reason = skipped(&report, step);
+        assert!(
+            reason.contains("no seed rule for this tag pair") && reason.contains(TAG_PAIRING_ERROR),
+            "{step}: {reason}"
+        );
+    }
+    assert_only(
+        &report,
+        &[
+            StepName::BundleShape,
+            StepName::WeatherObservationWindow,
+            StepName::ReceiptFieldConsistency,
+        ],
+    );
+}
+
+#[test]
+fn an_unknown_pair_skips_the_seed_and_winner_steps_and_fails() {
+    // An unknown tag on schema 6 / 5 parses on the Land Observations shape,
+    // so the signatures verify and only the pair is unknown.
+    for tag in [
+        "drand-quicknet+elexon-freq-v2",
+        "drand-quicknet+metoffice-landobs-v2",
+    ] {
+        let p = V6Params {
+            lock_entropy_composition: tag.into(),
+            exec_entropy_composition: tag.into(),
+            ..V6Params::weather()
+        };
+        let (json, pk, kid) = build_v6_bundle(&p);
+        let report = run_json(&json, &pk, &kid);
+        assert_eq!(status(&report, StepName::ExecSignature), &StepStatus::Pass);
+        for step in [StepName::SeedRecomputation, StepName::WinnerSelection] {
+            let reason = skipped(&report, step);
+            assert!(
+                reason.contains("no seed rule for this tag pair")
+                    && reason.contains("not a combination this verifier knows"),
+                "{tag} {step}: {reason}"
+            );
+        }
+        assert!(failing(&report).contains(&StepName::BundleShape));
+        assert!(failing(&report).contains(&StepName::ReceiptFieldConsistency));
         assert!(!report.passed());
     }
 }

@@ -651,9 +651,19 @@ pub fn verify_bundle_with<R: KeyResolver>(
             detail: None,
         });
         step6_pass = false;
+    } else if let Err(SeedError::NoRule(reason)) = &seed_input {
+        // No seed derivation is defined for this pair. The steps that pick
+        // their rules from the pair fail it, and a Skip never passes.
+        steps.push(StepResult {
+            name: StepName::SeedRecomputation,
+            status: StepStatus::Skip(reason.clone()),
+            detail: None,
+        });
+        step6_pass = false;
     } else {
         match &seed_input {
-            Err(reason) => {
+            Err(SeedError::NoRule(_)) => unreachable!("handled above"),
+            Err(SeedError::Invalid(reason)) => {
                 steps.push(StepResult {
                     name: StepName::SeedRecomputation,
                     status: StepStatus::Fail(reason.clone()),
@@ -690,7 +700,13 @@ pub fn verify_bundle_with<R: KeyResolver>(
     }
 
     // === Step 7: Winner selection ===
-    if !step6_pass || !step3_pass {
+    if let (true, Err(SeedError::NoRule(reason))) = (step3_pass, &seed_input) {
+        steps.push(StepResult {
+            name: StepName::WinnerSelection,
+            status: StepStatus::Skip(reason.clone()),
+            detail: None,
+        });
+    } else if !step6_pass || !step3_pass {
         steps.push(StepResult {
             name: StepName::WinnerSelection,
             status: StepStatus::Skip("seed or exec signature failed".into()),
@@ -1042,41 +1058,58 @@ enum SeedInput<'a> {
     Freq(&'a str),
 }
 
+/// Why `SeedInput::from_receipts` gives no seed input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SeedError {
+    /// The receipts' (schema, tag) pair has no seed derivation (a
+    /// mismatched or unrecognised pair). The seed and winner steps are
+    /// skipped; a Skip never passes, and the steps that choose their rules
+    /// from the pair fail it.
+    NoRule(String),
+    /// The pair has a rule, but the signed receipt breaks it.
+    Invalid(String),
+}
+
 impl<'a> SeedInput<'a> {
     /// Under the grid-frequency pair the seed comes from `freq_value`, and a
-    /// non-null `weather_value` is refused. Under every other pair it comes
-    /// from `weather_value` as before (an unknown or mismatched pair fails
-    /// the steps that pick their rules from the pair). Absent or null means
-    /// drand only; any other non-string value fails.
+    /// non-null `weather_value` is refused. Under the forecast and Land
+    /// Observations pairs it comes from `weather_value` as before. A
+    /// mismatched or unrecognised pair has no seed rule (`SeedError::NoRule`).
+    /// Absent or null means drand only; any other non-string value fails.
     fn from_receipts(
         lock: &serde_json::Value,
         exec: &'a serde_json::Value,
-    ) -> Result<SeedInput<'a>, String> {
+    ) -> Result<SeedInput<'a>, SeedError> {
         fn signed_text<'a>(
             exec: &'a serde_json::Value,
             key: &str,
-        ) -> Result<Option<&'a str>, String> {
+        ) -> Result<Option<&'a str>, SeedError> {
             match exec.get(key).filter(|v| !v.is_null()) {
                 None => Ok(None),
-                Some(v) => v
-                    .as_str()
-                    .map(Some)
-                    .ok_or_else(|| format!("exec receipt {key} is neither a string nor null")),
+                Some(v) => v.as_str().map(Some).ok_or_else(|| {
+                    SeedError::Invalid(format!("exec receipt {key} is neither a string nor null"))
+                }),
             }
         }
-        if weather_rules(lock, exec) == WeatherRules::Freq {
-            if exec.get("weather_value").is_some_and(|v| !v.is_null()) {
-                return Err(format!(
-                    "exec receipt weather_value must be null under {}",
-                    crate::protocol::freq_v1::ENTROPY_COMPOSITION
-                ));
+        match weather_rules(lock, exec) {
+            WeatherRules::Freq => {
+                if exec.get("weather_value").is_some_and(|v| !v.is_null()) {
+                    return Err(SeedError::Invalid(format!(
+                        "exec receipt weather_value must be null under {}",
+                        crate::protocol::freq_v1::ENTROPY_COMPOSITION
+                    )));
+                }
+                Ok(signed_text(exec, "freq_value")?.map_or(SeedInput::DrandOnly, SeedInput::Freq))
             }
-            Ok(signed_text(exec, "freq_value")?.map_or(SeedInput::DrandOnly, SeedInput::Freq))
-        } else {
-            Ok(
-                signed_text(exec, "weather_value")?
-                    .map_or(SeedInput::DrandOnly, SeedInput::Weather),
-            )
+            WeatherRules::Legacy | WeatherRules::LandObs => Ok(signed_text(exec, "weather_value")?
+                .map_or(SeedInput::DrandOnly, SeedInput::Weather)),
+            WeatherRules::Mismatched => Err(SeedError::NoRule(format!(
+                "no seed rule for this tag pair: {}",
+                mismatch_reason(lock, exec)
+            ))),
+            WeatherRules::Unrecognised(reason) => Err(SeedError::NoRule(format!(
+                "no seed rule for this tag pair: {reason}"
+            ))),
         }
     }
 
