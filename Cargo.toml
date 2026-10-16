@@ -51,6 +51,9 @@ required-features = ["cli"]
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
 ed25519-dalek = { version = "2", features = ["std"] }
+# The grid-frequency window vector test reads each Elexon row's JSON
+# number text exactly, as `weather-attest` does.
+serde_json = { version = "1", features = ["raw_value"] }
 
 # Native-only: mockito pulls in tokio/mio, which do not build for wasm32,
 # and would stop `wasm-pack test` compiling the test harness.
