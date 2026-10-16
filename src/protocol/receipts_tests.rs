@@ -1201,3 +1201,274 @@ fn unknown_exec_schema_message_lists_5() {
         .to_string();
     assert!(exec.contains("\"5\""), "{exec}");
 }
+
+// ---- Grid-frequency tag: lock v6 / execution v5 ----
+
+use crate::_test_support::{freq_exec_json, freq_lock_json};
+
+fn parse_freq_lock(v: &serde_json::Value) -> Result<LockReceiptV6Freq, String> {
+    match parse_lock_receipt(&v.to_string()).map_err(|e| e.to_string())? {
+        ParsedLockReceipt::V6Freq(p) => Ok(p),
+        other => Err(format!("parsed as {other:?}")),
+    }
+}
+
+fn parse_freq_exec(v: &serde_json::Value) -> Result<ExecutionReceiptV5Freq, String> {
+    match parse_execution_receipt(&v.to_string()).map_err(|e| e.to_string())? {
+        ParsedExecutionReceipt::V5Freq(p) => Ok(p),
+        other => Err(format!("parsed as {other:?}")),
+    }
+}
+
+#[test]
+fn freq_lock_has_20_fields_and_validates() {
+    assert_eq!(freq_lock_json().as_object().unwrap().len(), 20);
+    let p = parse_freq_lock(&freq_lock_json()).unwrap();
+    assert_eq!(p.freq_start, "2026-10-14T19:54:00.000000Z");
+    assert_eq!(validate_lock_receipt_tags_v6_freq(&p), Ok(()));
+}
+
+#[test]
+fn freq_lock_rejects_weather_fields_an_unaligned_freq_start_and_bad_tags() {
+    for (field, value) in [
+        ("weather_station", serde_json::json!("wmo-03749")),
+        (
+            "weather_time",
+            serde_json::json!("2026-10-14T19:00:00.000000Z"),
+        ),
+        (
+            "freq_start",
+            serde_json::json!("2026-10-14T19:54:16.000000Z"),
+        ),
+        (
+            "freq_start",
+            serde_json::json!("2026-10-14T19:53:60.000000Z"),
+        ),
+        ("freq_start", serde_json::json!("2026-10-14T19:54:00Z")),
+        ("jcs_version", serde_json::json!("sha256-jcs-v2")),
+        ("signature_algorithm", serde_json::json!("ed448")),
+        ("signing_key_id", serde_json::json!("")),
+    ] {
+        let mut v = freq_lock_json();
+        v[field] = value.clone();
+        let p = parse_freq_lock(&v).unwrap();
+        assert!(
+            validate_lock_receipt_tags_v6_freq(&p).is_err(),
+            "{field} = {value}"
+        );
+    }
+    // Fed a hand-built struct, the validator still pins the tag and schema.
+    let mut p = parse_freq_lock(&freq_lock_json()).unwrap();
+    p.entropy_composition = landobs_v1::ENTROPY_COMPOSITION.into();
+    assert!(validate_lock_receipt_tags_v6_freq(&p).is_err());
+    let mut p = parse_freq_lock(&freq_lock_json()).unwrap();
+    p.schema_version = "5".into();
+    assert!(validate_lock_receipt_tags_v6_freq(&p).is_err());
+}
+
+#[test]
+fn a_missing_null_field_or_an_extra_field_is_a_shape_mismatch() {
+    for field in ["weather_station", "weather_time", "freq_start"] {
+        let mut v = freq_lock_json();
+        v.as_object_mut().unwrap().remove(field);
+        assert!(
+            matches!(
+                parse_lock_receipt(&v.to_string()),
+                Err(ParseLockReceiptError::PayloadShapeMismatch(_))
+            ),
+            "{field}"
+        );
+    }
+    for field in [
+        "freq_fallback_reason",
+        "freq_value",
+        "weather_value",
+        "weather_station",
+        "weather_observation_time",
+        "weather_fallback_reason",
+    ] {
+        let mut v = freq_exec_json();
+        v.as_object_mut().unwrap().remove(field);
+        assert!(
+            matches!(
+                parse_execution_receipt(&v.to_string()),
+                Err(ParseExecutionReceiptError::PayloadShapeMismatch(_))
+            ),
+            "{field}"
+        );
+    }
+    let mut v = freq_lock_json();
+    v["weather_value"] = serde_json::Value::Null;
+    assert!(matches!(
+        parse_lock_receipt(&v.to_string()),
+        Err(ParseLockReceiptError::PayloadShapeMismatch(_))
+    ));
+    let mut v = freq_exec_json();
+    v["freq_start"] = serde_json::Value::Null;
+    assert!(matches!(
+        parse_execution_receipt(&v.to_string()),
+        Err(ParseExecutionReceiptError::PayloadShapeMismatch(_))
+    ));
+}
+
+#[test]
+fn a_freq_receipt_with_a_wrong_typed_field_is_a_shape_mismatch() {
+    let mut v = freq_lock_json();
+    v["freq_start"] = serde_json::Value::Null;
+    assert!(matches!(
+        parse_lock_receipt(&v.to_string()),
+        Err(ParseLockReceiptError::PayloadShapeMismatch(_))
+    ));
+    let mut v = freq_exec_json();
+    v["freq_value"] = serde_json::json!(50018);
+    assert!(matches!(
+        parse_execution_receipt(&v.to_string()),
+        Err(ParseExecutionReceiptError::PayloadShapeMismatch(_))
+    ));
+}
+
+#[test]
+fn a_duplicate_key_is_a_shape_mismatch() {
+    let json =
+        freq_lock_json()
+            .to_string()
+            .replacen("\"sequence\":1", "\"sequence\":1,\"sequence\":2", 1);
+    assert_ne!(json, freq_lock_json().to_string());
+    assert!(matches!(
+        parse_lock_receipt(&json),
+        Err(ParseLockReceiptError::PayloadShapeMismatch(_))
+    ));
+    let json =
+        freq_exec_json()
+            .to_string()
+            .replacen("\"sequence\":1", "\"sequence\":1,\"sequence\":2", 1);
+    assert_ne!(json, freq_exec_json().to_string());
+    assert!(matches!(
+        parse_execution_receipt(&json),
+        Err(ParseExecutionReceiptError::PayloadShapeMismatch(_))
+    ));
+}
+
+#[test]
+fn a_landobs_lock_with_freq_start_is_a_shape_mismatch() {
+    let mut v = freq_lock_json();
+    v["entropy_composition"] = serde_json::json!(landobs_v1::ENTROPY_COMPOSITION);
+    assert!(matches!(
+        parse_lock_receipt(&v.to_string()),
+        Err(ParseLockReceiptError::PayloadShapeMismatch(_))
+    ));
+}
+
+#[test]
+fn an_unknown_tag_on_schema_6_or_5_never_parses_as_frequency() {
+    // A near-miss tag goes down the Land Observations path, whose shape
+    // has no freq fields, so it fails to parse at all.
+    for tag in [
+        "drand-quicknet+elexon-freq-v2",
+        "DRAND-QUICKNET+ELEXON-FREQ-V1",
+        "",
+    ] {
+        let mut v = freq_lock_json();
+        v["entropy_composition"] = serde_json::json!(tag);
+        assert!(parse_lock_receipt(&v.to_string()).is_err(), "{tag}");
+        let mut v = freq_exec_json();
+        v["entropy_composition"] = serde_json::json!(tag);
+        assert!(parse_execution_receipt(&v.to_string()).is_err(), "{tag}");
+    }
+    // A non-string tag likewise.
+    let mut v = freq_lock_json();
+    v["entropy_composition"] = serde_json::json!(1);
+    assert!(parse_lock_receipt(&v.to_string()).is_err());
+}
+
+#[test]
+fn the_frequency_tag_on_other_schemas_never_parses_as_frequency() {
+    let mut v = freq_lock_json();
+    v["schema_version"] = serde_json::json!("5");
+    assert!(parse_lock_receipt(&v.to_string()).is_err());
+    let mut v = freq_exec_json();
+    v["schema_version"] = serde_json::json!("4");
+    assert!(parse_execution_receipt(&v.to_string()).is_err());
+}
+
+#[test]
+fn freq_exec_has_28_fields_and_validates_value_and_fallback() {
+    assert_eq!(freq_exec_json().as_object().unwrap().len(), 28);
+    assert_eq!(
+        validate_execution_receipt_tags_v5_freq(&parse_freq_exec(&freq_exec_json()).unwrap()),
+        Ok(())
+    );
+
+    let mut fallback = freq_exec_json();
+    fallback["freq_value"] = serde_json::Value::Null;
+    fallback["freq_fallback_reason"] = serde_json::json!("no_frequency_by_deadline");
+    assert_eq!(
+        validate_execution_receipt_tags_v5_freq(&parse_freq_exec(&fallback).unwrap()),
+        Ok(())
+    );
+}
+
+#[test]
+fn freq_exec_rejects_weather_fields_other_reasons_and_bad_values() {
+    for (field, value) in [
+        ("weather_station", serde_json::json!("wmo-03749")),
+        ("weather_value", serde_json::json!("141;1025;85;2432")),
+        (
+            "weather_observation_time",
+            serde_json::json!("2026-10-14T19:00:00.000000Z"),
+        ),
+        (
+            "weather_fallback_reason",
+            serde_json::json!("no_observation_by_deadline"),
+        ),
+        (
+            "freq_fallback_reason",
+            serde_json::json!("no_observation_by_deadline"),
+        ),
+        ("freq_fallback_reason", serde_json::json!("")),
+        (
+            "freq_value",
+            serde_json::json!("50000;50000;50000;50000;50000;50000;50012;50013"),
+        ),
+        (
+            "freq_value",
+            serde_json::json!("53000;50012;49983;49980;49953;49912;49883;49887"),
+        ),
+        (
+            "freq_value",
+            serde_json::json!("50018;50012;49983;49980;49953;49912;49883"),
+        ),
+        ("jcs_version", serde_json::json!("sha256-jcs-v2")),
+        ("signature_algorithm", serde_json::json!("ed448")),
+        (
+            "drand_signature_algorithm",
+            serde_json::json!("bls12_381_g1"),
+        ),
+        ("merkle_algorithm", serde_json::json!("sha256-pairwise-v2")),
+        ("signing_key_id", serde_json::json!("")),
+    ] {
+        let mut v = freq_exec_json();
+        v[field] = value.clone();
+        let p = parse_freq_exec(&v).unwrap();
+        assert!(
+            validate_execution_receipt_tags_v5_freq(&p).is_err(),
+            "{field} = {value}"
+        );
+    }
+    let mut p = parse_freq_exec(&freq_exec_json()).unwrap();
+    p.entropy_composition = landobs_v1::ENTROPY_COMPOSITION.into();
+    assert!(validate_execution_receipt_tags_v5_freq(&p).is_err());
+    let mut p = parse_freq_exec(&freq_exec_json()).unwrap();
+    p.schema_version = "4".into();
+    assert!(validate_execution_receipt_tags_v5_freq(&p).is_err());
+}
+
+#[test]
+fn a_landobs_exec_with_freq_value_is_a_shape_mismatch() {
+    let mut v = freq_exec_json();
+    v["entropy_composition"] = serde_json::json!(landobs_v1::ENTROPY_COMPOSITION);
+    assert!(matches!(
+        parse_execution_receipt(&v.to_string()),
+        Err(ParseExecutionReceiptError::PayloadShapeMismatch(_))
+    ));
+}

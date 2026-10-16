@@ -386,6 +386,7 @@ pub fn verify_bundle_with<R: KeyResolver>(
             Some(ParsedLockReceipt::V4(r)) => (Some(r.signing_key_id), Some(r.locked_at)),
             Some(ParsedLockReceipt::V5(r)) => (Some(r.signing_key_id), Some(r.locked_at)),
             Some(ParsedLockReceipt::V6(r)) => (Some(r.signing_key_id), Some(r.locked_at)),
+            Some(ParsedLockReceipt::V6Freq(r)) => (Some(r.signing_key_id), Some(r.locked_at)),
             None => (None, None),
         };
     let (exec_signing_key_id, exec_executed_at) =
@@ -400,6 +401,9 @@ pub fn verify_bundle_with<R: KeyResolver>(
             Some(ParsedExecutionReceipt::V3(r)) => (Some(r.signing_key_id), Some(r.executed_at)),
             Some(ParsedExecutionReceipt::V4(r)) => (Some(r.signing_key_id), Some(r.executed_at)),
             Some(ParsedExecutionReceipt::V5(r)) => (Some(r.signing_key_id), Some(r.executed_at)),
+            Some(ParsedExecutionReceipt::V5Freq(r)) => {
+                (Some(r.signing_key_id), Some(r.executed_at))
+            }
             None => (None, None),
         };
 
@@ -1030,6 +1034,10 @@ impl ResolutionFailureKind {
     }
 }
 
+/// Until grid-frequency bundles are verified end to end, their receipts
+/// fail the bundle shape step.
+const FREQ_NOT_SUPPORTED_YET: &str = "grid-frequency receipts are not supported yet";
+
 fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
     // Lock receipt — typed parse via dispatcher (deny_unknown_fields,
     // schema_version dispatch). V4 and V5 carry byte-identical field sets;
@@ -1107,6 +1115,13 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
                     };
                 }
                 (p.locked_at, p.weather_time, true)
+            }
+            Ok(ParsedLockReceipt::V6Freq(_)) => {
+                return StepResult {
+                    name: StepName::BundleShape,
+                    status: StepStatus::Fail(FREQ_NOT_SUPPORTED_YET.into()),
+                    detail: None,
+                };
             }
             Err(e) => {
                 return StepResult {
@@ -1235,6 +1250,13 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
                 };
             }
             (p.executed_at.clone(), p.weather_observation_time.clone())
+        }
+        ParsedExecutionReceipt::V5Freq(_) => {
+            return StepResult {
+                name: StepName::BundleShape,
+                status: StepStatus::Fail(FREQ_NOT_SUPPORTED_YET.into()),
+                detail: None,
+            };
         }
     };
 
@@ -1399,6 +1421,22 @@ fn check_drand_beacon(bundle: &ProofBundle, exec: &serde_json::Value) -> Result<
         return Err(format!(
             "entropy.weather_value ({:?}) does not match the signed execution receipt ({:?})",
             entropy.weather_value, exec_weather
+        ));
+    }
+
+    // The same binding for the grid-frequency value. A receipt without
+    // `freq_value` (every other tag) allows no `entropy.freq_value`.
+    let exec_freq = match exec.get("freq_value").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => Some(
+            v.as_str()
+                .ok_or_else(|| "execution receipt freq_value is not a string".to_string())?,
+        ),
+    };
+    if entropy.freq_value.as_deref() != exec_freq {
+        return Err(format!(
+            "entropy.freq_value ({:?}) does not match the signed execution receipt ({:?})",
+            entropy.freq_value, exec_freq
         ));
     }
 
@@ -3982,6 +4020,63 @@ mod tests {
             drand_step(&report).status
         );
         assert!(!report.passed());
+    }
+
+    #[test]
+    fn entropy_freq_value_on_a_bundle_without_one_fails() {
+        for bundle in [
+            valid_signed_bundle().0,
+            crate::_test_support::build_valid_drand_only_bundle().0,
+        ] {
+            let mut val: serde_json::Value = serde_json::from_str(&bundle).unwrap();
+            val["entropy"]["freq_value"] =
+                serde_json::json!("50018;50012;49983;49980;49953;49912;49883;49887");
+            let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+            assert!(
+                matches!(&drand_step(&report).status,
+                    StepStatus::Fail(r) if r.contains("entropy.freq_value")),
+                "got {:?}",
+                drand_step(&report).status
+            );
+            assert!(!report.passed());
+            // A null copy is the same as none.
+            val["entropy"]["freq_value"] = serde_json::Value::Null;
+            let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+            assert_eq!(drand_step(&report).status, StepStatus::Pass);
+        }
+    }
+
+    #[test]
+    fn grid_frequency_receipts_fail_bundle_shape_for_now() {
+        use crate::_test_support::{freq_exec_json, freq_lock_json};
+        let (json, _) = valid_signed_bundle();
+        for (lock, exec) in [(true, true), (true, false), (false, true)] {
+            let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+            if lock {
+                val["lock_receipt"]["payload_jcs"] =
+                    serde_json::json!(freq_lock_json().to_string());
+                val["lock_receipt"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("public_key_hex");
+            }
+            if exec {
+                val["execution_receipt"]["payload_jcs"] =
+                    serde_json::json!(freq_exec_json().to_string());
+                val["execution_receipt"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("public_key_hex");
+            }
+            let bundle = ProofBundle::from_json(&val.to_string()).unwrap();
+            let step = check_bundle_shape(&bundle);
+            assert_eq!(
+                step.status,
+                StepStatus::Fail(FREQ_NOT_SUPPORTED_YET.into()),
+                "lock {lock}, exec {exec}"
+            );
+            assert!(!verify_bundle(&bundle).passed());
+        }
     }
 
     #[test]

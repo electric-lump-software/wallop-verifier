@@ -184,6 +184,7 @@ fn signing_key_id_from_lock(payload_jcs: &str) -> Option<String> {
         ParsedLockReceipt::V4(p) => Some(p.signing_key_id),
         ParsedLockReceipt::V5(p) => Some(p.signing_key_id),
         ParsedLockReceipt::V6(p) => Some(p.signing_key_id),
+        ParsedLockReceipt::V6Freq(p) => Some(p.signing_key_id),
     }
 }
 
@@ -193,12 +194,26 @@ fn signing_key_id_from_exec(payload_jcs: &str) -> Option<String> {
         ParsedExecutionReceipt::V3(p) => Some(p.signing_key_id),
         ParsedExecutionReceipt::V4(p) => Some(p.signing_key_id),
         ParsedExecutionReceipt::V5(p) => Some(p.signing_key_id),
+        ParsedExecutionReceipt::V5Freq(p) => Some(p.signing_key_id),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signing_key_ids_are_read_from_frequency_receipts() {
+        use crate::_test_support::{freq_exec_json, freq_lock_json};
+        assert_eq!(
+            signing_key_id_from_lock(&freq_lock_json().to_string()).as_deref(),
+            Some("deadbeef")
+        );
+        assert_eq!(
+            signing_key_id_from_exec(&freq_exec_json().to_string()).as_deref(),
+            Some("cafebabe")
+        );
+    }
     use crate::_test_support::{build_valid_bundle, build_valid_v5_bundle};
     use crate::bundle::ProofBundle;
     use crate::{Entry, key_id};

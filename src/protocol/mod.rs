@@ -102,5 +102,29 @@ pub fn compute_seed_drand_only(entry_hash: &str, drand_randomness: &str) -> ([u8
     (seed_bytes, jcs)
 }
 
+/// Compute the draw seed for a grid-frequency draw from entry hash, drand
+/// randomness and `freq_value`:
+/// `SHA-256(JCS({drand_randomness, entry_hash, freq_value}))`.
+///
+/// The `freq_value` key keeps it apart from `compute_seed` and
+/// `compute_seed_drand_only`, even for the same string.
+pub fn compute_seed_freq(
+    entry_hash: &str,
+    drand_randomness: &str,
+    freq_value: &str,
+) -> ([u8; 32], String) {
+    let mut map = BTreeMap::new();
+    map.insert(
+        "drand_randomness",
+        serde_json::Value::String(drand_randomness.into()),
+    );
+    map.insert("entry_hash", serde_json::Value::String(entry_hash.into()));
+    map.insert("freq_value", serde_json::Value::String(freq_value.into()));
+    let jcs = serde_json::to_string(&map).unwrap();
+
+    let seed_bytes: [u8; 32] = Sha256::digest(jcs.as_bytes()).into();
+    (seed_bytes, jcs)
+}
+
 #[cfg(test)]
 mod tests;

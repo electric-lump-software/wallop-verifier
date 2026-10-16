@@ -41,6 +41,8 @@ The drand step was compiled only into the CLI build, so the WASM verifier on the
 
 - `verify_drand_wasm(chain_hash, round, signature_hex, randomness_hex) -> bool`: the drand check on its own, so the proof page can show it as a separate line. True only if the chain is the pinned quicknet chain, the BLS signature is valid for `round`, and `sha256(signature) == randomness`. `round` is a `u64`, so JavaScript passes a `BigInt`. Pass the values from the signed execution receipt, never from unsigned page data, and pass hex in lower case: an upper-case chain hash or randomness is rejected. It is never a gate; the proof page gates on `verify_bundle_with_resolved_keys_wasm` in attestable mode, with keys from `/operator/:slug/keys`.
 
+- Grid-frequency receipt types for the `drand-quicknet+elexon-freq-v1` tag: `protocol::freq_v1` (the tag's constants, window timing and grammar), `LockReceiptV6Freq`, `ExecutionReceiptV5Freq`, their tag validators, `compute_seed_freq` (`SHA-256(JCS{drand_randomness, entry_hash, freq_value})`) and `Entropy.freq_value`. A schema "6" lock or schema "5" execution receipt under this tag parses as the new variants `ParsedLockReceipt::V6Freq` / `ParsedExecutionReceipt::V5Freq`, with its key set checked exactly. Both enums are `#[non_exhaustive]`, so this is not a breaking change. Bundles with these receipts still fail verification (bundle shape) until the frequency checks land. An `entropy.freq_value` must equal the signed execution receipt's `freq_value`, so every other bundle must not carry one.
+
 The WASM bundle is larger, since the BLS pairing code is now linked in.
 
 ## [0.16.1] - unreleased

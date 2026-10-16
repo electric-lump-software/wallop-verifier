@@ -984,3 +984,68 @@ mod fixture_tests {
         assert!(bundle["entropy"].get("weather_value").is_none());
     }
 }
+
+/// A lock receipt v6 payload under the grid-frequency tag (20 fields),
+/// matching core's frequency protocol test: round 33_068_212 publishes at
+/// 2026-10-14T20:00:00Z, so its window starts at 19:54:00Z.
+#[doc(hidden)]
+pub fn freq_lock_json() -> serde_json::Value {
+    serde_json::json!({
+        "commitment_hash": "ab".repeat(32),
+        "drand_chain": crate::drand::QUICKNET_CHAIN_HASH,
+        "drand_round": 33_068_212u64,
+        "draw_id": "22222222-2222-2222-2222-222222222222",
+        "entropy_composition": crate::protocol::freq_v1::ENTROPY_COMPOSITION,
+        "entry_hash": "ab".repeat(32),
+        "fair_pick_version": "0.1.0",
+        "freq_start": "2026-10-14T19:54:00.000000Z",
+        "jcs_version": "sha256-jcs-v1",
+        "locked_at": "2026-10-14T19:50:00.123456Z",
+        "operator_id": "11111111-1111-1111-1111-111111111111",
+        "operator_slug": "acme-prizes",
+        "schema_version": "6",
+        "sequence": 1,
+        "signature_algorithm": "ed25519",
+        "signing_key_id": "deadbeef",
+        "wallop_core_version": "0.29.0",
+        "weather_station": null,
+        "weather_time": null,
+        "winner_count": 2
+    })
+}
+
+/// An execution receipt v5 payload under the grid-frequency tag (28
+/// fields), pairing with `freq_lock_json`.
+#[doc(hidden)]
+pub fn freq_exec_json() -> serde_json::Value {
+    serde_json::json!({
+        "drand_chain": crate::drand::QUICKNET_CHAIN_HASH,
+        "drand_randomness": "140117383b03a0c0c7a899a32b8cbd2ffff9e2569504037c358ee8c7c2efe2fd",
+        "drand_round": 33_068_212u64,
+        "drand_signature": "b6541e41bb68ff318e8bd74b9f6e168ae6424476c432241420c38427df58c6ef33fe009ce202a7101120ab481702fddf",
+        "drand_signature_algorithm": "bls12_381_g2",
+        "draw_id": "22222222-2222-2222-2222-222222222222",
+        "entropy_composition": crate::protocol::freq_v1::ENTROPY_COMPOSITION,
+        "entry_hash": "ab".repeat(32),
+        "executed_at": "2026-10-14T20:00:05.000000Z",
+        "fair_pick_version": "0.1.0",
+        "freq_fallback_reason": null,
+        "freq_value": "50018;50012;49983;49980;49953;49912;49883;49887",
+        "jcs_version": "sha256-jcs-v1",
+        "lock_receipt_hash": "cd".repeat(32),
+        "merkle_algorithm": "sha256-pairwise-v1",
+        "operator_id": "11111111-1111-1111-1111-111111111111",
+        "operator_slug": "acme-prizes",
+        "results": ["33333333-3333-3333-3333-333333333333"],
+        "schema_version": "5",
+        "seed": "ef".repeat(32),
+        "sequence": 1,
+        "signature_algorithm": "ed25519",
+        "signing_key_id": "cafebabe",
+        "wallop_core_version": "0.29.0",
+        "weather_fallback_reason": null,
+        "weather_observation_time": null,
+        "weather_station": null,
+        "weather_value": null
+    })
+}

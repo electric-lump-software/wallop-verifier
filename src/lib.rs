@@ -34,7 +34,7 @@ pub use protocol::receipts::{
     validate_execution_receipt_tags, validate_execution_receipt_tags_v3,
     validate_lock_receipt_tags,
 };
-pub use protocol::{compute_seed, compute_seed_drand_only, entry_hash};
+pub use protocol::{compute_seed, compute_seed_drand_only, compute_seed_freq, entry_hash};
 
 // Re-export fair_pick_rs types for convenience
 pub use fair_pick_rs::{Entry, Winner, draw};

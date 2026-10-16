@@ -301,3 +301,25 @@ fn fair_pick_large_pool_1000_ten_winners() {
 
     assert_eq!(actual, expected);
 }
+
+#[test]
+fn compute_seed_freq_matches_core_and_differs_from_the_weather_seed() {
+    let eh = "ab".repeat(32);
+    let r = "140117383b03a0c0c7a899a32b8cbd2ffff9e2569504037c358ee8c7c2efe2fd";
+    let v = "50018;50012;49983;49980;49953;49912;49883;49887";
+    let (seed, jcs) = compute_seed_freq(&eh, r, v);
+    assert_eq!(
+        jcs,
+        format!(r#"{{"drand_randomness":"{r}","entry_hash":"{eh}","freq_value":"{v}"}}"#)
+    );
+    assert_eq!(
+        hex::encode(seed),
+        "ab4a8f4bba2b29e391e185625a5b963d026c9f8d3f84bd116aeeae31e864b295"
+    );
+    assert_eq!(seed, <[u8; 32]>::from(Sha256::digest(jcs.as_bytes())));
+    assert_eq!(
+        hex::encode(compute_seed(&eh, r, v).0),
+        "bbf11c2b9ca4ae686dc8462888335ac9828e5c9895a4c531f8972a2f9797e174"
+    );
+    assert_ne!(seed, compute_seed_drand_only(&eh, r).0);
+}
