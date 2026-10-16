@@ -2,11 +2,13 @@
 //! each with exactly one signed field changed and re-signed, so only the
 //! semantic checks can refuse it.
 //!
-//! The vector file is `spec/vectors/proof-bundle-v6-tamper.json` in the
-//! wallop repo. This test reads the vendored copy under `vendor/wallop`.
-//! Only when that file is missing does it read the path in
-//! `WALLOP_TAMPER_VECTORS`, and it skips, saying so, when neither exists.
-//! It prints which file it used.
+//! There is one vector file per entropy tag in the wallop repo's
+//! `spec/vectors`: `proof-bundle-v6-tamper.json` (Land Observations) and
+//! `proof-bundle-v6-tamper-freq.json` (grid frequency). For each, this test
+//! reads the vendored copy under `vendor/wallop`. Only when that file is
+//! missing does it read the path in the file's environment variable
+//! (`WALLOP_TAMPER_VECTORS`, `WALLOP_TAMPER_FREQ_VECTORS`), and it skips
+//! that file, saying so, when neither exists. It prints which file it used.
 
 use wallop_verifier::bundle::ProofBundle;
 use wallop_verifier::key_resolver::{
@@ -16,36 +18,54 @@ use wallop_verifier::verify_steps::{
     StepStatus, VerificationReport, VerifierMode, verify_bundle_with,
 };
 
-const ENV: &str = "WALLOP_TAMPER_VECTORS";
-const VENDORED: &str = "vendor/wallop/spec/vectors/proof-bundle-v6-tamper.json";
+/// Each vector file: `(environment variable, vendored path)`.
+const FILES: [(&str, &str); 2] = [
+    (
+        "WALLOP_TAMPER_VECTORS",
+        "vendor/wallop/spec/vectors/proof-bundle-v6-tamper.json",
+    ),
+    (
+        "WALLOP_TAMPER_FREQ_VECTORS",
+        "vendor/wallop/spec/vectors/proof-bundle-v6-tamper-freq.json",
+    ),
+];
 
-/// The vector file: the vendored copy, else the path in
-/// `WALLOP_TAMPER_VECTORS`, else `None` (with a message).
-fn vector() -> Option<serde_json::Value> {
-    let vendored = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(VENDORED);
+/// One vector file: the vendored copy, else the path in `env`, else
+/// `None` (with a message).
+fn vector_file(env: &str, vendored: &str) -> Option<serde_json::Value> {
+    let vendored = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(vendored);
     let path = if vendored.is_file() {
         eprintln!(
             "tamper vectors: using the vendored file {}",
             vendored.display()
         );
         vendored
-    } else if let Ok(path) = std::env::var(ENV) {
+    } else if let Ok(path) = std::env::var(env) {
         eprintln!(
-            "tamper vectors: {} is missing; using {ENV}={path}",
+            "tamper vectors: {} is missing; using {env}={path}",
             vendored.display()
         );
         path.into()
     } else {
         eprintln!(
-            "skipping: {} is missing and {ENV} is unset; set {ENV} to the path of \
-             proof-bundle-v6-tamper.json to run",
-            vendored.display()
+            "skipping: {} is missing and {env} is unset; set {env} to the path of \
+             {} to run",
+            vendored.display(),
+            vendored.file_name().unwrap().to_string_lossy()
         );
         return None;
     };
     let shown = path.display();
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{shown}: {e}"));
     Some(serde_json::from_str(&text).unwrap_or_else(|e| panic!("{shown}: {e}")))
+}
+
+/// Every vector file that could be read.
+fn vectors() -> Vec<serde_json::Value> {
+    FILES
+        .iter()
+        .filter_map(|(env, vendored)| vector_file(env, vendored))
+        .collect()
 }
 
 /// Resolves from the vector's inline `keys: [{key_id, public_key_hex, key_class, inserted_at}]`.
@@ -128,7 +148,12 @@ fn failing_steps(report: &VerificationReport) -> Vec<String> {
 
 #[test]
 fn tamper_vector_bases_pass_every_step() {
-    let Some(v) = vector() else { return };
+    for v in vectors() {
+        tamper_vector_bases_pass(&v);
+    }
+}
+
+fn tamper_vector_bases_pass(v: &serde_json::Value) {
     let resolver = ListResolver::from_keys(&v["keys"]);
     let bases = v["bases"].as_array().expect("bases is a list");
     assert!(!bases.is_empty());
@@ -150,7 +175,12 @@ fn tamper_vector_bases_pass_every_step() {
 
 #[test]
 fn every_tampered_bundle_fails_exactly_its_named_steps() {
-    let Some(v) = vector() else { return };
+    for v in vectors() {
+        tampered_bundles_fail_exactly_their_named_steps(&v);
+    }
+}
+
+fn tampered_bundles_fail_exactly_their_named_steps(v: &serde_json::Value) {
     let resolver = ListResolver::from_keys(&v["keys"]);
     let cases = v["cases"].as_array().expect("cases is a list");
     assert!(!cases.is_empty());
@@ -186,11 +216,11 @@ fn every_tampered_bundle_fails_exactly_its_named_steps() {
 
 #[test]
 fn tamper_case_names_are_unique() {
-    let Some(v) = vector() else { return };
-    let mut names: Vec<&str> = v["cases"]
-        .as_array()
-        .unwrap()
+    // Unique across every file, so a case name is enough to find it.
+    let all = vectors();
+    let mut names: Vec<&str> = all
         .iter()
+        .flat_map(|v| v["cases"].as_array().unwrap())
         .map(|c| c["name"].as_str().unwrap())
         .collect();
     let total = names.len();
