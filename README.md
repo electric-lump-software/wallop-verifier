@@ -87,9 +87,21 @@ Same as `compute_seed` but the `weather_value` key is omitted entirely, providin
 
 ---
 
+### `compute_seed_freq(entry_hash, drand_randomness, freq_value) -> ([u8; 32], String)`
+
+The seed for a grid-frequency draw: `SHA-256(JCS({"drand_randomness": ..., "entry_hash": ..., "freq_value": ...}))`. The `freq_value` key keeps it apart from `compute_seed` and `compute_seed_drand_only`, even for the same string. A grid-frequency draw that fell back uses `compute_seed_drand_only`.
+
+---
+
 ### `verify(draw_id, entries, drand_randomness, weather_value, count, expected_results) -> bool`
 
 Runs the inner algorithmic pipeline — `entry_hash → compute_seed → draw → compare` — and returns `true` if the recomputed winners match `expected_results` exactly. Does **not** verify receipt signatures or anything else about a proof bundle; to verify a bundle, use the step pipeline (`verify_steps::verify_bundle_with`) and gate on `VerificationReport::passed()`.
+
+---
+
+### `verify_freq(draw_id, entries, drand_randomness, freq_value, count, expected_results) -> bool`
+
+`verify` for a grid-frequency draw: the seed is `compute_seed_freq` with `freq_value`, or drand alone when it is `None`. Choose it from the receipts' `entropy_composition`, never from which value happens to be present. In the browser: `verify_freq_wasm` and `compute_seed_freq_wasm`.
 
 ---
 
@@ -112,6 +124,20 @@ Reads `schema_version` from a JCS execution-receipt payload and deserialises int
 ### `validate_lock_receipt_tags` / `validate_execution_receipt_tags` / `validate_execution_receipt_tags_v3`
 
 Check that the pinned algorithm identity tags (`jcs_version`, `signature_algorithm`, `entropy_composition`, `drand_signature_algorithm`, `merkle_algorithm`) and enum fields (`weather_fallback_reason`) match the frozen values. Verifiers call these after `parse_execution_receipt` and before using any committed field.
+
+---
+
+## Grid frequency (lock schema 6)
+
+Lock receipt schema 6 and execution receipt schema 5 carry one of two entropy tags. `drand-quicknet+metoffice-landobs-v1` uses a Met Office weather observation; `drand-quicknet+elexon-freq-v1` uses 8 readings of GB grid frequency from Elexon's public BMRS FREQ dataset, 15 seconds apart. Its rules live in `protocol::freq_v1`, and every value there is frozen by the tag:
+
+- **The window.** The lock receipt signs `freq_start` (T), the first reading's time: `T = floor15(pub(R) - 105 s - W_freq - M)` for drand round R, with `W_freq = 240 s` and `M = 15 s`. So the readings are settled before the round exists. The lock must be signed at least 60 s before T, compared to the microsecond. `weather_station` and `weather_time` are null.
+- **The value.** The execution receipt signs `freq_value`, the 8 readings in time order as whole mHz, 5 digits each, joined by `;` (for example `50018;50012;49983;49980;49953;49912;49883;49887`). Each reading is read from its JSON number text, never through a float, and must lie in [47000, 52999]. A run of 6 identical readings makes the window invalid (a stuck feed). With no valid window by the deadline, the receipt instead signs `freq_fallback_reason: "no_frequency_by_deadline"` and the seed is drand only. Exactly one of the two is set, and every weather field is null.
+- **The receipts.** Their key sets are exact (`freq_v1::LOCK_KEYS`, 20 keys; `freq_v1::EXEC_KEYS`, 28 keys; checked by `freq_v1::exact_keys`). They parse as `ParsedLockReceipt::V6Freq` / `ParsedExecutionReceipt::V5Freq`.
+- **The bundle.** `entropy.freq_value` is an additive key in the proof bundle's `entropy` block, present when the receipt's tag is the grid-frequency one. It must equal the signed `freq_value`. The seed is always chosen by the receipts' (schema, tag) pair from the signed execution receipt, never from the unsigned `entropy` block. A pair with no seed rule skips the seed and winner steps, and never passes.
+- **Checking it against the record.** `wallop-verify weather-attest <BUNDLE>` re-fetches the window from Elexon (no key needed) and reports MATCH, MISMATCH or UNAVAILABLE. It is informational and never changes a verification result.
+
+Contains BMRS data © Elexon Limited copyright and database right 2026.
 
 ---
 
@@ -240,6 +266,13 @@ wasm-pack build --target web
 Test vectors are shared with the Elixir implementation via a git submodule pointing at [`wallop/spec/vectors/`](https://github.com/electric-lump-software/wallop/tree/main/spec/vectors). Both implementations verify against the same frozen JSON files — a protocol change is one edit, and both CIs catch drift immediately.
 
 See the [vector README](https://github.com/electric-lump-software/wallop/blob/main/spec/vectors/README.md) for the full list of covered scenarios.
+
+The lock 6 / execution 5 vectors are read by the integration tests in `tests/`:
+
+- both tags' tamper files (`proof-bundle-v6-tamper.json` and `proof-bundle-v6-tamper-freq.json`);
+- the grid-frequency window (`freq-window-v1.json`), schedule, value, receipt and proof bundle vectors.
+
+These files come from one wallop release and are vendored together. Once any of them is vendored, a missing one fails the test suite; it is never skipped. Before they are vendored, point `WALLOP_CORE_VECTORS_DIR` at a wallop checkout's `spec/vectors`. The tamper and window files also take their own paths: `WALLOP_TAMPER_VECTORS`, `WALLOP_TAMPER_FREQ_VECTORS` and `WALLOP_FREQ_WINDOW_VECTORS`. With nothing vendored and no path set, those tests skip and say so. The rules are in `tests/common/mod.rs`.
 
 ---
 

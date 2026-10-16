@@ -2,46 +2,22 @@
 //! each with the `freq_value` of the window or the reason it is invalid.
 //!
 //! The vector file is `spec/vectors/freq-window-v1.json` in the wallop
-//! repo. This test reads the vendored copy under `vendor/wallop`. Only when
-//! that file is missing does it read the path in `WALLOP_FREQ_WINDOW_VECTORS`,
-//! and it skips, saying so, when neither exists. It prints which file it
-//! used. Each body goes through `freq_v1::rows_from_body`, the parser
+//! repo, read under the rules in `tests/common`: the vendored copy; a
+//! failure if it is missing once any v6 vector is vendored; before that,
+//! `WALLOP_FREQ_WINDOW_VECTORS` or `WALLOP_CORE_VECTORS_DIR`. It prints which
+//! file it used. Each body goes through `freq_v1::rows_from_body`, the parser
 //! `weather-attest` uses, so the row rule is checked end to end.
 
 use wallop_verifier::protocol::freq_v1::{
     format_freq_start, parse_freq_start, rows_from_body, window_from_rows,
 };
 
-const ENV: &str = "WALLOP_FREQ_WINDOW_VECTORS";
-const VENDORED: &str = "vendor/wallop/spec/vectors/freq-window-v1.json";
+mod common;
 
-/// The vector file: the vendored copy, else the path in
-/// `WALLOP_FREQ_WINDOW_VECTORS`, else `None` (with a message).
+const ENV: &str = "WALLOP_FREQ_WINDOW_VECTORS";
+
 fn vector() -> Option<serde_json::Value> {
-    let vendored = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(VENDORED);
-    let path = if vendored.is_file() {
-        eprintln!(
-            "freq window vectors: using the vendored file {}",
-            vendored.display()
-        );
-        vendored
-    } else if let Ok(path) = std::env::var(ENV) {
-        eprintln!(
-            "freq window vectors: {} is missing; using {ENV}={path}",
-            vendored.display()
-        );
-        path.into()
-    } else {
-        eprintln!(
-            "skipping: {} is missing and {ENV} is unset; set {ENV} to the path of \
-             freq-window-v1.json to run",
-            vendored.display()
-        );
-        return None;
-    };
-    let shown = path.display();
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{shown}: {e}"));
-    Some(serde_json::from_str(&text).unwrap_or_else(|e| panic!("{shown}: {e}")))
+    common::core_vector("freq-window-v1.json", Some(ENV))
 }
 
 /// The text `window_from_rows`'s error must carry for core's `reason`.

@@ -4,11 +4,11 @@
 //!
 //! There is one vector file per entropy tag in the wallop repo's
 //! `spec/vectors`: `proof-bundle-v6-tamper.json` (Land Observations) and
-//! `proof-bundle-v6-tamper-freq.json` (grid frequency). For each, this test
-//! reads the vendored copy under `vendor/wallop`. Only when that file is
-//! missing does it read the path in the file's environment variable
-//! (`WALLOP_TAMPER_VECTORS`, `WALLOP_TAMPER_FREQ_VECTORS`), and it skips
-//! that file, saying so, when neither exists. It prints which file it used.
+//! `proof-bundle-v6-tamper-freq.json` (grid frequency). They are read under
+//! the rules in `tests/common`: the vendored copy under `vendor/wallop`; a
+//! failure if it is missing once any v6 vector is vendored; before that,
+//! the path in `WALLOP_TAMPER_VECTORS` / `WALLOP_TAMPER_FREQ_VECTORS` or
+//! `WALLOP_CORE_VECTORS_DIR`. It prints which file it used.
 
 use wallop_verifier::bundle::ProofBundle;
 use wallop_verifier::key_resolver::{
@@ -18,53 +18,23 @@ use wallop_verifier::verify_steps::{
     StepStatus, VerificationReport, VerifierMode, verify_bundle_with,
 };
 
-/// Each vector file: `(environment variable, vendored path)`.
+mod common;
+
+/// Each vector file: `(name, environment variable)`.
 const FILES: [(&str, &str); 2] = [
+    ("proof-bundle-v6-tamper.json", "WALLOP_TAMPER_VECTORS"),
     (
-        "WALLOP_TAMPER_VECTORS",
-        "vendor/wallop/spec/vectors/proof-bundle-v6-tamper.json",
-    ),
-    (
+        "proof-bundle-v6-tamper-freq.json",
         "WALLOP_TAMPER_FREQ_VECTORS",
-        "vendor/wallop/spec/vectors/proof-bundle-v6-tamper-freq.json",
     ),
 ];
 
-/// One vector file: the vendored copy, else the path in `env`, else
-/// `None` (with a message).
-fn vector_file(env: &str, vendored: &str) -> Option<serde_json::Value> {
-    let vendored = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(vendored);
-    let path = if vendored.is_file() {
-        eprintln!(
-            "tamper vectors: using the vendored file {}",
-            vendored.display()
-        );
-        vendored
-    } else if let Ok(path) = std::env::var(env) {
-        eprintln!(
-            "tamper vectors: {} is missing; using {env}={path}",
-            vendored.display()
-        );
-        path.into()
-    } else {
-        eprintln!(
-            "skipping: {} is missing and {env} is unset; set {env} to the path of \
-             {} to run",
-            vendored.display(),
-            vendored.file_name().unwrap().to_string_lossy()
-        );
-        return None;
-    };
-    let shown = path.display();
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{shown}: {e}"));
-    Some(serde_json::from_str(&text).unwrap_or_else(|e| panic!("{shown}: {e}")))
-}
-
-/// Every vector file that could be read.
+/// Every vector file, read under `common`'s rules: missing once the v6
+/// vectors are vendored is a failure, never a skip.
 fn vectors() -> Vec<serde_json::Value> {
     FILES
         .iter()
-        .filter_map(|(env, vendored)| vector_file(env, vendored))
+        .filter_map(|(name, env)| common::core_vector(name, Some(env)))
         .collect()
 }
 
@@ -227,4 +197,38 @@ fn tamper_case_names_are_unique() {
     names.sort_unstable();
     names.dedup();
     assert_eq!(names.len(), total, "duplicate case names");
+}
+
+/// Each tag's file carries its own bases and cases, so neither half can go
+/// missing unnoticed.
+#[test]
+fn each_tamper_file_has_its_tag_bases_and_cases() {
+    for ((name, env), bases) in FILES
+        .iter()
+        .zip([["observed", "fallback"], ["freq_observed", "freq_fallback"]])
+    {
+        let Some(v) = common::core_vector(name, Some(env)) else {
+            continue;
+        };
+        let got: Vec<&str> = v["bases"]
+            .as_array()
+            .expect("bases is a list")
+            .iter()
+            .map(|b| b["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(got, bases, "{name}: bases");
+        let cases = v["cases"].as_array().expect("cases is a list");
+        for base in bases {
+            assert!(
+                cases.iter().any(|c| c["base"] == base),
+                "{name}: no case uses base {base}"
+            );
+        }
+        assert!(
+            cases
+                .iter()
+                .all(|c| bases.contains(&c["base"].as_str().unwrap())),
+            "{name}: a case names a base from another file"
+        );
+    }
 }
