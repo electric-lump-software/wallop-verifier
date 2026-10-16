@@ -12,6 +12,7 @@ use wallop_verifier::protocol::receipts::{
     validate_execution_receipt_tags_v5, validate_lock_receipt_tags_v6,
 };
 
+pub(crate) mod freq;
 pub(crate) mod http;
 pub(crate) mod landobs;
 pub(crate) mod synop;
@@ -61,8 +62,9 @@ impl AttestInput {
         let wrong_schema = || {
             format!(
                 "weather-attest needs a lock receipt with schema_version \"6\" and an execution \
-                 receipt with schema_version \"5\" ({})",
-                landobs_v1::ENTROPY_COMPOSITION
+                 receipt with schema_version \"5\" ({} or {})",
+                landobs_v1::ENTROPY_COMPOSITION,
+                wallop_verifier::protocol::freq_v1::ENTROPY_COMPOSITION
             )
         };
         let lock = match parse_lock_receipt(&bundle.lock_receipt.payload_jcs)
@@ -215,10 +217,20 @@ fn read_input(path: &str) -> Result<String, String> {
 /// The `weather-attest` entry point. Builds the run's only HTTP clients.
 /// Exit codes: 0 no MISMATCH, 1 at least one MISMATCH, 2 unusable input.
 pub(crate) fn run(path: &str, metoffice_key: Option<&str>) -> ExitCode {
-    let input = match read_input(path)
+    let bundle = match read_input(path)
         .and_then(|json| ProofBundle::from_json(&json).map_err(|e| e.to_string()))
-        .and_then(|bundle| AttestInput::from_bundle(&bundle))
     {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    // The frequency tag is chosen by the signed lock receipt; it needs no key.
+    if freq::is_freq_bundle(&bundle) {
+        return freq::run(&bundle);
+    }
+    let input = match AttestInput::from_bundle(&bundle) {
         Ok(i) => i,
         Err(e) => {
             eprintln!("error: {e}");

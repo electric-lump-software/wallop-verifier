@@ -5,12 +5,12 @@
 //! repo. This test reads the vendored copy under `vendor/wallop`. Only when
 //! that file is missing does it read the path in `WALLOP_FREQ_WINDOW_VECTORS`,
 //! and it skips, saying so, when neither exists. It prints which file it
-//! used.
+//! used. Each body goes through `freq_v1::rows_from_body`, the parser
+//! `weather-attest` uses, so the row rule is checked end to end.
 
-use std::collections::HashMap;
-
-use serde_json::value::RawValue;
-use wallop_verifier::protocol::freq_v1::{format_freq_start, parse_freq_start, window_from_rows};
+use wallop_verifier::protocol::freq_v1::{
+    format_freq_start, parse_freq_start, rows_from_body, window_from_rows,
+};
 
 const ENV: &str = "WALLOP_FREQ_WINDOW_VECTORS";
 const VENDORED: &str = "vendor/wallop/spec/vectors/freq-window-v1.json";
@@ -44,28 +44,6 @@ fn vector() -> Option<serde_json::Value> {
     Some(serde_json::from_str(&text).unwrap_or_else(|e| panic!("{shown}: {e}")))
 }
 
-/// `body.data` as `(measurementTime, frequency JSON text)` rows, under the
-/// row rule `window_from_rows` documents: non-objects are dropped, a
-/// repeated key keeps its last value, an object without a string
-/// `measurementTime` is dropped, and a missing `frequency` is `""`.
-fn rows_from_body(body: &str) -> Vec<(String, String)> {
-    #[derive(serde::Deserialize)]
-    struct Body<'a> {
-        #[serde(borrow)]
-        data: Vec<&'a RawValue>,
-    }
-    let body: Body = serde_json::from_str(body).expect("body has a data list");
-    body.data
-        .into_iter()
-        .filter_map(|item| {
-            let row: HashMap<String, &RawValue> = serde_json::from_str(item.get()).ok()?;
-            let time = serde_json::from_str::<String>(row.get("measurementTime")?.get()).ok()?;
-            let freq = row.get("frequency").map_or("", |v| v.get());
-            Some((time, freq.to_string()))
-        })
-        .collect()
-}
-
 /// The text `window_from_rows`'s error must carry for core's `reason`.
 fn expected_fragment(reason: &str) -> &'static str {
     match reason {
@@ -77,21 +55,6 @@ fn expected_fragment(reason: &str) -> &'static str {
         "stuck" => "identical readings in a row",
         other => panic!("unknown reason {other}"),
     }
-}
-
-#[test]
-fn the_row_parser_keeps_the_last_repeated_key_and_drops_non_objects() {
-    let rows = rows_from_body(
-        r#"{"data":[1,"x",null,[],{"frequency":50.1},{"measurementTime":7,"frequency":50.1},
-        {"measurementTime":"a","frequency":49.98,"frequency":"50"},{"measurementTime":"b"}]}"#,
-    );
-    assert_eq!(
-        rows,
-        [
-            ("a".to_string(), "\"50\"".to_string()),
-            ("b".to_string(), String::new())
-        ]
-    );
 }
 
 #[test]
@@ -108,7 +71,8 @@ fn freq_window_vectors_match_core() {
     let (mut valid, mut invalid) = (0, 0);
     for case in cases {
         let name = case["name"].as_str().expect("name");
-        let rows = rows_from_body(case["body"].as_str().expect("body"));
+        let rows = rows_from_body(case["body"].as_str().expect("body").as_bytes())
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
         let got = window_from_rows(&rows, start);
         match (&case["value"], &case["invalid"]) {
             (serde_json::Value::String(value), serde_json::Value::Null) => {

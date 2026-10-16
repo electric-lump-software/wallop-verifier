@@ -68,3 +68,34 @@ fn subcommand_help_explains_the_key_flags_and_exit_codes() {
         assert!(help.contains(wanted), "{wanted:?} missing from: {help}");
     }
 }
+
+#[test]
+fn refuses_a_frequency_lock_with_an_unusable_execution_receipt() {
+    use wallop_verifier::_test_support::{FreqParams, build_freq_bundle};
+    let p = FreqParams {
+        exec_entropy_composition: wallop_verifier::protocol::landobs_v1::ENTROPY_COMPOSITION.into(),
+        ..FreqParams::value()
+    };
+    let (json, _, _) = build_freq_bundle(&p);
+    let out = run(&["weather-attest", "-"], &json);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        // The frequency path's own refusal: the bundle was dispatched by
+        // its lock receipt's tag.
+        String::from_utf8_lossy(&out.stderr).contains("the execution receipt is unusable"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Nothing was fetched or reported.
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn subcommand_help_names_the_grid_frequency_record() {
+    let out = run(&["weather-attest", "--help"], "");
+    let help = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(help.contains("Elexon's public BMRS FREQ record"), "{help}");
+}

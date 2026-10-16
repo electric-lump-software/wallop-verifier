@@ -235,8 +235,8 @@ pub fn reading_from_text(text: &str) -> Result<u32, String> {
 /// rows `(measurementTime, frequency JSON text)`, or the first reason the
 /// window is invalid.
 ///
-/// The row rule, identical to core's. The caller turns the body's `data`
-/// list into rows:
+/// The row rule, identical to core's. `rows_from_body` turns an Elexon
+/// body's `data` list into rows:
 ///
 /// * a list item that is not a JSON object is dropped;
 /// * an object with a repeated key keeps the last value for that key;
@@ -275,6 +275,40 @@ pub fn window_from_rows(rows: &[(String, String)], freq_start: i64) -> Result<St
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(";"))
+}
+
+/// An Elexon FREQ response body (`{"data": [...]}`) as rows for
+/// `window_from_rows`, under core's row rule: an item that is not a JSON
+/// object is dropped; an object with a repeated key keeps the last value;
+/// an object whose `measurementTime` is missing or not a JSON string is
+/// dropped; every other object is a row whose `frequency` is its exact JSON
+/// source text (`49.98`, `"49.98"`, `null`), or `""` when it has none, so a
+/// matching row without a reading still counts (invalid, or a duplicate).
+///
+/// `Err` only when the body is not a JSON object with a `data` list.
+pub fn rows_from_body(body: &[u8]) -> Result<Vec<(String, String)>, String> {
+    use serde_json::value::RawValue;
+    use std::collections::HashMap;
+
+    #[derive(serde::Deserialize)]
+    struct Body<'a> {
+        #[serde(borrow)]
+        data: Vec<&'a RawValue>,
+    }
+    let body: Body = serde_json::from_slice(body).map_err(|e| {
+        format!("not an Elexon FREQ response (a JSON object with a data list): {e}")
+    })?;
+    Ok(body
+        .data
+        .into_iter()
+        .filter_map(|item| {
+            // Deserialising into a map keeps the last value of a repeated key.
+            let row: HashMap<String, &RawValue> = serde_json::from_str(item.get()).ok()?;
+            let time: String = serde_json::from_str(row.get("measurementTime")?.get()).ok()?;
+            let frequency = row.get("frequency").map_or("", |v| v.get());
+            Some((time, frequency.to_string()))
+        })
+        .collect())
 }
 
 fn check_stuck(readings: &[u32]) -> Result<(), String> {
@@ -529,6 +563,46 @@ mod tests {
             "",
         ] {
             assert!(parse_freq_value(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn rows_from_body_follows_the_row_rule() {
+        let rows = rows_from_body(
+            br#"{"data":[1,"x",null,[],true,{"frequency":50.1},{"measurementTime":7,"frequency":50.1},
+            {"measurementTime":null,"frequency":50.1},
+            {"measurementTime":"a","frequency":49.98,"frequency":"50"},
+            {"measurementTime":"b"},
+            {"measurementTime":"c","frequency":null},
+            {"measurementTime":"x","measurementTime":"d", "frequency" :  49.987 },
+            {"measurementTime":"e","frequency":4.9987e1}],"metadata":{}}"#,
+        )
+        .unwrap();
+        let want: Vec<(String, String)> = [
+            ("a", "\"50\""),
+            ("b", ""),
+            ("c", "null"),
+            ("d", "49.987"),
+            ("e", "4.9987e1"),
+        ]
+        .iter()
+        .map(|(t, f)| (t.to_string(), f.to_string()))
+        .collect();
+        assert_eq!(rows, want);
+        assert_eq!(rows_from_body(br#"{"data":[]}"#), Ok(vec![]));
+        for bad in [
+            &b"not json"[..],
+            b"[]",
+            b"{}",
+            b"{\"data\":{}}",
+            b"{\"data\":null}",
+            b"",
+        ] {
+            assert!(
+                rows_from_body(bad).is_err(),
+                "{:?}",
+                String::from_utf8_lossy(bad)
+            );
         }
     }
 

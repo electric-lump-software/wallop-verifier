@@ -1,9 +1,11 @@
-//! Blocking HTTP clients for the two public weather records.
-//! Errors never include the Met Office key.
+//! Blocking HTTP clients for the public weather and grid-frequency
+//! records. Errors never include the Met Office key.
 
 use std::cell::Cell;
 use std::io::Read;
 use std::time::{Duration, Instant};
+
+use wallop_verifier::protocol::freq_v1;
 
 use super::USER_AGENT;
 use super::landobs::Row;
@@ -13,6 +15,10 @@ pub(crate) const LANDOBS_BASE_URL: &str =
 pub(crate) const OGIMET_BASE_URL: &str = "https://www.ogimet.com";
 /// Ogimet asks clients to leave at least 20 seconds between requests.
 pub(crate) const OGIMET_MIN_GAP: Duration = Duration::from_secs(20);
+/// Elexon's BMRS FREQ dataset. Public; no key.
+pub(crate) const ELEXON_BASE_URL: &str = "https://data.elexon.co.uk/bmrs/api/v1/datasets/FREQ";
+/// Elexon serves at most one day of FREQ readings per request.
+const ELEXON_MAX_SPAN_SECS: i64 = 86_400 - 1;
 const TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_BODY_BYTES: u64 = 1024 * 1024;
 
@@ -82,6 +88,60 @@ impl LandObsClient {
         let bytes = read_capped(response, "Land Observations")?;
         serde_json::from_slice(&bytes)
             .map_err(|e| format!("Land Observations response is not a list of rows: {e}"))
+    }
+}
+
+pub(crate) struct ElexonClient {
+    agent: ureq::Agent,
+    base_url: String,
+}
+
+impl ElexonClient {
+    pub(crate) fn new(base_url: &str) -> Self {
+        // Never follow a redirect, and over https refuse any downgrade
+        // (tests run against plain-http mock servers).
+        let agent = ureq::AgentBuilder::new()
+            .timeout(TIMEOUT)
+            .redirects(0)
+            .https_only(base_url.starts_with("https://"))
+            .build();
+        Self {
+            agent,
+            base_url: base_url.trim_end_matches('/').to_string(),
+        }
+    }
+
+    /// Every FREQ row with `from <= measurementTime <= to` (unix seconds),
+    /// as `(measurementTime, frequency JSON text)` under core's row rule
+    /// (`freq_v1::rows_from_body`). At most one day. Any HTTP error, an
+    /// oversized body or a body that is not a FREQ response is an `Err`,
+    /// which the caller reports as unavailable, never as a mismatch.
+    pub(crate) fn fetch(&self, from: i64, to: i64) -> Result<Vec<(String, String)>, String> {
+        if to < from || to - from > ELEXON_MAX_SPAN_SECS {
+            return Err("Elexon allows at most one day per request".into());
+        }
+        let stamp = |secs: i64| {
+            let canonical = freq_v1::format_freq_start(secs);
+            match canonical.strip_suffix(".000000Z") {
+                Some(prefix) if prefix.len() == 19 => Ok(format!("{prefix}Z")),
+                _ => Err(format!("{secs} is out of range")),
+            }
+        };
+        let response = self
+            .agent
+            .get(&self.base_url)
+            .query("measurementDateTimeFrom", &stamp(from)?)
+            .query("measurementDateTimeTo", &stamp(to)?)
+            .query("format", "json")
+            .set("accept", "application/json")
+            .set("User-Agent", USER_AGENT)
+            .call()
+            .map_err(|e| describe("Elexon", e))?;
+        if response.status() != 200 {
+            return Err(format!("Elexon returned HTTP {}", response.status()));
+        }
+        let bytes = read_capped(response, "Elexon")?;
+        freq_v1::rows_from_body(&bytes).map_err(|e| format!("Elexon response: {e}"))
     }
 }
 
@@ -167,6 +227,102 @@ mod tests {
     use mockito::Matcher;
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    /// 2026-10-14T19:54:00Z and 19:55:45Z.
+    const FROM: i64 = 1_792_007_640;
+    const TO: i64 = 1_792_007_745;
+
+    #[test]
+    fn elexon_is_https_and_sends_the_window_as_query() {
+        assert!(ELEXON_BASE_URL.starts_with("https://"));
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded(
+                    "measurementDateTimeFrom".into(),
+                    "2026-10-14T19:54:00Z".into(),
+                ),
+                Matcher::UrlEncoded(
+                    "measurementDateTimeTo".into(),
+                    "2026-10-14T19:55:45Z".into(),
+                ),
+                Matcher::UrlEncoded("format".into(), "json".into()),
+            ]))
+            .with_status(200)
+            .with_body(r#"{"data":[{"measurementTime":"2026-10-14T19:55:00Z","frequency":49.98}]}"#)
+            .create();
+        let rows = ElexonClient::new(&server.url()).fetch(FROM, TO).unwrap();
+        assert_eq!(
+            rows,
+            [("2026-10-14T19:55:00Z".to_string(), "49.98".to_string())]
+        );
+        mock.assert();
+    }
+
+    #[test]
+    fn elexon_refuses_more_than_a_day_and_never_follows_a_redirect() {
+        let client = ElexonClient::new("http://127.0.0.1:9");
+        assert!(client.fetch(0, 86_400).unwrap_err().contains("one day"));
+        assert!(client.fetch(10, 9).unwrap_err().contains("one day"));
+
+        let mut server = mockito::Server::new();
+        let target = server
+            .mock("GET", "/elsewhere")
+            .with_status(200)
+            .with_body(r#"{"data":[]}"#)
+            .expect(0)
+            .create();
+        server
+            .mock("GET", "/")
+            .match_query(Matcher::Any)
+            .with_status(302)
+            .with_header("location", &format!("{}/elsewhere", server.url()))
+            .create();
+        let err = ElexonClient::new(&server.url())
+            .fetch(FROM, TO)
+            .unwrap_err();
+        assert!(err.contains("302"), "{err}");
+        target.assert();
+    }
+
+    #[test]
+    fn elexon_body_over_the_cap_is_refused() {
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", "/")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(" ".repeat(MAX_BODY_BYTES as usize + 1))
+            .create();
+        let err = ElexonClient::new(&server.url())
+            .fetch(FROM, TO)
+            .unwrap_err();
+        assert!(err.contains("larger than"), "{err}");
+    }
+
+    #[test]
+    fn elexon_errors_and_unparseable_bodies_are_errors() {
+        for (status, body) in [
+            (500, r#"{"data":[]}"#),
+            (404, ""),
+            (204, ""),
+            (200, "<html>maintenance</html>"),
+            (200, r#"{"data":{}}"#),
+        ] {
+            let mut server = mockito::Server::new();
+            server
+                .mock("GET", "/")
+                .match_query(Matcher::Any)
+                .with_status(status)
+                .with_body(body)
+                .create();
+            assert!(
+                ElexonClient::new(&server.url()).fetch(FROM, TO).is_err(),
+                "{status} {body}"
+            );
+        }
+    }
 
     #[test]
     fn landobs_sends_the_key_and_parses_rows() {
