@@ -8,7 +8,9 @@ use crate::protocol::receipts::{
     ParsedLockReceipt, lock_receipt_hash, parse_execution_receipt, parse_lock_receipt,
     validate_execution_receipt_tags, validate_execution_receipt_tags_v3,
     validate_execution_receipt_tags_v4, validate_execution_receipt_tags_v5,
-    validate_lock_receipt_tags, validate_lock_receipt_tags_v5, validate_lock_receipt_tags_v6,
+    validate_execution_receipt_tags_v5_freq, validate_lock_receipt_tags,
+    validate_lock_receipt_tags_v5, validate_lock_receipt_tags_v6,
+    validate_lock_receipt_tags_v6_freq,
 };
 use crate::{Entry, compute_seed, compute_seed_drand_only, draw, entry_hash};
 use serde::{Deserialize, Serialize};
@@ -624,20 +626,14 @@ pub fn verify_bundle_with<R: KeyResolver>(
     }
 
     // === Step 6: Seed recomputation ===
-    // IMPORTANT: detect drand-only from exec receipt weather_value (not bundle entropy)
+    // The seed input is read from the signed execution receipt (never from
+    // the bundle's unsigned `entropy` block), and its derivation is chosen
+    // by the receipts' (schema, tag) pair, never by which field is present.
     let exec_parsed: serde_json::Value =
         serde_json::from_str(&bundle.execution_receipt.payload_jcs).unwrap_or_default();
-    // Absent or null means a drand-only draw. Any other non-string value
-    // is malformed, not "no weather", and fails the seed step.
-    let exec_weather_parsed: Result<Option<&str>, &str> =
-        match exec_parsed.get("weather_value").filter(|v| !v.is_null()) {
-            None => Ok(None),
-            Some(v) => v
-                .as_str()
-                .map(Some)
-                .ok_or("exec receipt weather_value is neither a string nor null"),
-        };
-    let exec_weather = exec_weather_parsed.unwrap_or(None);
+    let lock_for_rules: serde_json::Value =
+        serde_json::from_str(&bundle.lock_receipt.payload_jcs).unwrap_or_default();
+    let seed_input = SeedInput::from_receipts(&lock_for_rules, &exec_parsed);
     let exec_seed = exec_parsed
         .get("seed")
         .and_then(|v| v.as_str())
@@ -655,44 +651,42 @@ pub fn verify_bundle_with<R: KeyResolver>(
             detail: None,
         });
         step6_pass = false;
-    } else if let Err(reason) = exec_weather_parsed {
-        steps.push(StepResult {
-            name: StepName::SeedRecomputation,
-            status: StepStatus::Fail(reason.into()),
-            detail: None,
-        });
-        step6_pass = false;
     } else {
-        let (computed_seed, _) = match exec_weather {
-            Some(w) => compute_seed(&computed_entry_hash, exec_drand, w),
-            None => compute_seed_drand_only(&computed_entry_hash, exec_drand),
-        };
-        let computed_seed_hex = hex::encode(computed_seed);
-        step6_pass = computed_seed_hex == exec_seed;
-        let mode = if exec_weather.is_some() {
-            "drand + weather"
-        } else {
-            "drand only"
-        };
-        let step6_detail = if step6_pass {
-            None
-        } else {
-            Some(StepDetail::HexMismatch {
-                expected: exec_seed.to_string(),
-                computed: computed_seed_hex.clone(),
-            })
-        };
-        steps.push(StepResult {
-            name: StepName::SeedRecomputation,
-            status: if step6_pass {
-                StepStatus::Pass
-            } else {
-                StepStatus::Fail(format!(
-                    "({mode}) expected {exec_seed}, got {computed_seed_hex}"
-                ))
-            },
-            detail: step6_detail,
-        });
+        match &seed_input {
+            Err(reason) => {
+                steps.push(StepResult {
+                    name: StepName::SeedRecomputation,
+                    status: StepStatus::Fail(reason.clone()),
+                    detail: None,
+                });
+                step6_pass = false;
+            }
+            Ok(input) => {
+                let computed_seed = input.seed(&computed_entry_hash, exec_drand);
+                let computed_seed_hex = hex::encode(computed_seed);
+                step6_pass = computed_seed_hex == exec_seed;
+                let mode = input.mode();
+                let step6_detail = if step6_pass {
+                    None
+                } else {
+                    Some(StepDetail::HexMismatch {
+                        expected: exec_seed.to_string(),
+                        computed: computed_seed_hex.clone(),
+                    })
+                };
+                steps.push(StepResult {
+                    name: StepName::SeedRecomputation,
+                    status: if step6_pass {
+                        StepStatus::Pass
+                    } else {
+                        StepStatus::Fail(format!(
+                            "({mode}) expected {exec_seed}, got {computed_seed_hex}"
+                        ))
+                    },
+                    detail: step6_detail,
+                });
+            }
+        }
     }
 
     // === Step 7: Winner selection ===
@@ -711,9 +705,10 @@ pub fn verify_bundle_with<R: KeyResolver>(
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32;
 
-        let (computed_seed, _) = match exec_weather {
-            Some(w) => compute_seed(&computed_entry_hash, exec_drand, w),
-            None => compute_seed_drand_only(&computed_entry_hash, exec_drand),
+        // step6_pass implies the seed input was read.
+        let computed_seed = match &seed_input {
+            Ok(input) => input.seed(&computed_entry_hash, exec_drand),
+            Err(_) => unreachable!("winner selection runs only after the seed step passed"),
         };
 
         match draw(&entries, &computed_seed, winner_count) {
@@ -1034,9 +1029,86 @@ impl ResolutionFailureKind {
     }
 }
 
-/// Until grid-frequency bundles are verified end to end, their receipts
-/// fail the bundle shape step.
-const FREQ_NOT_SUPPORTED_YET: &str = "grid-frequency receipts are not supported yet";
+/// What the seed is derived from, read from the signed execution receipt
+/// and chosen by the receipts' (schema, tag) pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SeedInput<'a> {
+    /// No entropy value: drand alone (a fallback, or a drand-only draw).
+    DrandOnly,
+    /// `compute_seed` with the signed `weather_value`.
+    Weather(&'a str),
+    /// `compute_seed_freq` with the signed `freq_value` (grid-frequency
+    /// pair only).
+    Freq(&'a str),
+}
+
+impl<'a> SeedInput<'a> {
+    /// Under the grid-frequency pair the seed comes from `freq_value`, and a
+    /// non-null `weather_value` is refused. Under every other pair it comes
+    /// from `weather_value` as before (an unknown or mismatched pair fails
+    /// the steps that pick their rules from the pair). Absent or null means
+    /// drand only; any other non-string value fails.
+    fn from_receipts(
+        lock: &serde_json::Value,
+        exec: &'a serde_json::Value,
+    ) -> Result<SeedInput<'a>, String> {
+        fn signed_text<'a>(
+            exec: &'a serde_json::Value,
+            key: &str,
+        ) -> Result<Option<&'a str>, String> {
+            match exec.get(key).filter(|v| !v.is_null()) {
+                None => Ok(None),
+                Some(v) => v
+                    .as_str()
+                    .map(Some)
+                    .ok_or_else(|| format!("exec receipt {key} is neither a string nor null")),
+            }
+        }
+        if weather_rules(lock, exec) == WeatherRules::Freq {
+            if exec.get("weather_value").is_some_and(|v| !v.is_null()) {
+                return Err(format!(
+                    "exec receipt weather_value must be null under {}",
+                    crate::protocol::freq_v1::ENTROPY_COMPOSITION
+                ));
+            }
+            Ok(signed_text(exec, "freq_value")?.map_or(SeedInput::DrandOnly, SeedInput::Freq))
+        } else {
+            Ok(
+                signed_text(exec, "weather_value")?
+                    .map_or(SeedInput::DrandOnly, SeedInput::Weather),
+            )
+        }
+    }
+
+    fn seed(&self, entry_hash: &str, drand_randomness: &str) -> [u8; 32] {
+        match self {
+            SeedInput::DrandOnly => compute_seed_drand_only(entry_hash, drand_randomness).0,
+            SeedInput::Weather(w) => compute_seed(entry_hash, drand_randomness, w).0,
+            SeedInput::Freq(v) => {
+                crate::protocol::compute_seed_freq(entry_hash, drand_randomness, v).0
+            }
+        }
+    }
+
+    fn mode(&self) -> &'static str {
+        match self {
+            SeedInput::DrandOnly => "drand only",
+            SeedInput::Weather(_) => "drand + weather",
+            SeedInput::Freq(_) => "drand + grid frequency",
+        }
+    }
+}
+
+/// Lock v6 / execution v5 carry one of two tags; both receipts must carry
+/// the same one.
+const TAG_PAIRING_ERROR: &str = "lock and execution receipts carry different entropy tags";
+
+/// The tag a lock v6 / execution v5 receipt carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum V6Tag {
+    LandObs,
+    Freq,
+}
 
 fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
     // Lock receipt — typed parse via dispatcher (deny_unknown_fields,
@@ -1051,7 +1123,7 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
     // Mismatches reject as downgrade-relabel / upgrade-spoof attempts —
     // the same shape as the v2/v3 deny_unknown_fields defence (F2).
     let inline_lock_pk_present = bundle.lock_receipt.public_key_hex.is_some();
-    let (lock_locked_at, lock_weather_time, lock_is_v6) =
+    let (lock_locked_at, lock_weather_time, lock_freq_start, lock_v6) =
         match parse_lock_receipt(&bundle.lock_receipt.payload_jcs) {
             Ok(ParsedLockReceipt::V4(p)) => {
                 if let Err(e) = validate_lock_receipt_tags(&p) {
@@ -1072,7 +1144,7 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
                         detail: None,
                     };
                 }
-                (p.locked_at, p.weather_time, false)
+                (p.locked_at, Some(p.weather_time), None, None)
             }
             Ok(ParsedLockReceipt::V5(p)) => {
                 if let Err(e) = validate_lock_receipt_tags_v5(&p) {
@@ -1093,7 +1165,7 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
                         detail: None,
                     };
                 }
-                (p.locked_at, p.weather_time, false)
+                (p.locked_at, Some(p.weather_time), None, None)
             }
             Ok(ParsedLockReceipt::V6(p)) => {
                 if let Err(e) = validate_lock_receipt_tags_v6(&p) {
@@ -1114,14 +1186,33 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
                         detail: None,
                     };
                 }
-                (p.locked_at, p.weather_time, true)
+                (
+                    p.locked_at,
+                    Some(p.weather_time),
+                    None,
+                    Some(V6Tag::LandObs),
+                )
             }
-            Ok(ParsedLockReceipt::V6Freq(_)) => {
-                return StepResult {
-                    name: StepName::BundleShape,
-                    status: StepStatus::Fail(FREQ_NOT_SUPPORTED_YET.into()),
-                    detail: None,
-                };
+            Ok(ParsedLockReceipt::V6Freq(p)) => {
+                if let Err(e) = validate_lock_receipt_tags_v6_freq(&p) {
+                    return StepResult {
+                        name: StepName::BundleShape,
+                        status: StepStatus::Fail(format!("lock receipt validation: {}", e)),
+                        detail: None,
+                    };
+                }
+                if inline_lock_pk_present {
+                    return StepResult {
+                        name: StepName::BundleShape,
+                        status: StepStatus::Fail(
+                            "lock receipt schema_version=\"6\" must not carry inline \
+                             public_key_hex on the bundle wrapper (downgrade-relabel check)"
+                                .into(),
+                        ),
+                        detail: None,
+                    };
+                }
+                (p.locked_at, None, Some(p.freq_start), Some(V6Tag::Freq))
             }
             Err(e) => {
                 return StepResult {
@@ -1140,7 +1231,9 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
             detail: None,
         };
     }
-    if let Err(e) = chrono_parse_canonical(&lock_weather_time) {
+    if let Some(wt) = &lock_weather_time
+        && let Err(e) = chrono_parse_canonical(wt)
+    {
         return StepResult {
             name: StepName::BundleShape,
             status: StepStatus::Fail(format!("lock.weather_time: {}", e)),
@@ -1166,7 +1259,7 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
     // schema_version constant (v4 is byte-identical to v3 on the signed
     // payload; the bump signals resolver-driven verification).
     let inline_exec_pk_present = bundle.execution_receipt.public_key_hex.is_some();
-    let (executed_at, weather_observation_time) = match &parsed_exec {
+    let (executed_at, weather_observation_time, exec_v5) = match &parsed_exec {
         ParsedExecutionReceipt::V2(p) => {
             if let Err(e) = validate_execution_receipt_tags(p) {
                 return StepResult {
@@ -1186,7 +1279,11 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
                     detail: None,
                 };
             }
-            (p.executed_at.clone(), p.weather_observation_time.clone())
+            (
+                p.executed_at.clone(),
+                p.weather_observation_time.clone(),
+                None,
+            )
         }
         ParsedExecutionReceipt::V3(p) => {
             if let Err(e) = validate_execution_receipt_tags_v3(p) {
@@ -1207,7 +1304,11 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
                     detail: None,
                 };
             }
-            (p.executed_at.clone(), p.weather_observation_time.clone())
+            (
+                p.executed_at.clone(),
+                p.weather_observation_time.clone(),
+                None,
+            )
         }
         ParsedExecutionReceipt::V4(p) => {
             if let Err(e) = validate_execution_receipt_tags_v4(p) {
@@ -1228,7 +1329,11 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
                     detail: None,
                 };
             }
-            (p.executed_at.clone(), p.weather_observation_time.clone())
+            (
+                p.executed_at.clone(),
+                p.weather_observation_time.clone(),
+                None,
+            )
         }
         ParsedExecutionReceipt::V5(p) => {
             if let Err(e) = validate_execution_receipt_tags_v5(p) {
@@ -1249,14 +1354,32 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
                     detail: None,
                 };
             }
-            (p.executed_at.clone(), p.weather_observation_time.clone())
+            (
+                p.executed_at.clone(),
+                p.weather_observation_time.clone(),
+                Some(V6Tag::LandObs),
+            )
         }
-        ParsedExecutionReceipt::V5Freq(_) => {
-            return StepResult {
-                name: StepName::BundleShape,
-                status: StepStatus::Fail(FREQ_NOT_SUPPORTED_YET.into()),
-                detail: None,
-            };
+        ParsedExecutionReceipt::V5Freq(p) => {
+            if let Err(e) = validate_execution_receipt_tags_v5_freq(p) {
+                return StepResult {
+                    name: StepName::BundleShape,
+                    status: StepStatus::Fail(format!("exec receipt validation: {}", e)),
+                    detail: None,
+                };
+            }
+            if inline_exec_pk_present {
+                return StepResult {
+                    name: StepName::BundleShape,
+                    status: StepStatus::Fail(
+                        "execution receipt schema_version=\"5\" must not carry inline \
+                         public_key_hex on the bundle wrapper (downgrade-relabel check)"
+                            .into(),
+                    ),
+                    detail: None,
+                };
+            }
+            (p.executed_at.clone(), None, Some(V6Tag::Freq))
         }
     };
 
@@ -1277,15 +1400,21 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
         };
     }
 
-    let exec_is_v5 = matches!(parsed_exec, ParsedExecutionReceipt::V5(_));
-    if lock_is_v6 != exec_is_v5 {
+    if lock_v6.is_some() != exec_v5.is_some() {
         return StepResult {
             name: StepName::BundleShape,
             status: StepStatus::Fail(SCHEMA_PAIRING_ERROR.into()),
             detail: None,
         };
     }
-    if lock_is_v6 {
+    if lock_v6 != exec_v5 {
+        return StepResult {
+            name: StepName::BundleShape,
+            status: StepStatus::Fail(TAG_PAIRING_ERROR.into()),
+            detail: None,
+        };
+    }
+    if let Some(tag) = lock_v6 {
         // Under lock 6 every signed timestamp must round-trip: a string
         // such as `17:99` that only normalises to a real time is rejected.
         let mut strict = vec![
@@ -1304,10 +1433,20 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
                 };
             }
         }
-        if let Err(e) = crate::protocol::landobs_v1::parse_weather_time(&lock_weather_time) {
+        let parsed = match tag {
+            V6Tag::LandObs => crate::protocol::landobs_v1::parse_weather_time(
+                lock_weather_time.as_deref().unwrap_or_default(),
+            )
+            .map_err(|e| format!("lock.weather_time: {e}")),
+            V6Tag::Freq => crate::protocol::freq_v1::parse_freq_start(
+                lock_freq_start.as_deref().unwrap_or_default(),
+            )
+            .map_err(|e| format!("lock.freq_start: {e}")),
+        };
+        if let Err(reason) = parsed {
             return StepResult {
                 name: StepName::BundleShape,
-                status: StepStatus::Fail(format!("lock.weather_time: {e}")),
+                status: StepStatus::Fail(reason),
                 detail: None,
             };
         }
@@ -1507,17 +1646,20 @@ pub(crate) fn drand_round_after_lock(round: u64, locked_at: &str) -> Result<(), 
     }
 }
 
-/// Step 5a once the lock's `entry_hash` matches: under lock v6 (its
-/// `(schema_version, entropy_composition)` pair selects the Land
-/// Observations rules), `commitment_hash` must equal that entry hash.
-/// Older lock schemas are not checked.
+/// Step 5a once the lock's `entry_hash` matches: under lock v6, either tag
+/// (its `(schema_version, entropy_composition)` pair selects the Land
+/// Observations or grid-frequency rules), `commitment_hash` must equal
+/// that entry hash. Older lock schemas are not checked.
 fn check_lock_commitment_hash(lock: &serde_json::Value, entry_hash: &str) -> StepResult {
     let pass = || StepResult {
         name: StepName::LockReceiptEntryHash,
         status: StepStatus::Pass,
         detail: None,
     };
-    if rule_set_for("lock", lock, LOCK_RULE_SETS) != Ok(RuleSet::LandObs) {
+    if !matches!(
+        rule_set_for("lock", lock, LOCK_RULE_SETS),
+        Ok(RuleSet::LandObs | RuleSet::Freq)
+    ) {
         return pass();
     }
     match lock.get("commitment_hash").and_then(|v| v.as_str()) {
@@ -1557,8 +1699,8 @@ fn check_fair_pick_version(lock: &serde_json::Value) -> Result<(), String> {
     }
 }
 
-/// Lock receipt schema 6 and execution receipt schema 5 carry the Land
-/// Observations tag; neither may be paired with any other schema.
+/// Lock receipt schema 6 and execution receipt schema 5 (either tag) may be
+/// paired only with each other.
 const SCHEMA_PAIRING_ERROR: &str = "lock receipt schema_version \"6\" and execution receipt schema_version \"5\" must be used together";
 
 // Fields that MUST be byte-identical between lock and exec receipts per
@@ -1593,6 +1735,21 @@ const CROSS_CHECKED_FIELDS_LANDOBS: &[&str] = &[
     "entropy_composition",
     "operator_slug",
     "fair_pick_version",
+];
+
+// Under the grid-frequency tag: the Land Observations v6 list
+// (operator_slug and fair_pick_version included), plus weather_station,
+// which both receipts carry as null.
+const CROSS_CHECKED_FIELDS_FREQ: &[&str] = &[
+    "draw_id",
+    "operator_id",
+    "sequence",
+    "drand_chain",
+    "drand_round",
+    "entropy_composition",
+    "operator_slug",
+    "fair_pick_version",
+    "weather_station",
 ];
 
 fn check_landobs_stations(
@@ -1682,10 +1839,11 @@ fn check_receipt_field_consistency(bundle: &ProofBundle) -> StepResult {
     let fields = match &rules {
         WeatherRules::Legacy => CROSS_CHECKED_FIELDS,
         WeatherRules::LandObs => CROSS_CHECKED_FIELDS_LANDOBS,
+        WeatherRules::Freq => CROSS_CHECKED_FIELDS_FREQ,
         WeatherRules::Mismatched => {
             return StepResult {
                 name: StepName::ReceiptFieldConsistency,
-                status: StepStatus::Fail(SCHEMA_PAIRING_ERROR.into()),
+                status: StepStatus::Fail(mismatch_reason(&lock, &exec).into()),
                 detail: None,
             };
         }
@@ -1724,6 +1882,15 @@ fn check_receipt_field_consistency(bundle: &ProofBundle) -> StepResult {
             detail: None,
         };
     }
+    if rules == WeatherRules::Freq
+        && let Err(reason) = check_fair_pick_version(&lock)
+    {
+        return StepResult {
+            name: StepName::ReceiptFieldConsistency,
+            status: StepStatus::Fail(reason),
+            detail: None,
+        };
+    }
 
     StepResult {
         name: StepName::ReceiptFieldConsistency,
@@ -1744,17 +1911,17 @@ enum RuleSet {
     Legacy,
     /// The Land Observations tag on lock v6 or execution v5.
     LandObs,
+    /// The grid-frequency tag on lock v6 or execution v5.
+    Freq,
 }
 
 /// Every lock receipt `(schema_version, entropy_composition)` pair the
 /// verifier knows. A schema may in future carry more than one tag, so the
 /// rule set is chosen by the pair, never by the schema alone.
 ///
-/// When a second tag shares a schema, the seed derivation must also be
-/// chosen by the (schema, tag) pair, not by the schema or by whether
-/// `weather_value` is present: see the seed recomputation step (step 6 in
-/// `verify_bundle_with`), which today derives the seed the same way for
-/// every pair.
+/// Schema 6 carries two tags, so the seed derivation is chosen by the
+/// pair too, never by the schema or by which field is present: see
+/// `SeedInput`, used by the seed recomputation and winner selection steps.
 const LOCK_RULE_SETS: &[(&str, &str, RuleSet)] = &[
     (LOCK_SCHEMA_VERSION, ENTROPY_COMPOSITION, RuleSet::Legacy),
     (LOCK_SCHEMA_VERSION_V5, ENTROPY_COMPOSITION, RuleSet::Legacy),
@@ -1762,6 +1929,11 @@ const LOCK_RULE_SETS: &[(&str, &str, RuleSet)] = &[
         LOCK_SCHEMA_VERSION_V6,
         crate::protocol::landobs_v1::ENTROPY_COMPOSITION,
         RuleSet::LandObs,
+    ),
+    (
+        LOCK_SCHEMA_VERSION_V6,
+        crate::protocol::freq_v1::ENTROPY_COMPOSITION,
+        RuleSet::Freq,
     ),
 ];
 
@@ -1788,6 +1960,11 @@ const EXEC_RULE_SETS: &[(&str, &str, RuleSet)] = &[
         crate::protocol::landobs_v1::ENTROPY_COMPOSITION,
         RuleSet::LandObs,
     ),
+    (
+        EXECUTION_SCHEMA_VERSION_V5,
+        crate::protocol::freq_v1::ENTROPY_COMPOSITION,
+        RuleSet::Freq,
+    ),
 ];
 
 /// Which weather rules govern a receipt pair.
@@ -1798,7 +1975,11 @@ enum WeatherRules {
     Legacy,
     /// Lock v6 with execution v5, both on the Land Observations tag.
     LandObs,
-    /// Both receipts are known pairs, but one is v6/v5 and the other is not.
+    /// Lock v6 with execution v5, both on the grid-frequency tag.
+    Freq,
+    /// Both receipts are known pairs, but they select different rule sets:
+    /// one is v6/v5 and the other is not, or they carry different v6/v5
+    /// tags. See `mismatch_reason`.
     Mismatched,
     /// A receipt's `(schema_version, entropy_composition)` pair is not one
     /// the verifier knows. Fails closed: every step that picks its rules
@@ -1846,8 +2027,21 @@ fn weather_rules(lock: &serde_json::Value, exec: &serde_json::Value) -> WeatherR
         (Err(reason), _) | (_, Err(reason)) => WeatherRules::Unrecognised(reason),
         (Ok(RuleSet::Legacy), Ok(RuleSet::Legacy)) => WeatherRules::Legacy,
         (Ok(RuleSet::LandObs), Ok(RuleSet::LandObs)) => WeatherRules::LandObs,
-        (Ok(RuleSet::Legacy), Ok(RuleSet::LandObs))
-        | (Ok(RuleSet::LandObs), Ok(RuleSet::Legacy)) => WeatherRules::Mismatched,
+        (Ok(RuleSet::Freq), Ok(RuleSet::Freq)) => WeatherRules::Freq,
+        (Ok(_), Ok(_)) => WeatherRules::Mismatched,
+    }
+}
+
+/// Why a `WeatherRules::Mismatched` pair fails: two different v6/v5 tags,
+/// or a v6/v5 receipt paired with an older schema.
+fn mismatch_reason(lock: &serde_json::Value, exec: &serde_json::Value) -> &'static str {
+    let v6_family = |r: Result<RuleSet, String>| matches!(r, Ok(RuleSet::LandObs | RuleSet::Freq));
+    if v6_family(rule_set_for("lock", lock, LOCK_RULE_SETS))
+        && v6_family(rule_set_for("execution", exec, EXEC_RULE_SETS))
+    {
+        TAG_PAIRING_ERROR
+    } else {
+        SCHEMA_PAIRING_ERROR
     }
 }
 
@@ -1936,6 +2130,69 @@ fn check_landobs_weather(lock: &serde_json::Value, exec: &serde_json::Value) -> 
     }
 }
 
+/// The window under the grid-frequency tag: the lock's `freq_start` must be
+/// the window start its drand round implies, the lock must be at least
+/// `LOCK_GAP_SECS` before it (compared to the microsecond), and the
+/// execution receipt must carry either a `freq_value` with no reason, or no
+/// value with reason `no_frequency_by_deadline`.
+fn check_freq_window(lock: &serde_json::Value, exec: &serde_json::Value) -> Result<(), String> {
+    use crate::protocol::freq_v1;
+    let lock_str = |field: &str| {
+        lock.get(field)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("lock receipt {field} is missing or not a string"))
+    };
+    let freq_start = lock_str("freq_start")?;
+    let start =
+        freq_v1::parse_freq_start(freq_start).map_err(|e| format!("lock.freq_start: {e}"))?;
+    let round = lock
+        .get("drand_round")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| "lock receipt drand_round is missing or not an integer".to_string())?;
+    let expected = freq_v1::freq_start_for_round(round)
+        .ok_or_else(|| format!("drand round {round} has no quicknet publish time"))?;
+    if start != expected {
+        return Err(format!(
+            "lock freq_start {freq_start} is not the window start for drand round {round}: expected {}",
+            freq_v1::format_freq_start(expected)
+        ));
+    }
+
+    let locked_at_str = lock_str("locked_at")?;
+    let locked_at = chrono_parse_canonical_strict(locked_at_str)
+        .map_err(|e| format!("lock.locked_at ({locked_at_str}): {e}"))?;
+    let latest = freq_v1::latest_lock_at(expected)
+        .ok_or_else(|| format!("freq_start {freq_start} has no latest lock time"))?;
+    let latest_micros = latest
+        .checked_mul(1_000_000)
+        .ok_or_else(|| format!("latest lock time {latest} is out of range"))?;
+    if locked_at.timestamp_micros() > latest_micros {
+        return Err(format!(
+            "lock locked_at {locked_at_str} is later than freq_start minus {} seconds ({})",
+            freq_v1::LOCK_GAP_SECS,
+            freq_v1::format_freq_start(latest)
+        ));
+    }
+
+    let field = |name: &str| exec.get(name).filter(|v| !v.is_null());
+    let shown = |v: Option<&serde_json::Value>| if v.is_some() { "set" } else { "null" };
+    match (field("freq_value"), field("freq_fallback_reason")) {
+        (Some(_), None) => Ok(()),
+        (None, Some(reason)) if reason.as_str() == Some(freq_v1::FALLBACK_NO_FREQUENCY) => Ok(()),
+        (None, Some(reason)) => Err(format!(
+            "exec freq_fallback_reason {reason} is not \"{}\"",
+            freq_v1::FALLBACK_NO_FREQUENCY
+        )),
+        (value, reason) => Err(format!(
+            "exec receipt must carry freq_value with no freq_fallback_reason, or a \
+             freq_fallback_reason with no freq_value; it has freq_value {}, \
+             freq_fallback_reason {}",
+            shown(value),
+            shown(reason)
+        )),
+    }
+}
+
 fn check_weather_observation_window(bundle: &ProofBundle) -> StepResult {
     let lock: serde_json::Value = match serde_json::from_str(&bundle.lock_receipt.payload_jcs) {
         Ok(v) => v,
@@ -1965,7 +2222,17 @@ fn check_weather_observation_window(bundle: &ProofBundle) -> StepResult {
         WeatherRules::Mismatched => {
             return StepResult {
                 name: StepName::WeatherObservationWindow,
-                status: StepStatus::Fail(SCHEMA_PAIRING_ERROR.into()),
+                status: StepStatus::Fail(mismatch_reason(&lock, &exec).into()),
+                detail: None,
+            };
+        }
+        WeatherRules::Freq => {
+            return StepResult {
+                name: StepName::WeatherObservationWindow,
+                status: match check_freq_window(&lock, &exec) {
+                    Ok(()) => StepStatus::Pass,
+                    Err(reason) => StepStatus::Fail(reason),
+                },
                 detail: None,
             };
         }
@@ -4047,39 +4314,6 @@ mod tests {
     }
 
     #[test]
-    fn grid_frequency_receipts_fail_bundle_shape_for_now() {
-        use crate::_test_support::{freq_exec_json, freq_lock_json};
-        let (json, _) = valid_signed_bundle();
-        for (lock, exec) in [(true, true), (true, false), (false, true)] {
-            let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
-            if lock {
-                val["lock_receipt"]["payload_jcs"] =
-                    serde_json::json!(freq_lock_json().to_string());
-                val["lock_receipt"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("public_key_hex");
-            }
-            if exec {
-                val["execution_receipt"]["payload_jcs"] =
-                    serde_json::json!(freq_exec_json().to_string());
-                val["execution_receipt"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("public_key_hex");
-            }
-            let bundle = ProofBundle::from_json(&val.to_string()).unwrap();
-            let step = check_bundle_shape(&bundle);
-            assert_eq!(
-                step.status,
-                StepStatus::Fail(FREQ_NOT_SUPPORTED_YET.into()),
-                "lock {lock}, exec {exec}"
-            );
-            assert!(!verify_bundle(&bundle).passed());
-        }
-    }
-
-    #[test]
     fn entropy_weather_value_removed_fails() {
         let (json, _) = valid_signed_bundle();
         let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -4396,3 +4630,7 @@ mod tests {
 #[cfg(test)]
 #[path = "verify_steps_landobs_tests.rs"]
 mod landobs_tests;
+
+#[cfg(test)]
+#[path = "verify_steps_freq_tests.rs"]
+mod freq_tests;

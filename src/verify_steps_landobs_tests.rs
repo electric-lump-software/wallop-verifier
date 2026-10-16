@@ -944,13 +944,14 @@ fn weather_rules_dispatch_on_the_schema_and_tag_pair() {
 fn entropy_composition_is_cross_checked_under_both_rule_sets() {
     assert!(CROSS_CHECKED_FIELDS.contains(&"entropy_composition"));
     assert!(CROSS_CHECKED_FIELDS_LANDOBS.contains(&"entropy_composition"));
+    assert!(CROSS_CHECKED_FIELDS_FREQ.contains(&"entropy_composition"));
 }
 
 /// Today a lock/exec tag difference always leaves one receipt with an
 /// unknown (schema, tag) pair, so field consistency fails on that, before
 /// the `entropy_composition` cross-check is reached. This proves the
 /// difference fails; it does not exercise the cross-check itself (see
-/// `each_schema_has_exactly_one_tag`).
+/// `each_schema_tag_pair_is_listed_once`).
 #[test]
 fn lock_and_exec_tags_that_differ_fail_field_consistency_as_an_unknown_pair() {
     let report = run(&V6Params {
@@ -967,26 +968,22 @@ fn lock_and_exec_tags_that_differ_fail_field_consistency_as_an_unknown_pair() {
     assert!(!report.passed());
 }
 
-/// Tripwire. While every schema carries exactly one tag, a lock/exec tag
-/// difference can only show up as an unknown pair, and the
-/// `entropy_composition` cross-check is unreachable. Once a schema gains a
-/// second tag the cross-check becomes live and needs a real test.
+/// Each (schema, tag) pair is listed once, and two known but different tags
+/// on lock and exec fail closed (they are a mismatched pair, so the
+/// `entropy_composition` cross-check is never the only guard): see
+/// `freq_tests::known_but_different_tags_on_lock_and_exec_fail_on_the_pairing`.
 #[test]
-fn each_schema_has_exactly_one_tag() {
+fn each_schema_tag_pair_is_listed_once() {
     for (table, rows) in [
         ("LOCK_RULE_SETS", LOCK_RULE_SETS),
         ("EXEC_RULE_SETS", EXEC_RULE_SETS),
     ] {
-        for (schema, _, _) in rows {
-            let tags = rows.iter().filter(|(s, _, _)| s == schema).count();
-            assert_eq!(
-                tags, 1,
-                "{table}: schema_version {schema:?} now has {tags} tags. The \
-                 entropy_composition cross-check between lock and exec is now \
-                 reachable: add a real test that a lock/exec pair with two known \
-                 but different tags fails receipt_field_consistency on that \
-                 cross-check, then update this tripwire"
-            );
+        for (schema, tag, _) in rows {
+            let n = rows
+                .iter()
+                .filter(|(s, t, _)| s == schema && t == tag)
+                .count();
+            assert_eq!(n, 1, "{table}: ({schema:?}, {tag:?}) is listed {n} times");
         }
     }
 }

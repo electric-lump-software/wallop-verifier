@@ -68,7 +68,7 @@ pub use fair_pick_rs::{Entry, Winner, draw};
 /// JSON or a missing field).
 ///
 /// Returns `Err` for a lock receipt with schema 6 or an execution receipt
-/// with schema 5.
+/// with schema 5, under either tag (Land Observations or grid frequency).
 #[deprecated(note = "checks less than verify_bundle_with; use verify_bundle_with")]
 #[allow(clippy::too_many_arguments)]
 pub fn verify_full(
@@ -80,9 +80,10 @@ pub fn verify_full(
     infrastructure_public_key: &[u8; 32],
     entries: &[Entry],
 ) -> Result<bool, String> {
-    // The Land Observations schemas carry rules this function does not
-    // check (observation hour, lock offset, stations, fallback). Refuse
-    // rather than pass them without those checks.
+    // Lock schema 6 / execution schema 5, under either tag, carry rules this
+    // function does not check (observation hour or frequency window, lock
+    // offset, stations, fallback, and the frequency seed). Refuse rather
+    // than pass them without those checks.
     if protocol::receipts::receipt_schema_version(lock_receipt_jcs).as_deref()
         == Some(protocol::receipts::LOCK_SCHEMA_VERSION_V6)
         || protocol::receipts::receipt_schema_version(execution_receipt_jcs).as_deref()
@@ -287,10 +288,95 @@ pub fn verify(
     }
 }
 
+/// Like `verify`, for a grid-frequency draw: the seed is
+/// `compute_seed_freq` with `freq_value`, or drand alone when it is `None`.
+/// The caller chooses this function from the receipts' tag, never from
+/// which value is present.
+pub fn verify_freq(
+    draw_id: &str,
+    entries: &[Entry],
+    drand_randomness: &str,
+    freq_value: Option<&str>,
+    count: u32,
+    expected_results: &[Winner],
+) -> bool {
+    let (ehash, _) = entry_hash(draw_id, entries);
+    let (seed, _) = match freq_value {
+        Some(v) => compute_seed_freq(&ehash, drand_randomness, v),
+        None => compute_seed_drand_only(&ehash, drand_randomness),
+    };
+    match draw(entries, &seed, count) {
+        Ok(results) => results == expected_results,
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 #[allow(deprecated)] // exercises verify_full
 mod tests {
     use super::*;
+
+    #[test]
+    fn verify_full_refuses_frequency_receipts() {
+        use crate::_test_support::{FreqParams, build_freq_bundle, v6_entries};
+        for p in [FreqParams::value(), FreqParams::fallback()] {
+            let (json, pk_hex, _) = build_freq_bundle(&p);
+            let b: serde_json::Value = serde_json::from_str(&json).unwrap();
+            let pk: [u8; 32] = hex::decode(&pk_hex).unwrap().try_into().unwrap();
+            let sig = |w: &serde_json::Value| -> [u8; 64] {
+                hex::decode(w["signature_hex"].as_str().unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap()
+            };
+            let result = verify_full(
+                b["lock_receipt"]["payload_jcs"].as_str().unwrap(),
+                &sig(&b["lock_receipt"]),
+                &pk,
+                b["execution_receipt"]["payload_jcs"].as_str().unwrap(),
+                &sig(&b["execution_receipt"]),
+                &pk,
+                &v6_entries(),
+            );
+            assert!(
+                matches!(&result, Err(e) if e.contains("verified only by verify_bundle_with")),
+                "{p:?}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn verify_freq_checks_the_frequency_seed_and_verify_does_not_accept_it() {
+        let entries = crate::_test_support::v6_entries();
+        let draw_id = "22222222-2222-2222-2222-222222222222";
+        let r = "140117383b03a0c0c7a899a32b8cbd2ffff9e2569504037c358ee8c7c2efe2fd";
+        let v = "50012;50018;50012;49983;49980;49953;49912;49883";
+        let (ehash, _) = entry_hash(draw_id, &entries);
+        let (seed, _) = compute_seed_freq(&ehash, r, v);
+        let winners = draw(&entries, &seed, 2).unwrap();
+        assert!(verify_freq(draw_id, &entries, r, Some(v), 2, &winners));
+        assert!(
+            !verify(draw_id, &entries, r, Some(v), 2, &winners),
+            "the weather seed must not match"
+        );
+        let (drand_seed, _) = compute_seed_drand_only(&ehash, r);
+        let drand_winners = draw(&entries, &drand_seed, 2).unwrap();
+        assert!(verify_freq(draw_id, &entries, r, None, 2, &drand_winners));
+        // Some value never verifies a drand-only draw, and the reverse.
+        for other in ["50012;50018;50012;49983;49980;49953;49912;49884", v] {
+            let (s, _) = compute_seed_freq(&ehash, r, other);
+            if draw(&entries, &s, 2).unwrap() != drand_winners {
+                assert!(!verify_freq(
+                    draw_id,
+                    &entries,
+                    r,
+                    Some(other),
+                    2,
+                    &drand_winners
+                ));
+            }
+        }
+    }
     use ed25519_dalek::{Signer, SigningKey};
 
     const END_TO_END_VECTOR: &str = include_str!("../vendor/wallop/spec/vectors/end-to-end.json");

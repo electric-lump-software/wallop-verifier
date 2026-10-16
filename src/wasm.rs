@@ -69,6 +69,50 @@ pub fn compute_seed_drand_only_wasm(
     serde_wasm_bindgen::to_value(&result).map_err(|e| JsError::new(&e.to_string()))
 }
 
+/// WASM entry point for the grid-frequency seed.
+#[wasm_bindgen]
+pub fn compute_seed_freq_wasm(
+    entry_hash: &str,
+    drand_randomness: &str,
+    freq_value: &str,
+) -> Result<JsValue, JsError> {
+    let (seed_bytes, jcs) = protocol::compute_seed_freq(entry_hash, drand_randomness, freq_value);
+
+    let result = serde_json::json!({
+        "seed": hex::encode(seed_bytes),
+        "jcs": jcs,
+    });
+    serde_wasm_bindgen::to_value(&result).map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// WASM entry point for verifying a grid-frequency draw's winners. Choose
+/// it from the receipts' `entropy_composition`, never from which value is
+/// present.
+#[wasm_bindgen]
+pub fn verify_freq_wasm(
+    draw_id: &str,
+    entries_js: JsValue,
+    drand_randomness: &str,
+    freq_value: Option<String>,
+    count: u32,
+    expected_results_js: JsValue,
+) -> Result<bool, JsError> {
+    let entries: Vec<Entry> =
+        serde_wasm_bindgen::from_value(entries_js).map_err(|e| JsError::new(&e.to_string()))?;
+
+    let expected: Vec<Winner> = serde_wasm_bindgen::from_value(expected_results_js)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+
+    Ok(crate::verify_freq(
+        draw_id,
+        &entries,
+        drand_randomness,
+        freq_value.as_deref(),
+        count,
+        &expected,
+    ))
+}
+
 /// WASM entry point for full verification pipeline.
 #[wasm_bindgen]
 pub fn verify_wasm(

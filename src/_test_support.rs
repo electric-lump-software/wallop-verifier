@@ -825,10 +825,210 @@ impl KeyResolver for MockResolver {
     }
 }
 
+/// Quicknet round 33_068_212 (published 2026-10-14T20:00:00Z), the round
+/// core's grid-frequency tests use.
+#[doc(hidden)]
+pub const BEACON_FREQ_ROUND: u64 = 33_068_212;
+#[doc(hidden)]
+pub const BEACON_FREQ_SIGNATURE: &str = "b6541e41bb68ff318e8bd74b9f6e168ae6424476c432241420c38427df58c6ef33fe009ce202a7101120ab481702fddf";
+#[doc(hidden)]
+pub const BEACON_FREQ_RANDOMNESS: &str =
+    "140117383b03a0c0c7a899a32b8cbd2ffff9e2569504037c358ee8c7c2efe2fd";
+
+/// Inputs for a grid-frequency bundle. Defaults use quicknet round
+/// 33_068_212 (2026-10-14T20:00:00Z) and its real beacon.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct FreqParams {
+    pub lock_entropy_composition: String,
+    pub exec_entropy_composition: String,
+    pub drand_round: u64,
+    pub drand_signature: String,
+    pub drand_randomness: String,
+    pub locked_at: String,
+    pub freq_start: String,
+    pub executed_at: String,
+    pub lock_weather_station: Option<String>,
+    pub exec_weather_value: Option<String>,
+    pub freq_value: Option<String>,
+    pub freq_fallback_reason: Option<String>,
+    /// When set, the seed is computed from this instead of the signed value,
+    /// so the seed step can be made to fail on its own.
+    pub seed_from: Option<Option<String>>,
+    /// The v6 hardening, varied by the tests: both receipts'
+    /// `fair_pick_version`, the exec `operator_slug`, and the lock
+    /// `commitment_hash` (None: the entry hash, as v6 requires).
+    pub lock_fair_pick_version: String,
+    pub exec_fair_pick_version: String,
+    pub exec_operator_slug: String,
+    pub commitment_hash: Option<String>,
+}
+
+impl FreqParams {
+    /// A draw with a grid-frequency value.
+    pub fn value() -> Self {
+        Self {
+            lock_entropy_composition: crate::protocol::freq_v1::ENTROPY_COMPOSITION.into(),
+            exec_entropy_composition: crate::protocol::freq_v1::ENTROPY_COMPOSITION.into(),
+            drand_round: BEACON_FREQ_ROUND,
+            drand_signature: BEACON_FREQ_SIGNATURE.into(),
+            drand_randomness: BEACON_FREQ_RANDOMNESS.into(),
+            locked_at: "2026-10-14T19:50:00.123456Z".into(),
+            freq_start: "2026-10-14T19:54:00.000000Z".into(),
+            executed_at: "2026-10-14T20:00:05.000000Z".into(),
+            lock_weather_station: None,
+            exec_weather_value: None,
+            freq_value: Some("50012;50018;50012;49983;49980;49953;49912;49883".into()),
+            freq_fallback_reason: None,
+            seed_from: None,
+            lock_fair_pick_version: "0.1.0".into(),
+            exec_fair_pick_version: "0.1.0".into(),
+            exec_operator_slug: "acme-prizes".into(),
+            commitment_hash: None,
+        }
+    }
+
+    /// A draw that fell back to drand alone.
+    pub fn fallback() -> Self {
+        Self {
+            freq_value: None,
+            freq_fallback_reason: Some(crate::protocol::freq_v1::FALLBACK_NO_FREQUENCY.into()),
+            ..Self::value()
+        }
+    }
+}
+
+/// Build and sign a resolver-driven grid-frequency bundle from `p`, with
+/// the same envelope as `build_v6_bundle`. Returns `(bundle_json,
+/// public_key_hex, signing_key_id)`.
+#[doc(hidden)]
+pub fn build_freq_bundle(p: &FreqParams) -> (String, String, String) {
+    let sk = test_signing_key();
+    let pk_bytes: [u8; 32] = sk.verifying_key().to_bytes();
+    let pk_hex = hex::encode(pk_bytes);
+    let kid = crate::protocol::crypto::key_id(&pk_bytes);
+    let entries = v6_entries();
+    let draw_id = "22222222-2222-2222-2222-222222222222";
+    let (ehash, _) = entry_hash(draw_id, &entries);
+    let seed_input = p.seed_from.clone().unwrap_or_else(|| p.freq_value.clone());
+    let (seed_bytes, _) = match seed_input.as_deref() {
+        Some(v) => crate::protocol::compute_seed_freq(&ehash, &p.drand_randomness, v),
+        None => compute_seed_drand_only(&ehash, &p.drand_randomness),
+    };
+    let winners = draw(&entries, &seed_bytes, 2).unwrap();
+    let results: Vec<String> = winners.iter().map(|w| w.entry_id.clone()).collect();
+    let chain = crate::drand::QUICKNET_CHAIN_HASH;
+
+    let lock_jcs = serde_json::json!({
+        "commitment_hash": p.commitment_hash.clone().unwrap_or_else(|| ehash.clone()),
+        "drand_chain": chain,
+        "drand_round": p.drand_round,
+        "draw_id": draw_id,
+        "entropy_composition": &p.lock_entropy_composition,
+        "entry_hash": &ehash,
+        "fair_pick_version": &p.lock_fair_pick_version,
+        "freq_start": &p.freq_start,
+        "jcs_version": "sha256-jcs-v1",
+        "locked_at": &p.locked_at,
+        "operator_id": "11111111-1111-1111-1111-111111111111",
+        "operator_slug": "acme-prizes",
+        "schema_version": "6",
+        "sequence": 1,
+        "signature_algorithm": "ed25519",
+        "signing_key_id": &kid,
+        "wallop_core_version": "0.29.0",
+        "weather_station": &p.lock_weather_station,
+        "weather_time": null,
+        "winner_count": 2
+    })
+    .to_string();
+    let lock_sig_hex = hex::encode(sk.sign(lock_jcs.as_bytes()).to_bytes());
+
+    let exec_jcs = serde_json::json!({
+        "drand_chain": chain,
+        "drand_randomness": &p.drand_randomness,
+        "drand_round": p.drand_round,
+        "drand_signature": &p.drand_signature,
+        "drand_signature_algorithm": "bls12_381_g2",
+        "draw_id": draw_id,
+        "entropy_composition": &p.exec_entropy_composition,
+        "entry_hash": &ehash,
+        "executed_at": &p.executed_at,
+        "fair_pick_version": &p.exec_fair_pick_version,
+        "freq_fallback_reason": &p.freq_fallback_reason,
+        "freq_value": &p.freq_value,
+        "jcs_version": "sha256-jcs-v1",
+        "lock_receipt_hash": lock_receipt_hash(&lock_jcs),
+        "merkle_algorithm": "sha256-pairwise-v1",
+        "operator_id": "11111111-1111-1111-1111-111111111111",
+        "operator_slug": &p.exec_operator_slug,
+        "results": &results,
+        "schema_version": "5",
+        "seed": hex::encode(seed_bytes),
+        "sequence": 1,
+        "signature_algorithm": "ed25519",
+        "signing_key_id": &kid,
+        "wallop_core_version": "0.29.0",
+        "weather_fallback_reason": null,
+        "weather_observation_time": null,
+        "weather_station": null,
+        "weather_value": &p.exec_weather_value
+    })
+    .to_string();
+    let exec_sig_hex = hex::encode(sk.sign(exec_jcs.as_bytes()).to_bytes());
+
+    let mut entropy = serde_json::Map::new();
+    entropy.insert("drand_round".into(), serde_json::json!(p.drand_round));
+    entropy.insert(
+        "drand_randomness".into(),
+        serde_json::json!(&p.drand_randomness),
+    );
+    entropy.insert(
+        "drand_signature".into(),
+        serde_json::json!(&p.drand_signature),
+    );
+    entropy.insert("drand_chain_hash".into(), serde_json::json!(chain));
+    if let Some(v) = &p.freq_value {
+        entropy.insert("freq_value".into(), serde_json::json!(v));
+    }
+    if let Some(w) = &p.exec_weather_value {
+        entropy.insert("weather_value".into(), serde_json::json!(w));
+    }
+
+    let bundle = serde_json::json!({
+        "version": 1,
+        "draw_id": draw_id,
+        "entries": entries.iter().map(|e| serde_json::json!({"uuid": &e.id, "weight": e.weight})).collect::<Vec<_>>(),
+        "results": winners.iter().map(|w| serde_json::json!({"entry_id": &w.entry_id, "position": w.position})).collect::<Vec<_>>(),
+        "entropy": entropy,
+        "lock_receipt": { "payload_jcs": &lock_jcs, "signature_hex": &lock_sig_hex },
+        "execution_receipt": { "payload_jcs": &exec_jcs, "signature_hex": &exec_sig_hex }
+    })
+    .to_string();
+    (bundle, pk_hex, kid)
+}
+
 #[cfg(test)]
 mod beacon_tests {
     use super::*;
     use crate::drand::{QUICKNET_CHAIN_HASH, verify_drand_round};
+
+    #[test]
+    fn frequency_fixture_beacon_is_genuine() {
+        assert!(
+            verify_drand_round(
+                QUICKNET_CHAIN_HASH,
+                BEACON_FREQ_ROUND,
+                BEACON_FREQ_SIGNATURE,
+                BEACON_FREQ_RANDOMNESS
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            crate::drand::quicknet_round_time(BEACON_FREQ_ROUND),
+            Some(1_792_008_000)
+        );
+    }
 
     #[test]
     fn fixture_beacons_are_genuine() {
