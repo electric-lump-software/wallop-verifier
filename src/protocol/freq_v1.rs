@@ -20,10 +20,9 @@ pub const SPACING_SECS: i64 = 15;
 pub const SPAN_SECS: i64 = (READINGS as i64 - 1) * SPACING_SECS;
 
 /// W_freq, in seconds: a window may be stored until `F = T + SPAN_SECS +
-/// W_FREQ_SECS`. Provisional (240 s) until the Elexon latency measurement
-/// ends. Before the release that ships this tag it is set to the largest
-/// observed Elexon batch latency (measured from T + 105 s) plus 40 s, and
-/// stays at most 240 s; core's fetch window changes in the same release.
+/// W_FREQ_SECS`. Final at 240 s. The rule (largest observed Elexon batch
+/// latency, measured from T + 105 s, plus 40 s, at most 240 s) is capped and
+/// the cap binds: a window that arrives later falls back to drand only.
 pub const W_FREQ_SECS: i64 = 240;
 
 /// M, in seconds: F is never later than `pub(R) - MARGIN_SECS`, so the

@@ -20,11 +20,11 @@ pub const PRIMARY_STATION: &str = STATIONS[0];
 /// W, in seconds: the observation for `weather_time` may be fetched until
 /// `weather_time + W_SECS`.
 ///
-/// The value is provisional (40 minutes). Before the release that ships
-/// this tag, it is set to the measured Land Observations publication
-/// latency: p99 plus 10 minutes, capped at 90 minutes. Every derived value,
+/// 30 minutes: the measured Land Observations publication latency (p99 of
+/// 15 minutes) plus 10 minutes, rounded up so the primary source keeps 5
+/// minutes of headroom before the backup cutover. Every derived value,
 /// fixture and unit test follows this one constant.
-pub const W_SECS: i64 = 40 * 60;
+pub const W_SECS: i64 = 30 * 60;
 
 /// Gap between the end of the fetch window and the drand round's
 /// publication.
