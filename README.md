@@ -271,8 +271,9 @@ The lock 6 / execution 5 vectors are read by the integration tests in `tests/`:
 
 - both tags' tamper files (`proof-bundle-v6-tamper.json` and `proof-bundle-v6-tamper-freq.json`);
 - the grid-frequency window (`freq-window-v1.json`), schedule, value, receipt and proof bundle vectors.
+- the schedule boundaries (`schedule-boundaries-v1.json`): both tags' schedules for every whole minute from 22:00 to 02:59 UTC across both UK clock changes, a month end, a year end and February with and without a leap day.
 
-These files come from one wallop release and are vendored together. Once any of them is vendored, a missing one fails the test suite; it is never skipped. Before they are vendored, point `WALLOP_CORE_VECTORS_DIR` at a wallop checkout's `spec/vectors`. The tamper and window files also take their own paths: `WALLOP_TAMPER_VECTORS`, `WALLOP_TAMPER_FREQ_VECTORS` and `WALLOP_FREQ_WINDOW_VECTORS`. With nothing vendored and no path set, those tests skip and say so. The rules are in `tests/common/mod.rs`.
+These files come from one wallop release and are vendored together. Once any of them is vendored, a missing one fails the test suite; it is never skipped. Before they are vendored, point `WALLOP_CORE_VECTORS_DIR` at a wallop checkout's `spec/vectors`. The tamper, window and schedule boundary files also take their own paths: `WALLOP_TAMPER_VECTORS`, `WALLOP_TAMPER_FREQ_VECTORS`, `WALLOP_FREQ_WINDOW_VECTORS` and `WALLOP_SCHEDULE_BOUNDARY_VECTORS`. With nothing vendored and no path set, those tests skip and say so. The rules are in `tests/common/mod.rs`.
 
 ---
 

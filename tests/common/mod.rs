@@ -45,6 +45,7 @@ pub const V6_VECTORS: &[&str] = &[
     "execution-receipt-fallback-v5-freq.json",
     "proof-bundle-v6-freq.json",
     "proof-bundle-v6-freq-fallback.json",
+    "schedule-boundaries-v1.json",
 ];
 
 fn vendored_dir() -> PathBuf {
