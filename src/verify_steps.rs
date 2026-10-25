@@ -35,7 +35,13 @@ pub enum StepName {
     LockSignature,
     /// The execution receipt's Ed25519 signature under its
     /// infrastructure key. As for `LockSignature`, a receipt that fails
-    /// its typed parse fails this step too.
+    /// its typed parse fails this step too. Whether the typed parse
+    /// succeeds depends on `schema_version` alone: the parser may pick a
+    /// struct by tag, but each receipt kind has one key set for both
+    /// tags, and `entropy_composition` is checked after the parse
+    /// (`BundleShape`). So a receipt with the right shape and a wrong or
+    /// unknown tag keeps its key id, and its signature step passes when
+    /// the signature is valid.
     ExecSignature,
     ReceiptLinkage,
     /// The lock receipt's `entry_hash` equals the entry hash recomputed
@@ -265,6 +271,9 @@ pub enum ResolutionFailureKind {
     /// The signature step fails closed: a receipt that fails its typed
     /// parse has no key id, so its signature step fails too. The shared
     /// tamper vectors depend on this, and other verifiers must match it.
+    /// Whether the typed parse succeeds depends on `schema_version` alone;
+    /// the tag is checked after it, so a wrong or unknown tag on a
+    /// receipt of the right shape never produces this.
     ReceiptUnparsed,
 }
 
