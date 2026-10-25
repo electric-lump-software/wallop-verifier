@@ -515,15 +515,11 @@ fn lock_station_must_be_middle_wallop() {
     );
     assert_eq!(
         check_landobs_station(&serde_json::json!({"weather_station": 3749})),
-        Err(
-            "lock weather_station missing or not a string is not the station wmo-03749".to_string()
-        )
+        Err("lock weather_station is missing or not a string; it must be wmo-03749".to_string())
     );
     assert_eq!(
         check_landobs_station(&serde_json::json!({})),
-        Err(
-            "lock weather_station missing or not a string is not the station wmo-03749".to_string()
-        )
+        Err("lock weather_station is missing or not a string; it must be wmo-03749".to_string())
     );
 }
 

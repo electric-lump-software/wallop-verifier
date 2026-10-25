@@ -1642,7 +1642,8 @@ fn check_drand_beacon(bundle: &ProofBundle, exec: &serde_json::Value) -> Result<
     }
 
     // The same binding for the grid-frequency value. A receipt without
-    // `freq_value` (every other tag) allows no `entropy.freq_value`.
+    // `freq_value` (a tag that carries none, or a weather tag whose reading
+    // arrived) allows no `entropy.freq_value`.
     let exec_freq = match exec.get("freq_value").filter(|v| !v.is_null()) {
         None => None,
         Some(v) => Some(
@@ -1825,7 +1826,7 @@ fn check_landobs_station(lock: &serde_json::Value) -> Result<(), String> {
             "lock weather_station {other:?} is not the station {PRIMARY_STATION}"
         )),
         None => Err(format!(
-            "lock weather_station missing or not a string is not the station {PRIMARY_STATION}"
+            "lock weather_station is missing or not a string; it must be {PRIMARY_STATION}"
         )),
     }
 }

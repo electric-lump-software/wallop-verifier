@@ -605,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_reports_both_stations() {
+    fn fallback_reports_middle_wallop() {
         let mut server = mockito::Server::new();
         let earlier = ROW_03749.replace("19:00:00Z", "18:00:00Z");
         server.mock("GET", "/gcnfur").with_body(&earlier).create();
