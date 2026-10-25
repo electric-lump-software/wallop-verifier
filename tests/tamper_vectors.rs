@@ -200,13 +200,15 @@ fn tamper_case_names_are_unique() {
 }
 
 /// Each tag's file carries its own bases and cases, so neither half can go
-/// missing unnoticed.
+/// missing unnoticed. The Land Observations file has one base per execution
+/// state: a reading, the grid-frequency window, drand alone. Base names are
+/// per file: `freq_fallback` is state (b) there and the frequency tag's
+/// fallback in the other file.
 #[test]
 fn each_tamper_file_has_its_tag_bases_and_cases() {
-    for ((name, env), bases) in FILES
-        .iter()
-        .zip([["observed", "fallback"], ["freq_observed", "freq_fallback"]])
-    {
+    let land_obs: &[&str] = &["observed", "freq_fallback", "fallback"];
+    let freq: &[&str] = &["freq_observed", "freq_fallback"];
+    for ((name, env), bases) in FILES.iter().zip([land_obs, freq]) {
         let Some(v) = common::core_vector(name, Some(env)) else {
             continue;
         };
@@ -220,7 +222,7 @@ fn each_tamper_file_has_its_tag_bases_and_cases() {
         let cases = v["cases"].as_array().expect("cases is a list");
         for base in bases {
             assert!(
-                cases.iter().any(|c| c["base"] == base),
+                cases.iter().any(|c| c["base"] == *base),
                 "{name}: no case uses base {base}"
             );
         }

@@ -57,8 +57,8 @@ const NEGATIVE_CASE_REASONS: &[(&str, &str)] = &[
         "round_published_before_lock",
         "not after lock receipt locked_at",
     ),
-    ("lock_station_not_first_in_tag", "got \"wmo-03462\""),
-    ("exec_station_not_in_tag", "got \"wmo-03772\""),
+    ("lock_station_not_middle_wallop", "got \"wmo-03462\""),
+    ("exec_station_not_middle_wallop", "got \"wmo-03772\""),
     ("exec_station_wittering", "got \"wmo-03462\""),
     (
         "observation_time_not_weather_time",

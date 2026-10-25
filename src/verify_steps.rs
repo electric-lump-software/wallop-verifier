@@ -91,7 +91,7 @@ pub enum StepName {
     /// RFC 3339 form (`chrono_parse_canonical`). It covers lock receipt
     /// schema 4, 5 or 6 and execution receipt schema 2 to 5; under lock
     /// schema 6 / execution schema 5 it also checks the Land Observations
-    /// tag pins (stations, fallback reason, `weather_value` grammar). Lock
+    /// tag pins (the station, fallback reason, `weather_value` grammar). Lock
     /// schema 6 must pair with execution schema 5 in both directions, and
     /// under lock schema 6 `weather_time`, `locked_at`, `executed_at` and
     /// `weather_observation_time` must be canonical and round-trip. The

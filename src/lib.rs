@@ -82,7 +82,7 @@ pub fn verify_full(
 ) -> Result<bool, String> {
     // Lock schema 6 / execution schema 5, under either tag, carry rules this
     // function does not check (observation hour or frequency window, lock
-    // offset, stations, fallback, and the frequency seed). Refuse rather
+    // offset, the station, fallback, and the frequency seed). Refuse rather
     // than pass them without those checks.
     if protocol::receipts::receipt_schema_version(lock_receipt_jcs).as_deref()
         == Some(protocol::receipts::LOCK_SCHEMA_VERSION_V6)

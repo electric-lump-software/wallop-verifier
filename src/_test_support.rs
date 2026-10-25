@@ -651,11 +651,11 @@ pub const V6_NEGATIVE_CASES: &[(&str, &[&str])] = &[
         &["weather_observation_window", "drand_bls_signature"],
     ),
     (
-        "lock_station_not_first_in_tag",
+        "lock_station_not_middle_wallop",
         &["bundle_shape", "receipt_field_consistency"],
     ),
     (
-        "exec_station_not_in_tag",
+        "exec_station_not_middle_wallop",
         &["bundle_shape", "receipt_field_consistency"],
     ),
     (
@@ -807,11 +807,11 @@ pub fn v6_negative_bundle(name: &str) -> (String, String, String) {
             locked_at: at(published + 1),
             ..base
         },
-        "lock_station_not_first_in_tag" => V6Params {
+        "lock_station_not_middle_wallop" => V6Params {
             lock_station: "wmo-03462".into(),
             ..base
         },
-        "exec_station_not_in_tag" => V6Params {
+        "exec_station_not_middle_wallop" => V6Params {
             exec_station: Some("wmo-03772".into()),
             ..base
         },

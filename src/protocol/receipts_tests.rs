@@ -1166,7 +1166,7 @@ fn exec_v5_rejects_v5_era_fallback_reasons() {
 }
 
 #[test]
-fn exec_v5_rejects_stations_outside_the_list() {
+fn exec_v5_rejects_a_station_not_middle_wallop() {
     let p = exec_v5(|v| v["weather_station"] = serde_json::json!("wmo-03772"));
     assert!(
         validate_execution_receipt_tags_v5(&p)

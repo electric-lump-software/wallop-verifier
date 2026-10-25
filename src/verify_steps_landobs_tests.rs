@@ -435,7 +435,7 @@ fn legacy_v5_observation_an_hour_early_still_passes_the_window() {
 }
 
 #[test]
-fn v6_exec_station_outside_the_list_fails_field_consistency() {
+fn v6_exec_station_not_middle_wallop_fails_field_consistency() {
     let p = V6Params {
         exec_station: Some("wmo-03772".into()),
         ..V6Params::weather()
@@ -1468,5 +1468,88 @@ fn a_receipt_outside_the_table_fails_window_consistency_and_seed() {
         ] {
             assert_step_fails(&report, name, "none of the three states");
         }
+    }
+}
+
+#[test]
+fn v6_bundle_entropy_altered_in_any_state_fails_only_the_drand_step() {
+    // The unsigned `entropy` copy of the value that fed the seed is bound to
+    // the signed execution receipt. Changing, dropping or adding either
+    // value, in each of the three states, fails the drand step and nothing
+    // else: the signed receipts are untouched.
+    let weather = Some(serde_json::json!("142;1025;85;2432"));
+    let freq = Some(serde_json::json!(
+        "50013;50018;50012;49983;49980;49953;49912;49883"
+    ));
+    let cases = [
+        (
+            "(a) weather_value changed",
+            V6Params::weather(),
+            "weather_value",
+            &weather,
+        ),
+        (
+            "(a) weather_value removed",
+            V6Params::weather(),
+            "weather_value",
+            &None,
+        ),
+        (
+            "(a) freq_value added",
+            V6Params::weather(),
+            "freq_value",
+            &freq,
+        ),
+        (
+            "(b) freq_value changed",
+            V6Params::freq_fallback(),
+            "freq_value",
+            &freq,
+        ),
+        (
+            "(b) freq_value removed",
+            V6Params::freq_fallback(),
+            "freq_value",
+            &None,
+        ),
+        (
+            "(b) weather_value added",
+            V6Params::freq_fallback(),
+            "weather_value",
+            &weather,
+        ),
+        (
+            "(c) weather_value added",
+            V6Params::fallback(),
+            "weather_value",
+            &weather,
+        ),
+        (
+            "(c) freq_value added",
+            V6Params::fallback(),
+            "freq_value",
+            &freq,
+        ),
+    ];
+    for (case, params, key, value) in cases {
+        let (json, pk_hex, kid) = build_v6_bundle(&params);
+        assert!(run_json(&json, &pk_hex, &kid).passed(), "{case}: base");
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let entropy = v["entropy"].as_object_mut().unwrap();
+        match value {
+            Some(value) => assert_ne!(
+                entropy.insert(key.into(), value.clone()).as_ref(),
+                Some(value),
+                "{case}"
+            ),
+            None => assert!(entropy.remove(key).is_some(), "{case}: no {key} to remove"),
+        };
+        let report = run_json(&v.to_string(), &pk_hex, &kid);
+        assert_only_fails(
+            &report,
+            StepName::DrandBlsSignature,
+            &format!("entropy.{key}"),
+            case,
+        );
     }
 }
