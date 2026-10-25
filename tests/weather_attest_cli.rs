@@ -99,3 +99,33 @@ fn subcommand_help_names_the_grid_frequency_record() {
         .join(" ");
     assert!(help.contains("Elexon's public BMRS FREQ record"), "{help}");
 }
+
+#[test]
+fn refuses_an_execution_receipt_outside_the_three_states_before_any_lookup() {
+    // A fake key, passed the way the help recommends, never printed.
+    const KEY: &str = "fake-metoffice-key-do-not-print";
+    let (json, _, _) =
+        wallop_verifier::_test_support::v6_negative_bundle("weather_with_freq_value");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wallop-verify"))
+        .args(["weather-attest", "-"])
+        .env("WALLOP_METOFFICE_KEY", KEY)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(json.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("none of the three states"), "{stderr}");
+    // Nothing was fetched or reported.
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(!stdout.contains(KEY) && !stderr.contains(KEY));
+}

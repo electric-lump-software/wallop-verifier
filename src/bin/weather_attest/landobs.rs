@@ -88,7 +88,7 @@ pub(crate) fn presence(rows: &[Row], weather_time: &str) -> Outcome {
         }
         None => Outcome::Absent(format!("no row for {}", &weather_time[..16])),
         Some(row) => match row_to_value(row) {
-            Ok(value) => Outcome::Present(value),
+            Ok(_value) => Outcome::Present(super::PRESENT_CAVEAT.into()),
             Err(e) => Outcome::Absent(format!("row present but not a valid observation: {e}")),
         },
     }

@@ -234,7 +234,7 @@ pub(crate) fn presence(body: Option<&str>, station: &str, weather_time: &str) ->
         Ok(None) => Outcome::Unavailable(NONE_AROUND.into()),
         Ok(Some(r)) if r.nil => Outcome::Absent("SYNOP is NIL".into()),
         Ok(Some(r)) => match (r.t_tenths, r.mslp_tenths) {
-            (Some(t), Some(p)) => Outcome::Present(format!("t {t}, mslp {}", (p + 5) / 10)),
+            (Some(_), Some(_)) => Outcome::Present(super::PRESENT_CAVEAT.into()),
             _ => Outcome::Absent("SYNOP has no temperature or pressure group".into()),
         },
     }

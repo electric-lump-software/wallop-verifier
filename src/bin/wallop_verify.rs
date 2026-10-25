@@ -143,9 +143,10 @@ enum Commands {
     ///
     /// Checks the weather details in a schema 6 bundle's execution receipt
     /// against Met Office Land Observations (which keeps about 48 hours)
-    /// and the WMO SYNOP via Ogimet, or, for a grid-frequency bundle, its
-    /// 8 readings against Elexon's public BMRS FREQ record (no key needed).
-    /// This is informational: it does not
+    /// and the WMO SYNOP via Ogimet. When the draw fell back from Middle
+    /// Wallop's reading, it also checks the grid-frequency window, and for
+    /// a grid-frequency bundle its 8 readings, against Elexon's public BMRS
+    /// FREQ record (no key needed). This is informational: it does not
     /// check signatures and never changes a verification result. Run
     /// `wallop-verify <BUNDLE>` to verify the bundle. Top-level flags such
     /// as --mode and --pin-* do not apply to this command.
