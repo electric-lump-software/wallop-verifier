@@ -200,31 +200,62 @@ pub(crate) fn run(bundle: &ProofBundle) -> ExitCode {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use wallop_verifier::_test_support::{FreqParams, build_freq_bundle, resign_exec};
 
-    const REAL: &str = "50012;50018;50012;49983;49980;49953;49912;49883";
-    const REAL_TEXT: [&str; 8] = [
+    pub(crate) const REAL: &str = "50012;50018;50012;49983;49980;49953;49912;49883";
+    pub(crate) const REAL_TEXT: [&str; 8] = [
         "50.012", "50.018", "50.012", "49.983", "49.98", "49.953", "49.912", "49.883",
     ];
 
-    fn body(texts: &[&str]) -> String {
-        let times = [
-            "19:54:00", "19:54:15", "19:54:30", "19:54:45", "19:55:00", "19:55:15", "19:55:30",
-            "19:55:45",
-        ];
+    /// The frequency fixture's window start, 2026-10-14T19:54:00Z.
+    const START: i64 = 1_792_007_640;
+
+    /// Elexon's stamp for `secs`: whole seconds, `Z`.
+    fn stamp(secs: i64) -> String {
+        let canonical = freq_v1::format_freq_start(secs);
+        format!("{}Z", canonical.strip_suffix(".000000Z").unwrap())
+    }
+
+    /// An Elexon FREQ body holding `texts` at the reading times from
+    /// `start`, 15 s apart, newest first as Elexon sends them.
+    pub(crate) fn body_at(start: i64, texts: &[&str]) -> String {
         let rows: Vec<String> = texts
             .iter()
-            .zip(times)
+            .enumerate()
             .rev()
-            .map(|(f, t)| {
-                format!(
-                    r#"{{"dataset":"FREQ","measurementTime":"2026-10-14T{t}Z","frequency":{f}}}"#
-                )
+            .map(|(i, f)| {
+                let t = stamp(start + freq_v1::SPACING_SECS * i as i64);
+                format!(r#"{{"dataset":"FREQ","measurementTime":"{t}","frequency":{f}}}"#)
             })
             .collect();
         format!(r#"{{"data":[{}]}}"#, rows.join(","))
+    }
+
+    fn body(texts: &[&str]) -> String {
+        body_at(START, texts)
+    }
+
+    /// Serve `body` for exactly the window request from `start`.
+    pub(crate) fn serve_at(
+        server: &mut mockito::Server,
+        start: i64,
+        status: usize,
+        body: &str,
+    ) -> mockito::Mock {
+        server
+            .mock("GET", "/")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("measurementDateTimeFrom".into(), stamp(start)),
+                mockito::Matcher::UrlEncoded(
+                    "measurementDateTimeTo".into(),
+                    stamp(start + freq_v1::SPAN_SECS),
+                ),
+            ]))
+            .with_status(status)
+            .with_body(body)
+            .create()
     }
 
     fn input(value: Option<&str>) -> FreqAttestInput {
@@ -238,21 +269,7 @@ mod tests {
     }
 
     fn serve(server: &mut mockito::Server, status: usize, body: &str) -> mockito::Mock {
-        server
-            .mock("GET", "/")
-            .match_query(mockito::Matcher::AllOf(vec![
-                mockito::Matcher::UrlEncoded(
-                    "measurementDateTimeFrom".into(),
-                    "2026-10-14T19:54:00Z".into(),
-                ),
-                mockito::Matcher::UrlEncoded(
-                    "measurementDateTimeTo".into(),
-                    "2026-10-14T19:55:45Z".into(),
-                ),
-            ]))
-            .with_status(status)
-            .with_body(body)
-            .create()
+        serve_at(server, START, status, body)
     }
 
     fn outcome(value: Option<&str>, status: usize, body: &str) -> Outcome {
@@ -262,6 +279,14 @@ mod tests {
         mock.assert();
         assert_eq!(lines.len(), 1);
         lines.into_iter().next().unwrap().outcome
+    }
+
+    #[test]
+    fn the_helpers_serve_the_fixture_window() {
+        assert_eq!(stamp(START), "2026-10-14T19:54:00Z");
+        assert_eq!(stamp(START + freq_v1::SPAN_SECS), "2026-10-14T19:55:45Z");
+        let b = body(&REAL_TEXT);
+        assert!(b.starts_with(r#"{"data":[{"dataset":"FREQ","measurementTime":"2026-10-14T19:55:45Z","frequency":49.883}"#), "{b}");
     }
 
     #[test]

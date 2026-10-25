@@ -211,6 +211,11 @@ pub fn receipt_schema_version_wasm(payload_jcs: &str) -> Option<String> {
 /// `"drand_only"`. Any other combination of the five fields, or a payload
 /// that is not a JSON object, is an error. A page picks its seed formula
 /// from this, never from which field happens to be present.
+///
+/// This selects a seed formula; it is not a check. It does not verify
+/// signatures, the tag, the station or `freq_start`. Only
+/// `verify_bundle_*` decides whether a bundle is valid, and a page must
+/// show no seed match unless that gate passes.
 #[wasm_bindgen]
 pub fn landobs_exec_state_wasm(exec_payload_jcs: &str) -> Result<String, JsError> {
     use protocol::landobs_v1::{ExecState, exec_state};

@@ -153,8 +153,9 @@ enum Commands {
     ///
     /// Exit status: 0 means no mismatch was found, not that the weather is
     /// confirmed. 1 means a public record disagrees with the receipt, not a
-    /// failed verification. 2 means the bundle could not be read or is not
-    /// schema 6.
+    /// failed verification. 2 means the bundle could not be read, is not
+    /// schema 6, or its execution receipt is in none of the three states
+    /// (weather, grid frequency, drand only).
     WeatherAttest {
         /// Path to proof bundle JSON file, or "-" for stdin
         bundle: String,

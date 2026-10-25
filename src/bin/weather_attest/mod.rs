@@ -54,10 +54,10 @@ pub(crate) struct Line {
 
 /// Which source fed the seed, by the signed execution receipt's state
 /// under the three-state table (`landobs_v1::exec_state`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SeedSource {
-    /// (a) Middle Wallop's reading.
-    Weather,
+    /// (a) Middle Wallop's reading: the signed `weather_value`.
+    Weather(String),
     /// (b) The round's grid-frequency window.
     Freq,
     /// (c) drand alone.
@@ -72,7 +72,6 @@ pub(crate) struct AttestInput {
     pub weather_time_unix: i64,
     pub station: String,
     pub source: SeedSource,
-    pub value: Option<String>,
     pub fallback_reason: Option<String>,
     pub freq_start: String,
     pub freq_start_unix: i64,
@@ -114,7 +113,7 @@ impl AttestInput {
             serde_json::from_str(&bundle.execution_receipt.payload_jcs)
                 .map_err(|e| format!("the execution receipt is unusable: {e}"))?;
         let source = match landobs_v1::exec_state(&payload)? {
-            ExecState::Weather(_) => SeedSource::Weather,
+            ExecState::Weather(value) => SeedSource::Weather(value.to_string()),
             ExecState::Freq(_) => SeedSource::Freq,
             ExecState::DrandOnly => SeedSource::DrandOnly,
         };
@@ -127,7 +126,6 @@ impl AttestInput {
             weather_time_unix,
             station,
             source,
-            value: exec.weather_value,
             fallback_reason: exec.weather_fallback_reason,
             freq_start: lock.freq_start,
             freq_start_unix,
@@ -207,15 +205,8 @@ pub(crate) fn attest(
     };
 
     let mut lines = Vec::new();
-    match (input.source, &input.value) {
-        (SeedSource::Weather, None) => {
-            // `from_bundle` never builds this; the table puts a value in (a).
-            lines.push(Line {
-                label: format!("Land Observations, {}", input.station),
-                outcome: Outcome::Unavailable("the receipt has no weather_value".into()),
-            });
-        }
-        (SeedSource::Weather, Some(value)) => {
+    match &input.source {
+        SeedSource::Weather(value) => {
             lines.push(Line {
                 label: format!("Land Observations, {}", input.station),
                 outcome: match rows_for(&input.station) {
@@ -233,9 +224,21 @@ pub(crate) fn attest(
                 },
             });
         }
-        (SeedSource::Freq | SeedSource::DrandOnly, _) => {
+        SeedSource::Freq | SeedSource::DrandOnly => {
             presence_lines(PRIMARY_STATION, &mut lines);
-            lines.extend(freq::attest(&input.freq_input(), elexon));
+            // A window Elexon holds now says no more than a reading the
+            // Met Office holds now: its publication time is unknown.
+            lines.extend(
+                freq::attest(&input.freq_input(), elexon)
+                    .into_iter()
+                    .map(|line| match line.outcome {
+                        Outcome::Present(d) => Line {
+                            outcome: Outcome::Present(format!("{d}; {PRESENT_CAVEAT}")),
+                            ..line
+                        },
+                        _ => line,
+                    }),
+            );
         }
     }
     lines
@@ -325,8 +328,8 @@ fn report(input: &AttestInput, lines: &[Line]) -> String {
     let _ = writeln!(out, "  Draw ................ {}", input.draw_id);
     let _ = writeln!(out, "  Observation hour .... {}", input.weather_time);
     let reason = |r: &Option<String>| r.as_deref().unwrap_or("no reason given").to_string();
-    match input.source {
-        SeedSource::Weather => {
+    match &input.source {
+        SeedSource::Weather(value) => {
             let _ = writeln!(out, "  Seed source ......... Middle Wallop's reading");
             let _ = writeln!(
                 out,
@@ -334,9 +337,7 @@ fn report(input: &AttestInput, lines: &[Line]) -> String {
                 input.station,
                 station_name(&input.station)
             );
-            if let Some(value) = &input.value {
-                let _ = writeln!(out, "  Weather value ....... {value}");
-            }
+            let _ = writeln!(out, "  Weather value ....... {value}");
         }
         SeedSource::Freq => {
             let _ = writeln!(
@@ -377,7 +378,7 @@ fn report(input: &AttestInput, lines: &[Line]) -> String {
     }
     let _ = writeln!(out);
     let details = match input.source {
-        SeedSource::Weather => "weather details",
+        SeedSource::Weather(_) => "weather details",
         SeedSource::Freq | SeedSource::DrandOnly => "weather and grid-frequency details",
     };
     let _ = writeln!(
@@ -395,14 +396,14 @@ fn report(input: &AttestInput, lines: &[Line]) -> String {
     {
         let _ = writeln!(
             out,
-            "  PRESENT means the record holds that hour now. Its publication time is"
+            "  PRESENT means the record holds that hour, or that grid window, now. Its"
         );
         let _ = writeln!(
             out,
-            "  unknown, so a late reading can't be told from a withheld one."
+            "  publication time is unknown, so a late reading can't be told from a withheld one."
         );
     }
-    if input.source != SeedSource::Weather {
+    if !matches!(input.source, SeedSource::Weather(_)) {
         let _ = writeln!(
             out,
             "  Contains BMRS data © Elexon Limited copyright and database right {}.",
@@ -417,8 +418,8 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use wallop_verifier::_test_support::{
-        V6_FREQ_VALUE, V6Params, build_v6_bundle, build_valid_v5_bundle, v6_entries,
-        v6_negative_bundle,
+        V6_FREQ_VALUE, V6_WEATHER_VALUE, V6Params, build_v6_bundle, build_valid_v5_bundle,
+        v6_entries, v6_negative_bundle,
     };
 
     const WT: &str = "2026-10-01T19:00:00.000000Z";
@@ -430,10 +431,7 @@ mod tests {
     /// The round's window start for `WT` at the earliest publish time.
     const FREQ_START: &str = "2026-10-01T19:25:00.000000Z";
     const FREQ_START_UNIX: i64 = WT_UNIX + 1500;
-    const FREQ: &str = "50012;50018;50012;49983;49980;49953;49912;49883";
-    const FREQ_TEXT: [&str; 8] = [
-        "50.012", "50.018", "50.012", "49.983", "49.98", "49.953", "49.912", "49.883",
-    ];
+    use freq::tests::{REAL as FREQ, REAL_TEXT as FREQ_TEXT, body_at, serve_at};
     const NOW: i64 = WT_UNIX + 3600;
 
     /// State (a) with a value, otherwise state (c).
@@ -443,12 +441,10 @@ mod tests {
             weather_time: WT.into(),
             weather_time_unix: WT_UNIX,
             station: station.into(),
-            source: if value.is_some() {
-                SeedSource::Weather
-            } else {
-                SeedSource::DrandOnly
+            source: match value {
+                Some(v) => SeedSource::Weather(v.into()),
+                None => SeedSource::DrandOnly,
             },
-            value: value.map(str::to_owned),
             fallback_reason: value
                 .is_none()
                 .then(|| landobs_v1::FALLBACK_NO_OBSERVATION.to_string()),
@@ -483,38 +479,12 @@ mod tests {
         http::ElexonClient::new(&server.url())
     }
 
-    /// An Elexon FREQ body holding `texts` at the 8 reading times from
-    /// `FREQ_START`, newest first as Elexon sends them.
-    fn elexon_body(texts: &[&str]) -> String {
-        let rows: Vec<String> = texts
-            .iter()
-            .enumerate()
-            .rev()
-            .map(|(i, f)| {
-                let at = freq_v1::format_freq_start(FREQ_START_UNIX + 15 * i as i64);
-                let at = at.strip_suffix(".000000Z").unwrap();
-                format!(r#"{{"dataset":"FREQ","measurementTime":"{at}Z","frequency":{f}}}"#)
-            })
-            .collect();
-        format!(r#"{{"data":[{}]}}"#, rows.join(","))
+    fn serve_elexon(server: &mut mockito::Server, body: &str) -> mockito::Mock {
+        serve_at(server, FREQ_START_UNIX, 200, body)
     }
 
-    fn serve_elexon(server: &mut mockito::Server, body: &str) -> mockito::Mock {
-        server
-            .mock("GET", "/")
-            .match_query(mockito::Matcher::AllOf(vec![
-                mockito::Matcher::UrlEncoded(
-                    "measurementDateTimeFrom".into(),
-                    "2026-10-01T19:25:00Z".into(),
-                ),
-                mockito::Matcher::UrlEncoded(
-                    "measurementDateTimeTo".into(),
-                    "2026-10-01T19:26:45Z".into(),
-                ),
-            ]))
-            .with_body(body)
-            .expect(1)
-            .create()
+    fn elexon_body(texts: &[&str]) -> String {
+        body_at(FREQ_START_UNIX, texts)
     }
 
     fn mock_synop(server: &mut mockito::Server, block: &str, body: &str) -> mockito::Mock {
@@ -530,7 +500,7 @@ mod tests {
         let (json, _, _) = build_v6_bundle(&V6Params::weather());
         let i = AttestInput::from_bundle(&ProofBundle::from_json(&json).unwrap()).unwrap();
         assert_eq!(i.station, "wmo-03749");
-        assert_eq!(i.value.as_deref(), Some("184;1021;51;4114"));
+        assert_eq!(i.source, SeedSource::Weather("184;1021;51;4114".into()));
     }
 
     #[test]
@@ -858,7 +828,7 @@ mod tests {
             AttestInput::from_bundle(&ProofBundle::from_json(&json).unwrap()).unwrap()
         };
         let a = read(&V6Params::weather());
-        assert_eq!(a.source, SeedSource::Weather);
+        assert_eq!(a.source, SeedSource::Weather(V6_WEATHER_VALUE.into()));
         assert_eq!(a.freq_value, None);
         assert_eq!(a.freq_fallback_reason, None);
         let start = V6Params::weather().freq_start.unwrap();
@@ -927,11 +897,21 @@ mod tests {
                 l.label
             );
         }
+        // State (c): Elexon holds the window now, with the same caveat.
+        let grid = lines
+            .iter()
+            .find(|l| l.label.starts_with("Elexon"))
+            .unwrap();
+        assert!(
+            matches!(&grid.outcome, Outcome::Present(d)
+                if d.starts_with("Elexon now holds a valid window") && d.ends_with(&format!("; {PRESENT_CAVEAT}"))),
+            "{grid:?}"
+        );
         let r = report(&input_fallback(), &lines);
         assert!(r.contains(&format!("PRESENT ({PRESENT_CAVEAT})")), "{r}");
         let flat = r.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            flat.contains("PRESENT means the record holds that hour now. Its publication time is unknown, so a late reading can't be told from a withheld one."),
+            flat.contains("PRESENT means the record holds that hour, or that grid window, now. Its publication time is unknown, so a late reading can't be told from a withheld one."),
             "{r}"
         );
         assert!(!r.contains("does not show"), "{r}");
@@ -1056,11 +1036,15 @@ mod tests {
         let mut server = mockito::Server::new();
         server.mock("GET", "/gcnfur").with_status(500).create();
         mock_synop(&mut server, "03749", "");
-        server
-            .mock("GET", "/")
-            .match_query(mockito::Matcher::Any)
-            .with_body(r#"{"data":[]}"#)
-            .create();
+        // The real window for the fixture's own freq_start: the fixture
+        // signs the same readings the frequency tests serve.
+        assert_eq!(V6_FREQ_VALUE, FREQ);
+        let window = serve_at(
+            &mut server,
+            input.freq_start_unix,
+            200,
+            &body_at(input.freq_start_unix, &FREQ_TEXT),
+        );
         let landobs_client = http::LandObsClient::new(&server.url(), KEY);
         let lines = attest(
             &input,
@@ -1069,8 +1053,18 @@ mod tests {
             &elexon(&server),
             input.weather_time_unix + 3600,
         );
+        window.assert();
         let out = report(&input, &lines);
         assert!(out.contains("Elexon FREQ from"), "{out}");
+        let grid = lines
+            .iter()
+            .find(|l| l.label.starts_with("Elexon"))
+            .unwrap();
+        assert_eq!(
+            grid.outcome,
+            Outcome::Match(format!("8 readings {V6_FREQ_VALUE}")),
+            "{out}"
+        );
         assert!(!has_mismatch(&lines), "{out}");
         assert!(!out.contains(KEY), "{out}");
     }
