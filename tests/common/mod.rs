@@ -3,17 +3,19 @@
 //!
 //! Where a vector is read from, in order:
 //!
-//! 1. The vendored copy, `vendor/wallop/spec/vectors/<name>`.
-//! 2. **Hard failure** if that file is missing but the vendored tree holds
-//!    any lock 6 / execution 5 vector (`V6_VECTORS`). Those files come from
-//!    one core release, so once one is vendored every one must be: a
-//!    missing file means an incomplete vendor bump, and the test fails
-//!    rather than skipping.
-//! 3. The file's own environment variable, where it has one (for example
-//!    `WALLOP_TAMPER_VECTORS`), or `WALLOP_CORE_VECTORS_DIR/<name>`. This is
-//!    the documented fallback before the v6 vectors are vendored: point it
-//!    at a core checkout's `spec/vectors`. A path that is set but can't be
-//!    read fails the test.
+//! 1. An explicit path: the file's own environment variable, where it has
+//!    one (for example `WALLOP_TAMPER_VECTORS`), or
+//!    `WALLOP_CORE_VECTORS_DIR/<name>`. Point it at a core checkout's
+//!    `spec/vectors` to confirm that checkout's vectors. It overrides the
+//!    vendored copy when both exist, and the test says so on stderr, and
+//!    says loudly when the two files differ. A directory that is set but
+//!    lacks the file fails the test.
+//! 2. The vendored copy, `vendor/wallop/spec/vectors/<name>`.
+//! 3. **Hard failure** if that file is missing but the vendored tree holds
+//!    any lock 6 / execution 5 vector (`V6_VECTORS`), even with a path set.
+//!    Those files come from one core release, so once one is vendored
+//!    every one must be: a missing file means an incomplete vendor bump,
+//!    and the test fails rather than skipping.
 //! 4. Only when the vendored tree has no v6 vector at all and no path is
 //!    set does the test skip, saying so on stderr.
 //!
@@ -60,9 +62,10 @@ pub fn locate(
     file_env: Option<&str>,
     env: impl Fn(&str) -> Option<String>,
 ) -> Result<Option<PathBuf>, String> {
+    let explicit = explicit_path(name, file_env, &env)?;
     let vendored = vendored_dir.join(name);
     if vendored.is_file() {
-        return Ok(Some(vendored));
+        return Ok(Some(explicit.unwrap_or(vendored)));
     }
     let present: Vec<&str> = V6_VECTORS
         .iter()
@@ -76,6 +79,16 @@ pub fn locate(
             vendored.display()
         ));
     }
+    Ok(explicit)
+}
+
+/// The path set for `name` in the environment, if any: the file's own
+/// variable first, then `WALLOP_CORE_VECTORS_DIR/<name>`.
+fn explicit_path(
+    name: &str,
+    file_env: Option<&str>,
+    env: &impl Fn(&str) -> Option<String>,
+) -> Result<Option<PathBuf>, String> {
     if let Some(var) = file_env
         && let Some(path) = env(var)
     {
@@ -89,6 +102,29 @@ pub fn locate(
         return Ok(Some(path));
     }
     Ok(None)
+}
+
+/// What to say when `chosen` is not the vendored copy at `vendored` but
+/// that copy exists: an explicit path overrides it, and whether the two
+/// files differ. `None` when there is no vendored copy or it was chosen.
+pub fn override_note(vendored: &Path, chosen: &Path) -> Option<String> {
+    if chosen == vendored || !vendored.is_file() {
+        return None;
+    }
+    let same = std::fs::read(vendored).ok() == std::fs::read(chosen).ok();
+    Some(if same {
+        format!(
+            "core vectors: {} overrides the vendored {} (identical bytes)",
+            chosen.display(),
+            vendored.display()
+        )
+    } else {
+        format!(
+            "core vectors: WARNING {} DIFFERS from the vendored {}; reading the explicit path",
+            chosen.display(),
+            vendored.display()
+        )
+    })
 }
 
 /// The parsed vector `name`, or `None` (with a message) only before the v6
@@ -111,6 +147,9 @@ pub fn core_vector(name: &str, file_env: Option<&str>) -> Option<serde_json::Val
         }
         Err(reason) => panic!("{reason}"),
     };
+    if let Some(note) = override_note(&vendored_dir().join(name), &path) {
+        eprintln!("{note}");
+    }
     let shown = path.display();
     eprintln!("core vectors: reading {shown}");
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{shown}: {e}"));
