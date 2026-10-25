@@ -32,6 +32,7 @@ The drand step was compiled only into the CLI build, so the WASM verifier on the
 - `Cargo.toml` version bump 0.16.1 → 0.17.0.
 - `drand-verify` (Apache-2.0) is no longer optional. It was enabled only by the `cli` feature; it is now an ordinary dependency, so every build, WASM included, verifies drand.
 - CI runs `wasm-pack test --node`, so the drand and gate tests run inside wasm32 as well as natively.
+- A receipt that fails its typed parse has no `signing_key_id`, so its signature step fails too, now with the new `ResolutionFailureKind::ReceiptUnparsed` ("receipt did not parse, so it has no signing_key_id to resolve (see bundle_shape)"). Before, it reported `KeyNotFound`, "trust root does not list the requested key_id", although no key was looked up. The step still fails, so no report's verdict changes.
 
 ### Deprecated
 

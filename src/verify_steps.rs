@@ -29,7 +29,13 @@ use std::fmt;
 #[serde(rename_all = "snake_case")]
 pub enum StepName {
     EntryHash,
+    /// The lock receipt's Ed25519 signature under its operator key. A
+    /// receipt that fails its typed parse has no key id, so this step
+    /// fails too (`ResolutionFailureKind::ReceiptUnparsed`).
     LockSignature,
+    /// The execution receipt's Ed25519 signature under its
+    /// infrastructure key. As for `LockSignature`, a receipt that fails
+    /// its typed parse fails this step too.
     ExecSignature,
     ReceiptLinkage,
     /// The lock receipt's `entry_hash` equals the entry hash recomputed
@@ -208,7 +214,7 @@ pub enum StepDetail {
     /// (typically `LockSignature` / `ExecSignature`). Distinguishes
     /// `Unreachable` / `KeyNotFound` / `PinMismatch` /
     /// `MalformedResponse` / `InconsistentRow` / `SentinelRejected` /
-    /// `LegacySentinelRejected` from the generic "Ed25519 signature
+    /// `LegacySentinelRejected` / `ReceiptUnparsed` from the generic "Ed25519 signature
     /// invalid" message — without this, every resolver failure
     /// collapsed to the same opaque outcome.
     ResolutionFailure {
@@ -253,6 +259,13 @@ pub enum ResolutionFailureKind {
     /// belt-and-braces — that string would silently pass any `<=`
     /// temporal-binding comparison.
     LegacySentinelRejected,
+    /// The receipt failed its typed parse, so there is no
+    /// `signing_key_id` to resolve and nothing was asked of the trust
+    /// root. `BundleShape` fails in the same run and names the cause.
+    /// The signature step fails closed: a receipt that fails its typed
+    /// parse has no key id, so its signature step fails too. The shared
+    /// tamper vectors depend on this, and other verifiers must match it.
+    ReceiptUnparsed,
 }
 
 #[derive(Debug, Clone)]
@@ -960,10 +973,10 @@ fn is_sentinel_year_timestamp(ts: &str) -> bool {
 /// Returns `Ok(ResolvedKey)` for a usable resolution, `Err(kind)`
 /// otherwise. `Err` cases:
 ///
-/// - No `key_id` to look up (`requested_key_id` is `None`) → treated
-///   as `KeyNotFound`. This happens when the receipt parse failed,
-///   which `BundleShape` will already have caught — the verifier
-///   reports both in the same run.
+/// - No `key_id` to look up (`requested_key_id` is `None`) →
+///   `ReceiptUnparsed`. This happens when the receipt's typed parse
+///   failed, which `BundleShape` reports in the same run. The signature
+///   step therefore fails too; it never passes without a key id.
 /// - `resolver.resolve` returned an error → the variant maps directly.
 /// - Returned `public_key`'s key_id does not match the requested one
 ///   → `InconsistentRow` (the verifier-side mirror of the producer's
@@ -976,7 +989,7 @@ fn resolve_with_filter<R: KeyResolver>(
     class: KeyClass,
     mode: VerifierMode,
 ) -> Result<ResolvedKey, ResolutionFailureKind> {
-    let kid = requested_key_id.ok_or(ResolutionFailureKind::KeyNotFound)?;
+    let kid = requested_key_id.ok_or(ResolutionFailureKind::ReceiptUnparsed)?;
     let resolved = resolver
         .resolve(kid, class)
         .map_err(map_resolution_error_kind)?;
@@ -1045,6 +1058,9 @@ impl ResolutionFailureKind {
             ResolutionFailureKind::SentinelRejected => {
                 "resolver returned Sentinel inserted_at under a non-self-consistency mode \
                  (protocol violation per spec §4.2.4)"
+            }
+            ResolutionFailureKind::ReceiptUnparsed => {
+                "receipt did not parse, so it has no signing_key_id to resolve (see bundle_shape)"
             }
             ResolutionFailureKind::LegacySentinelRejected => {
                 "resolver returned the legacy 0001-01-01 sentinel literal in inserted_at"

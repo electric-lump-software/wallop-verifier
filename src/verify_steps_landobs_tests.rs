@@ -1553,3 +1553,34 @@ fn v6_bundle_entropy_altered_in_any_state_fails_only_the_drand_step() {
         );
     }
 }
+
+#[test]
+fn an_exec_receipt_that_fails_its_typed_parse_fails_its_signature_as_unparsed() {
+    // Schema 4 has no frequency fields, so the amended receipt doesn't
+    // parse: there is no key id, nothing is asked of the trust root, and
+    // the signature step fails closed without claiming a missing key.
+    let (json, pk_hex, kid) = build_v6_bundle(&V6Params::weather());
+    let edited = crate::_test_support::resign_exec(&json, |e| e["schema_version"] = "4".into());
+    let report = run_json(&edited.to_string(), &pk_hex, &kid);
+    assert_step_fails(
+        &report,
+        StepName::ExecSignature,
+        "receipt did not parse, so it has no signing_key_id to resolve (see bundle_shape)",
+    );
+    let step = report
+        .steps
+        .iter()
+        .find(|s| s.name == StepName::ExecSignature)
+        .unwrap();
+    assert_eq!(
+        step.detail,
+        Some(StepDetail::ResolutionFailure {
+            class: KeyClass::Infrastructure,
+            kind: ResolutionFailureKind::ReceiptUnparsed,
+        })
+    );
+    assert!(matches!(
+        status(&report, StepName::BundleShape),
+        StepStatus::Fail(_)
+    ));
+}
