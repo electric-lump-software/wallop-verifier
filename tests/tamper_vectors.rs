@@ -145,12 +145,20 @@ fn tamper_vector_bases_pass(v: &serde_json::Value) {
 
 #[test]
 fn every_tampered_bundle_fails_exactly_its_named_steps() {
-    for v in vectors() {
-        tampered_bundles_fail_exactly_their_named_steps(&v);
-    }
+    // Every file is checked before failing, so a mismatch in the first
+    // file can't hide one in the next.
+    let failures: Vec<String> = FILES
+        .iter()
+        .filter_map(|(name, env)| Some((name, common::core_vector(name, Some(env))?)))
+        .filter_map(|(name, v)| {
+            tampered_bundles_fail_exactly_their_named_steps(&v).map(|e| format!("{name}: {e}"))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
-fn tampered_bundles_fail_exactly_their_named_steps(v: &serde_json::Value) {
+/// `None` when every case fails exactly its named steps, else the mismatches.
+fn tampered_bundles_fail_exactly_their_named_steps(v: &serde_json::Value) -> Option<String> {
     let resolver = ListResolver::from_keys(&v["keys"]);
     let cases = v["cases"].as_array().expect("cases is a list");
     assert!(!cases.is_empty());
@@ -175,13 +183,29 @@ fn tampered_bundles_fail_exactly_their_named_steps(v: &serde_json::Value) {
             ));
         }
     }
-    assert!(
-        mismatches.is_empty(),
-        "{} of {} cases differ:\n{}",
-        mismatches.len(),
-        cases.len(),
-        mismatches.join("\n")
-    );
+    (!mismatches.is_empty()).then(|| {
+        format!(
+            "{} of {} cases differ:\n{}",
+            mismatches.len(),
+            cases.len(),
+            mismatches.join("\n")
+        )
+    })
+}
+
+#[test]
+fn tamper_base_names_are_unique() {
+    // Unique across every file, so a base name means one state of one tag.
+    let all = vectors();
+    let mut names: Vec<&str> = all
+        .iter()
+        .flat_map(|v| v["bases"].as_array().unwrap())
+        .map(|b| b["name"].as_str().unwrap())
+        .collect();
+    let total = names.len();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), total, "duplicate base names");
 }
 
 #[test]
@@ -201,12 +225,10 @@ fn tamper_case_names_are_unique() {
 
 /// Each tag's file carries its own bases and cases, so neither half can go
 /// missing unnoticed. The Land Observations file has one base per execution
-/// state: a reading, the grid-frequency window, drand alone. Base names are
-/// per file: `freq_fallback` is state (b) there and the frequency tag's
-/// fallback in the other file.
+/// state: a reading, the grid-frequency window, drand alone.
 #[test]
 fn each_tamper_file_has_its_tag_bases_and_cases() {
-    let land_obs: &[&str] = &["observed", "freq_fallback", "fallback"];
+    let land_obs: &[&str] = &["observed", "freq_window", "fallback"];
     let freq: &[&str] = &["freq_observed", "freq_fallback"];
     for ((name, env), bases) in FILES.iter().zip([land_obs, freq]) {
         let Some(v) = common::core_vector(name, Some(env)) else {
