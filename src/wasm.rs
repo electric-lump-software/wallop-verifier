@@ -205,6 +205,27 @@ pub fn receipt_schema_version_wasm(payload_jcs: &str) -> Option<String> {
     protocol::receipts::receipt_schema_version(payload_jcs)
 }
 
+/// The state of an execution receipt under the observation-weather tag,
+/// read from its signed payload (`payload_jcs`) by the same three-state
+/// table the verifier enforces: `"weather"`, `"frequency"` or
+/// `"drand_only"`. Any other combination of the five fields, or a payload
+/// that is not a JSON object, is an error. A page picks its seed formula
+/// from this, never from which field happens to be present.
+#[wasm_bindgen]
+pub fn landobs_exec_state_wasm(exec_payload_jcs: &str) -> Result<String, JsError> {
+    use protocol::landobs_v1::{ExecState, exec_state};
+    let exec: serde_json::Value = serde_json::from_str(exec_payload_jcs)
+        .map_err(|e| JsError::new(&format!("exec receipt is not JSON: {e}")))?;
+    if !exec.is_object() {
+        return Err(JsError::new("exec receipt is not a JSON object"));
+    }
+    match exec_state(&exec).map_err(|e| JsError::new(&e))? {
+        ExecState::Weather(_) => Ok("weather".into()),
+        ExecState::Freq(_) => Ok("frequency".into()),
+        ExecState::DrandOnly => Ok("drand_only".into()),
+    }
+}
+
 /// WASM entry point for merkle_root.
 #[wasm_bindgen]
 pub fn merkle_root_wasm(leaves_js: JsValue) -> Result<String, JsError> {
@@ -721,5 +742,40 @@ mod wasm_freq_export_tests {
                 serde_wasm_bindgen::to_value(self).unwrap()
             }
         }
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_landobs_exec_state_tests {
+    use super::landobs_exec_state_wasm;
+    use crate::_test_support::{V6Params, build_v6_bundle, v6_negative_bundle};
+    use crate::bundle::ProofBundle;
+    use wasm_bindgen_test::*;
+
+    fn exec_payload(json: &str) -> String {
+        ProofBundle::from_json(json)
+            .unwrap()
+            .execution_receipt
+            .payload_jcs
+    }
+
+    #[wasm_bindgen_test]
+    fn names_each_of_the_three_states() {
+        for (p, want) in [
+            (V6Params::weather(), "weather"),
+            (V6Params::freq_fallback(), "frequency"),
+            (V6Params::fallback(), "drand_only"),
+        ] {
+            let (json, _, _) = build_v6_bundle(&p);
+            assert_eq!(landobs_exec_state_wasm(&exec_payload(&json)).unwrap(), want);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn refuses_a_receipt_outside_the_table() {
+        let (json, _, _) = v6_negative_bundle("weather_with_freq_value");
+        assert!(landobs_exec_state_wasm(&exec_payload(&json)).is_err());
+        assert!(landobs_exec_state_wasm("not json").is_err());
+        assert!(landobs_exec_state_wasm("[]").is_err());
     }
 }

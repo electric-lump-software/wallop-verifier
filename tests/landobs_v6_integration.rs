@@ -190,13 +190,13 @@ fn every_negative_case_fails_at_exactly_its_expected_steps() {
                 && fails("seed_recomputation")
                 && step.status == StepStatus::Skip("seed or exec signature failed".into());
             let after_lock_signature = fails("lock_signature")
-                && matches!(
+                && (matches!(
                     (step.name, &step.status),
                     (StepName::ReceiptLinkage, StepStatus::Skip(r)) if r == "signature check failed"
-                ) | matches!(
+                ) || matches!(
                     (step.name, &step.status),
                     (StepName::LockReceiptEntryHash, StepStatus::Skip(r)) if r == "lock signature failed"
-                );
+                ));
             if after_seed || after_lock_signature {
                 continue;
             }
@@ -228,6 +228,21 @@ fn every_negative_case_fails_at_exactly_its_expected_steps() {
             "{name}: no failing step says {reason:?}: {:?}",
             report.steps
         );
+
+        // Where the seed step is expected to fail, it fails by the
+        // three-state table itself, not on a seed mismatch.
+        if steps.contains(&"seed_recomputation") {
+            let seed = report
+                .steps
+                .iter()
+                .find(|s| s.name == StepName::SeedRecomputation)
+                .unwrap();
+            assert!(
+                matches!(&seed.status, StepStatus::Fail(m) if m.contains("none of the three states")),
+                "{name}: seed step must refuse by the table: {:?}",
+                seed.status
+            );
+        }
     }
 }
 
