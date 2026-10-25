@@ -47,8 +47,9 @@ pub const FALLBACK_NO_FREQUENCY: &str = "no_frequency_by_deadline";
 /// Allowed `freq_fallback_reason` values.
 pub const VALID_FREQ_FALLBACK_REASONS: &[Option<&str>] = &[None, Some(FALLBACK_NO_FREQUENCY)];
 
-/// Every key of a lock receipt schema 6 under this tag, sorted bytewise.
-/// Equal to core's lock key set for the tag.
+/// Every key of a lock receipt schema 6, sorted bytewise. Shared with the
+/// Land Observations tag (`landobs_v1::LOCK_KEYS`). Equal to core's lock
+/// key set.
 pub const LOCK_KEYS: [&str; 20] = [
     "commitment_hash",
     "drand_chain",
@@ -72,8 +73,9 @@ pub const LOCK_KEYS: [&str; 20] = [
     "winner_count",
 ];
 
-/// Every key of an execution receipt schema 5 under this tag, sorted
-/// bytewise. Equal to core's execution key set for the tag.
+/// Every key of an execution receipt schema 5, sorted bytewise. Shared
+/// with the Land Observations tag (`landobs_v1::EXEC_KEYS`). Equal to
+/// core's execution key set.
 pub const EXEC_KEYS: [&str; 28] = [
     "drand_chain",
     "drand_randomness",
@@ -123,9 +125,7 @@ pub fn exact_keys(value: &serde_json::Value, keys: &[&str]) -> Result<(), String
     if got == keys {
         Ok(())
     } else {
-        Err(format!(
-            "the receipt's keys are not the {ENTROPY_COMPOSITION} key set"
-        ))
+        Err("the receipt's keys are not the lock v6 / execution v5 key set".into())
     }
 }
 

@@ -49,7 +49,7 @@ impl FreqAttestInput {
             ParsedExecutionReceipt::V5Freq(p) => p,
             _ => {
                 return Err(format!(
-                    "the execution receipt is not a schema \"5\" {} receipt",
+                    "the execution receipt is unusable: it is not a schema \"5\" {} receipt",
                     freq_v1::ENTROPY_COMPOSITION
                 ));
             }

@@ -34,6 +34,13 @@ pub const FALLBACK_NO_OBSERVATION: &str = "no_observation_by_deadline";
 /// Allowed `weather_fallback_reason` values on an execution v5 receipt.
 pub const VALID_WEATHER_FALLBACK_REASONS: &[Option<&str>] = &[None, Some(FALLBACK_NO_OBSERVATION)];
 
+/// Both lock schema 6 tags share one lock key set and one execution key
+/// set; the Land Observations tag signs `freq_start`, and on a fallback
+/// `freq_value` / `freq_fallback_reason`, with the grid-frequency tag's
+/// meaning. The fallback's constants are `freq_v1`'s, frozen by this tag
+/// by reference.
+pub use super::freq_v1::{EXEC_KEYS, LOCK_KEYS};
+
 const _: () = assert!(W_SECS > 0 && W_SECS <= 90 * 60 && W_SECS % 60 == 0);
 
 const HOUR_SECS: i64 = 3600;

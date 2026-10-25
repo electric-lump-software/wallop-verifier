@@ -985,6 +985,7 @@ fn lock_v6_value() -> serde_json::Value {
         "entropy_composition": landobs_v1::ENTROPY_COMPOSITION,
         "entry_hash": "abc",
         "fair_pick_version": "0.2.1",
+        "freq_start": "2026-10-01T19:54:00.000000Z",
         "jcs_version": JCS_VERSION,
         "locked_at": "2026-10-01T18:13:00.000000Z",
         "operator_id": "11111111-1111-1111-1111-111111111111",
@@ -1000,10 +1001,14 @@ fn lock_v6_value() -> serde_json::Value {
     })
 }
 
-fn lock_v6(edit: impl FnOnce(&mut serde_json::Value)) -> LockReceiptV6 {
+fn lock_v6_json(edit: impl FnOnce(&mut serde_json::Value)) -> String {
     let mut v = lock_v6_value();
     edit(&mut v);
-    match parse_lock_receipt(&v.to_string()).unwrap() {
+    v.to_string()
+}
+
+fn lock_v6(edit: impl FnOnce(&mut serde_json::Value)) -> LockReceiptV6 {
+    match parse_lock_receipt(&lock_v6_json(edit)).unwrap() {
         ParsedLockReceipt::V6(p) => p,
         other => panic!("expected V6, got {other:?}"),
     }
@@ -1061,6 +1066,7 @@ fn lock_v6_rejects_empty_signing_key_id() {
 fn lock_v5_still_rejects_the_landobs_tag() {
     let mut v = lock_v6_value();
     v["schema_version"] = serde_json::json!("5");
+    v.as_object_mut().unwrap().remove("freq_start");
     let p = match parse_lock_receipt(&v.to_string()).unwrap() {
         ParsedLockReceipt::V5(p) => p,
         other => panic!("expected V5, got {other:?}"),
@@ -1092,6 +1098,8 @@ fn exec_v5_value() -> serde_json::Value {
         "entry_hash": "abc",
         "executed_at": "2026-10-01T20:00:05.000000Z",
         "fair_pick_version": "0.2.1",
+        "freq_fallback_reason": null,
+        "freq_value": null,
         "jcs_version": JCS_VERSION,
         "lock_receipt_hash": "abc",
         "merkle_algorithm": MERKLE_ALGORITHM,
@@ -1111,10 +1119,14 @@ fn exec_v5_value() -> serde_json::Value {
     })
 }
 
-fn exec_v5(edit: impl FnOnce(&mut serde_json::Value)) -> ExecutionReceiptV5 {
+fn exec_v5_json(edit: impl FnOnce(&mut serde_json::Value)) -> String {
     let mut v = exec_v5_value();
     edit(&mut v);
-    match parse_execution_receipt(&v.to_string()).unwrap() {
+    v.to_string()
+}
+
+fn exec_v5(edit: impl FnOnce(&mut serde_json::Value)) -> ExecutionReceiptV5 {
+    match parse_execution_receipt(&exec_v5_json(edit)).unwrap() {
         ParsedExecutionReceipt::V5(p) => p,
         other => panic!("expected V5, got {other:?}"),
     }
@@ -1199,6 +1211,55 @@ fn exec_v5_rejects_the_forecast_tag() {
             .unwrap_err()
             .contains("entropy_composition")
     );
+}
+
+#[test]
+fn lock_v6_landobs_needs_freq_start_on_the_15s_grid_and_exactly_the_shared_keys() {
+    let ok = lock_v6_json(|_| {});
+    assert!(matches!(
+        parse_lock_receipt(&ok),
+        Ok(ParsedLockReceipt::V6(_))
+    ));
+    type Edit = Box<dyn Fn(&mut serde_json::Value)>;
+    let edits: [(&str, Edit); 3] = [
+        (
+            "missing",
+            Box::new(|v: &mut serde_json::Value| {
+                v.as_object_mut().unwrap().remove("freq_start");
+            }),
+        ),
+        (
+            "null",
+            Box::new(|v: &mut serde_json::Value| v["freq_start"] = serde_json::Value::Null),
+        ),
+        (
+            "extra key",
+            Box::new(|v: &mut serde_json::Value| v["freq_value"] = serde_json::json!(null)),
+        ),
+    ];
+    for (name, edit) in edits {
+        let j = lock_v6_json(|v| edit(v));
+        assert!(parse_lock_receipt(&j).is_err(), "{name}");
+    }
+    let off = lock_v6_json(|v| v["freq_start"] = serde_json::json!("2026-10-14T19:54:01.000000Z"));
+    let ParsedLockReceipt::V6(p) = parse_lock_receipt(&off).unwrap() else {
+        panic!()
+    };
+    assert!(validate_lock_receipt_tags_v6(&p).is_err());
+}
+
+#[test]
+fn exec_v5_landobs_carries_the_freq_fields_and_checks_them_one_by_one() {
+    let ok = exec_v5(|_| {});
+    assert!(validate_execution_receipt_tags_v5(&ok).is_ok());
+    let bad_reason = exec_v5(|v| v["freq_fallback_reason"] = serde_json::json!("unreachable"));
+    assert!(validate_execution_receipt_tags_v5(&bad_reason).is_err());
+    let bad_value = exec_v5(|v| v["freq_value"] = serde_json::json!("50012"));
+    assert!(validate_execution_receipt_tags_v5(&bad_value).is_err());
+    let missing = exec_v5_json(|v| {
+        v.as_object_mut().unwrap().remove("freq_value");
+    });
+    assert!(parse_execution_receipt(&missing).is_err());
 }
 
 #[test]
@@ -1356,8 +1417,11 @@ fn a_duplicate_key_is_a_shape_mismatch() {
     ));
 }
 
+/// The tags share a key set, so only the weather fields' types tell them
+/// apart at parse time: a Land Observations lock must name its station and
+/// hour.
 #[test]
-fn a_landobs_lock_with_freq_start_is_a_shape_mismatch() {
+fn a_landobs_lock_with_null_weather_fields_is_a_shape_mismatch() {
     let mut v = freq_lock_json();
     v["entropy_composition"] = serde_json::json!(landobs_v1::ENTROPY_COMPOSITION);
     assert!(matches!(
@@ -1368,8 +1432,9 @@ fn a_landobs_lock_with_freq_start_is_a_shape_mismatch() {
 
 #[test]
 fn an_unknown_tag_on_schema_6_or_5_never_parses_as_frequency() {
-    // A near-miss tag goes down the Land Observations path, whose shape
-    // has no freq fields, so it fails to parse at all.
+    // A near-miss tag goes down the Land Observations shape. The lock's
+    // null station fails to parse there; the execution receipt parses (its
+    // weather fields are nullable) but its validator names the tag.
     for tag in [
         "drand-quicknet+elexon-freq-v2",
         "DRAND-QUICKNET+ELEXON-FREQ-V1",
@@ -1380,7 +1445,15 @@ fn an_unknown_tag_on_schema_6_or_5_never_parses_as_frequency() {
         assert!(parse_lock_receipt(&v.to_string()).is_err(), "{tag}");
         let mut v = freq_exec_json();
         v["entropy_composition"] = serde_json::json!(tag);
-        assert!(parse_execution_receipt(&v.to_string()).is_err(), "{tag}");
+        match parse_execution_receipt(&v.to_string()) {
+            Ok(ParsedExecutionReceipt::V5(p)) => assert!(
+                validate_execution_receipt_tags_v5(&p)
+                    .unwrap_err()
+                    .contains("entropy_composition"),
+                "{tag}"
+            ),
+            other => panic!("{tag}: expected the Land Observations shape, got {other:?}"),
+        }
     }
     // A non-string tag likewise.
     let mut v = freq_lock_json();
@@ -1470,12 +1543,20 @@ fn freq_exec_rejects_weather_fields_other_reasons_and_bad_values() {
     assert!(validate_execution_receipt_tags_v5_freq(&p).is_err());
 }
 
+/// A Land Observations execution receipt carries the frequency fields too
+/// (its fallback), so a frequency receipt relabelled as one parses, and
+/// its validator refuses it for having no station.
 #[test]
-fn a_landobs_exec_with_freq_value_is_a_shape_mismatch() {
+fn a_frequency_exec_relabelled_as_landobs_fails_its_validator() {
     let mut v = freq_exec_json();
     v["entropy_composition"] = serde_json::json!(landobs_v1::ENTROPY_COMPOSITION);
-    assert!(matches!(
-        parse_execution_receipt(&v.to_string()),
-        Err(ParseExecutionReceiptError::PayloadShapeMismatch(_))
-    ));
+    let p = match parse_execution_receipt(&v.to_string()).unwrap() {
+        ParsedExecutionReceipt::V5(p) => p,
+        other => panic!("expected V5, got {other:?}"),
+    };
+    assert!(
+        validate_execution_receipt_tags_v5(&p)
+            .unwrap_err()
+            .contains("weather_station")
+    );
 }

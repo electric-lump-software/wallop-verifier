@@ -64,7 +64,8 @@ pub enum StepName {
     /// `[lock.weather_time - 3600s, lock.weather_time]`, and a fallback
     /// reason is present exactly when weather is missing; `NotApplicable`
     /// on a drand-only draw. Lock v6 / execution v5: `weather_time` is the
-    /// observation hour the drand round implies, `locked_at` is at least
+    /// observation hour the drand round implies, `freq_start` is the window
+    /// start the round implies, `locked_at` is at least
     /// 46 minutes before it, and the execution receipt carries either an
     /// observation of exactly that hour or the fallback reason
     /// `no_observation_by_deadline`, never a mix of the two. Always `Pass`
@@ -2037,10 +2038,11 @@ fn mismatch_reason(lock: &serde_json::Value, exec: &serde_json::Value) -> &'stat
 
 /// The weather window under the Land Observations tag. The lock receipt's
 /// `weather_time` must be the observation hour its drand round implies,
-/// the lock must be at least `LOCK_OFFSET_SECS` before it (compared to the
-/// microsecond), and the execution receipt must carry either an
-/// observation of exactly that hour with no fallback reason, or no
-/// observation with reason `no_observation_by_deadline`.
+/// its `freq_start` must be the grid-frequency window start the round
+/// implies, the lock must be at least `LOCK_OFFSET_SECS` before
+/// `weather_time` (compared to the microsecond), and the execution receipt
+/// must carry either an observation of exactly that hour with no fallback
+/// reason, or no observation with reason `no_observation_by_deadline`.
 fn check_landobs_weather(lock: &serde_json::Value, exec: &serde_json::Value) -> Result<(), String> {
     use crate::protocol::landobs_v1;
     let lock_str = |field: &str| {
@@ -2061,6 +2063,18 @@ fn check_landobs_weather(lock: &serde_json::Value, exec: &serde_json::Value) -> 
         return Err(format!(
             "lock weather_time {weather_time} is not the observation hour for drand round {round}: expected {}",
             format_canonical(expected, 0)
+        ));
+    }
+
+    let freq_start = lock_str("freq_start")?;
+    let start = crate::protocol::freq_v1::parse_freq_start(freq_start)
+        .map_err(|e| format!("lock.freq_start: {e}"))?;
+    let expected_start = crate::protocol::freq_v1::freq_start_for_round(round)
+        .ok_or_else(|| format!("drand round {round} has no quicknet publish time"))?;
+    if start != expected_start {
+        return Err(format!(
+            "lock freq_start {freq_start} is not the window start for drand round {round}: expected {}",
+            crate::protocol::freq_v1::format_freq_start(expected_start)
         ));
     }
 

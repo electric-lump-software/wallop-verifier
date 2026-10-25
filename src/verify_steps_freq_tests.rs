@@ -609,9 +609,7 @@ fn a_mismatched_pair_skips_the_seed_and_winner_steps_and_fails() {
     // Re-sign the exec as a well-formed Land Observations v5 receipt, so
     // both receipts are valid known pairs that differ.
     let v = crate::_test_support::resign_exec(&json, |exec| {
-        let o = exec.as_object_mut().unwrap();
-        o.remove("freq_value");
-        o.remove("freq_fallback_reason");
+        exec["freq_value"] = serde_json::Value::Null;
         exec["weather_station"] = serde_json::json!("wmo-03749");
         exec["weather_fallback_reason"] = serde_json::json!("no_observation_by_deadline");
     });

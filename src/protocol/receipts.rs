@@ -117,9 +117,10 @@ pub struct LockReceiptV5 {
     pub winner_count: u64,
 }
 
-/// V6 lock receipt: same field set as V5, under the
-/// `drand-quicknet+metoffice-landobs-v1` entropy tag (see `landobs_v1`).
-/// Resolver-driven like V5. Pairs only with `ExecutionReceiptV5`.
+/// V6 lock receipt: the shared v6 field set under the
+/// `drand-quicknet+metoffice-landobs-v1` tag (see `landobs_v1`): V5's
+/// fields plus `freq_start`, the grid-frequency window the draw falls back
+/// to. Resolver-driven like V5. Pairs only with `ExecutionReceiptV5`.
 #[derive(serde::Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct LockReceiptV6 {
@@ -130,6 +131,7 @@ pub struct LockReceiptV6 {
     pub entropy_composition: String,
     pub entry_hash: String,
     pub fair_pick_version: String,
+    pub freq_start: String,
     pub jcs_version: String,
     pub locked_at: String,
     pub operator_id: String,
@@ -242,8 +244,10 @@ pub struct ExecutionReceiptV4 {
     pub weather_value: Option<String>,
 }
 
-/// V5 execution receipt: same field set as V4, under the
-/// `drand-quicknet+metoffice-landobs-v1` tag. Resolver-driven. Pairs only
+/// V5 execution receipt: the shared v6 field set under the
+/// `drand-quicknet+metoffice-landobs-v1` tag: V4's fields plus
+/// `freq_value` and `freq_fallback_reason`, set when the draw fell back
+/// from the weather to the grid frequency. Resolver-driven. Pairs only
 /// with `LockReceiptV6`.
 #[derive(serde::Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
@@ -258,6 +262,8 @@ pub struct ExecutionReceiptV5 {
     pub entry_hash: String,
     pub executed_at: String,
     pub fair_pick_version: String,
+    pub freq_fallback_reason: Option<String>,
+    pub freq_value: Option<String>,
     pub jcs_version: String,
     pub lock_receipt_hash: String,
     pub merkle_algorithm: String,
@@ -778,6 +784,7 @@ pub fn validate_lock_receipt_tags_v6(payload: &LockReceiptV6) -> Result<(), Stri
             payload.weather_station
         ));
     }
+    freq_v1::parse_freq_start(&payload.freq_start).map(|_| ())?;
     Ok(())
 }
 
@@ -902,6 +909,16 @@ pub fn validate_execution_receipt_tags_v5(payload: &ExecutionReceiptV5) -> Resul
     }
     if let Some(value) = &payload.weather_value {
         landobs_v1::parse_weather_value(value)?;
+    }
+    let freq_reason = payload.freq_fallback_reason.as_deref();
+    if !freq_v1::VALID_FREQ_FALLBACK_REASONS.contains(&freq_reason) {
+        return Err(format!(
+            "unknown freq_fallback_reason: {:?}",
+            payload.freq_fallback_reason
+        ));
+    }
+    if let Some(value) = &payload.freq_value {
+        freq_v1::parse_freq_value(value)?;
     }
     Ok(())
 }
@@ -1066,15 +1083,15 @@ pub fn validate_weather_station(station: &str) -> Result<(), String> {
 /// error MUST upgrade, MUST NOT retry. Mirrors `parse_execution_receipt`'s
 /// dispatcher pattern.
 ///
-/// V4, V5 and V6 carry byte-identical field sets; the discriminant exists
+/// V4 and V5 carry byte-identical field sets; the discriminant exists
 /// so callers can route on whether the bundle's wrapper is expected to
 /// carry inline keys (V4) or to be resolver-driven (V5). See spec §4.2.4.
-/// V6 is resolver-driven like V5, additionally carries the
+/// V6 is resolver-driven like V5, adds `freq_start`, carries the
 /// `drand-quicknet+metoffice-landobs-v1` tag, and pairs only with
-/// execution receipt V5. A schema "6" receipt whose `entropy_composition`
-/// is the grid-frequency tag parses as `V6Freq` instead (its key set is
-/// checked exactly first); any other tag parses as `V6`, whose validator
-/// then rejects an unknown tag by name.
+/// execution receipt V5. Both schema "6" tags share one key set, checked
+/// exactly before parsing; the grid-frequency tag parses as `V6Freq`.
+/// Any other tag parses as `V6` without the key-set check, and its
+/// validator then rejects the unknown tag by name.
 ///
 /// The enum is `#[non_exhaustive]`: callers MUST treat an unrecognised
 /// variant as a verification failure, never as a pass.
@@ -1146,8 +1163,16 @@ pub fn parse_lock_receipt(payload_jcs: &str) -> Result<ParsedLockReceipt, ParseL
                     .map_err(|e| ParseLockReceiptError::PayloadShapeMismatch(e.to_string()))?;
                 Ok(ParsedLockReceipt::V6Freq(parsed))
             }
-            // The Land Observations tag, or an unknown one, which the V6
-            // validator then rejects by name.
+            Some(landobs_v1::ENTROPY_COMPOSITION) => {
+                // Both tags share one key set; checked first, so a missing
+                // or extra key fails closed before serde reads it.
+                freq_v1::exact_keys(&value, &landobs_v1::LOCK_KEYS)
+                    .map_err(ParseLockReceiptError::PayloadShapeMismatch)?;
+                let parsed: LockReceiptV6 = serde_json::from_str(payload_jcs)
+                    .map_err(|e| ParseLockReceiptError::PayloadShapeMismatch(e.to_string()))?;
+                Ok(ParsedLockReceipt::V6(parsed))
+            }
+            // An unknown tag, which the V6 validator then rejects by name.
             _ => {
                 let parsed: LockReceiptV6 = serde_json::from_str(payload_jcs)
                     .map_err(|e| ParseLockReceiptError::PayloadShapeMismatch(e.to_string()))?;
@@ -1168,10 +1193,11 @@ pub fn parse_lock_receipt(payload_jcs: &str) -> Result<ParsedLockReceipt, ParseL
 /// (spec §4.2.1 — older-schema rejection).
 /// V4 carries a byte-identical field set to V3; the discriminant signals
 /// resolver-driven verification, mirroring `ParsedLockReceipt::V5`.
-/// V5 carries V4's field set under the `drand-quicknet+metoffice-landobs-v1`
-/// tag and pairs only with `ParsedLockReceipt::V6`. A schema "5" receipt
-/// under the grid-frequency tag parses as `V5Freq` (key set checked
-/// exactly first) and pairs only with `ParsedLockReceipt::V6Freq`.
+/// V5 carries V4's field set plus `freq_value` and `freq_fallback_reason`
+/// under the `drand-quicknet+metoffice-landobs-v1` tag and pairs only with
+/// `ParsedLockReceipt::V6`. Both schema "5" tags share one key set, checked
+/// exactly before parsing; the grid-frequency tag parses as `V5Freq` and
+/// pairs only with `ParsedLockReceipt::V6Freq`.
 ///
 /// The enum is `#[non_exhaustive]`: callers MUST treat an unrecognised
 /// variant as a verification failure, never as a pass.
@@ -1249,8 +1275,17 @@ pub fn parse_execution_receipt(
                     .map_err(|e| ParseExecutionReceiptError::PayloadShapeMismatch(e.to_string()))?;
                 Ok(ParsedExecutionReceipt::V5Freq(parsed))
             }
-            // The Land Observations tag, or an unknown one, which the V5
-            // validator then rejects by name.
+            Some(landobs_v1::ENTROPY_COMPOSITION) => {
+                // Both tags share one key set; checked first, so a missing
+                // null field or an extra key fails closed before serde
+                // reads it.
+                freq_v1::exact_keys(&value, &landobs_v1::EXEC_KEYS)
+                    .map_err(ParseExecutionReceiptError::PayloadShapeMismatch)?;
+                let parsed: ExecutionReceiptV5 = serde_json::from_str(payload_jcs)
+                    .map_err(|e| ParseExecutionReceiptError::PayloadShapeMismatch(e.to_string()))?;
+                Ok(ParsedExecutionReceipt::V5(parsed))
+            }
+            // An unknown tag, which the V5 validator then rejects by name.
             _ => {
                 let parsed: ExecutionReceiptV5 = serde_json::from_str(payload_jcs)
                     .map_err(|e| ParseExecutionReceiptError::PayloadShapeMismatch(e.to_string()))?;

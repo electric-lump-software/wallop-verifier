@@ -9,10 +9,10 @@
 //! API stability is NOT guaranteed. Contents may change in any release.
 
 use crate::key_resolver::{InsertedAt, KeyClass, KeyResolver, ResolutionError, ResolvedKey};
-use crate::protocol::landobs_v1;
 use crate::protocol::receipts::lock_receipt_hash;
+use crate::protocol::{freq_v1, landobs_v1};
 use crate::verify_steps::format_canonical;
-use crate::{Entry, compute_seed, compute_seed_drand_only, draw, entry_hash};
+use crate::{Entry, compute_seed, compute_seed_drand_only, compute_seed_freq, draw, entry_hash};
 use ed25519_dalek::{Signer, SigningKey};
 
 /// Real quicknet beacons, from
@@ -381,6 +381,16 @@ pub struct V6Params {
     pub weather_value: Option<String>,
     pub weather_observation_time: Option<String>,
     pub weather_fallback_reason: Option<String>,
+    /// The lock's `freq_start`. Written only on a schema 6 lock.
+    pub freq_start: Option<String>,
+    /// Leave `freq_start` out of a schema 6 lock altogether.
+    pub omit_freq_start: bool,
+    /// The execution receipt's `freq_value`. Written only on a schema 5
+    /// execution receipt.
+    pub freq_value: Option<String>,
+    /// The execution receipt's `freq_fallback_reason`. Written only on a
+    /// schema 5 execution receipt.
+    pub freq_fallback_reason: Option<String>,
 }
 
 impl V6Params {
@@ -412,6 +422,13 @@ impl V6Params {
             weather_value: Some(V6_WEATHER_VALUE.into()),
             weather_observation_time: Some(weather_time),
             weather_fallback_reason: None,
+            freq_start: Some(freq_v1::format_freq_start(
+                freq_v1::freq_start_for_round(BEACON_V6_ROUND)
+                    .expect("fixture round has a window start"),
+            )),
+            omit_freq_start: false,
+            freq_value: None,
+            freq_fallback_reason: None,
         }
     }
 
@@ -455,15 +472,16 @@ pub fn build_v6_bundle(p: &V6Params) -> (String, String, String) {
     let entries = v6_entries();
     let draw_id = "22222222-2222-2222-2222-222222222222";
     let (ehash, _) = entry_hash(draw_id, &entries);
-    let (seed_bytes, _) = match p.weather_value.as_deref() {
-        Some(w) => compute_seed(&ehash, &p.drand_randomness, w),
-        None => compute_seed_drand_only(&ehash, &p.drand_randomness),
+    let (seed_bytes, _) = match (p.weather_value.as_deref(), p.freq_value.as_deref()) {
+        (Some(w), _) => compute_seed(&ehash, &p.drand_randomness, w),
+        (None, Some(f)) => compute_seed_freq(&ehash, &p.drand_randomness, f),
+        (None, None) => compute_seed_drand_only(&ehash, &p.drand_randomness),
     };
     let winners = draw(&entries, &seed_bytes, 2).unwrap();
     let results: Vec<String> = winners.iter().map(|w| w.entry_id.clone()).collect();
     let chain = crate::drand::QUICKNET_CHAIN_HASH;
 
-    let lock_jcs = serde_json::json!({
+    let mut lock = serde_json::json!({
         "commitment_hash": &ehash,
         "drand_chain": chain,
         "drand_round": p.drand_round,
@@ -483,11 +501,18 @@ pub fn build_v6_bundle(p: &V6Params) -> (String, String, String) {
         "weather_station": &p.lock_station,
         "weather_time": &p.weather_time,
         "winner_count": 2
-    })
-    .to_string();
+    });
+    // A schema 5 lock stays the legacy shape, as the old builders made it.
+    if p.lock_schema == "6" && !p.omit_freq_start {
+        lock.as_object_mut()
+            .expect("lock is an object")
+            .insert("freq_start".into(), serde_json::json!(p.freq_start));
+    }
+    // serde_json's map is sorted (no `preserve_order`), so this is JCS.
+    let lock_jcs = lock.to_string();
     let lock_sig_hex = hex::encode(sk.sign(lock_jcs.as_bytes()).to_bytes());
 
-    let exec_jcs = serde_json::json!({
+    let mut exec = serde_json::json!({
         "drand_chain": chain,
         "drand_randomness": &p.drand_randomness,
         "drand_round": p.drand_round,
@@ -514,8 +539,17 @@ pub fn build_v6_bundle(p: &V6Params) -> (String, String, String) {
         "weather_observation_time": &p.weather_observation_time,
         "weather_station": &p.exec_station,
         "weather_value": &p.weather_value
-    })
-    .to_string();
+    });
+    // A schema 4 execution receipt stays the legacy shape.
+    if p.exec_schema == "5" {
+        let map = exec.as_object_mut().expect("exec is an object");
+        map.insert(
+            "freq_fallback_reason".into(),
+            serde_json::json!(p.freq_fallback_reason),
+        );
+        map.insert("freq_value".into(), serde_json::json!(p.freq_value));
+    }
+    let exec_jcs = exec.to_string();
     let exec_sig_hex = hex::encode(sk.sign(exec_jcs.as_bytes()).to_bytes());
 
     let mut entropy = serde_json::Map::new();
@@ -531,6 +565,9 @@ pub fn build_v6_bundle(p: &V6Params) -> (String, String, String) {
     entropy.insert("drand_chain_hash".into(), serde_json::json!(chain));
     if let Some(w) = &p.weather_value {
         entropy.insert("weather_value".into(), serde_json::json!(w));
+    }
+    if let Some(f) = &p.freq_value {
+        entropy.insert("freq_value".into(), serde_json::json!(f));
     }
 
     let bundle = serde_json::json!({

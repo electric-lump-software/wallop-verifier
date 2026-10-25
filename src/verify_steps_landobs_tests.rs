@@ -1281,3 +1281,23 @@ fn commitment_hash_rule_follows_the_lock_rule_set() {
     });
     assert_step_fails(&lock6, StepName::LockReceiptEntryHash, "commitment_hash");
 }
+
+#[test]
+fn freq_start_must_be_the_rounds_window_start() {
+    use crate::protocol::freq_v1;
+    let t = freq_v1::freq_start_for_round(crate::_test_support::BEACON_V6_ROUND).unwrap();
+    for (off, steps) in [
+        (15, vec![StepName::WeatherObservationWindow]),
+        (-15, vec![StepName::WeatherObservationWindow]),
+        (
+            1,
+            vec![StepName::WeatherObservationWindow, StepName::BundleShape],
+        ),
+    ] {
+        let report = run(&V6Params {
+            freq_start: Some(format_canonical(t + off, 0)),
+            ..V6Params::weather()
+        });
+        assert_eq!(failing(&report), steps, "offset {off}");
+    }
+}
