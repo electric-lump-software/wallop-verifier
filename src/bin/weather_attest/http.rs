@@ -454,7 +454,7 @@ mod tests {
             .unwrap();
         assert!(slept.borrow().is_empty());
         client
-            .fetch("03462", "202610011900", "202610011900")
+            .fetch("03772", "202610011900", "202610011900")
             .unwrap();
         let waits = slept.borrow();
         assert_eq!(waits.len(), 1);

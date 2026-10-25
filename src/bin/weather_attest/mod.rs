@@ -6,7 +6,7 @@ use std::io::Read;
 use std::process::ExitCode;
 
 use wallop_verifier::bundle::ProofBundle;
-use wallop_verifier::protocol::landobs_v1::{self, PRIMARY_STATION, STATIONS};
+use wallop_verifier::protocol::landobs_v1::{self, PRIMARY_STATION};
 use wallop_verifier::protocol::receipts::{
     ParsedExecutionReceipt, ParsedLockReceipt, parse_execution_receipt, parse_lock_receipt,
     validate_execution_receipt_tags_v5, validate_lock_receipt_tags_v6,
@@ -100,15 +100,13 @@ impl AttestInput {
 pub(crate) fn station_name(station: &str) -> &'static str {
     match station {
         "wmo-03749" => "Middle Wallop",
-        "wmo-03462" => "Wittering",
         _ => "unknown station",
     }
 }
 
 /// Compare the signed observation with Land Observations (first), then
-/// the WMO SYNOP via Ogimet. When the backup station was used, also report
-/// whether the primary station's records hold that hour; on a fallback,
-/// report that for both stations.
+/// the WMO SYNOP via Ogimet. On a fallback, report whether Middle Wallop's
+/// records hold that hour.
 ///
 /// Takes the run's one `OgimetClient` so every SYNOP request shares its
 /// pacing. `input.weather_time` has passed `parse_weather_time`.
@@ -171,14 +169,9 @@ pub(crate) fn attest(
                     Err(e) => Outcome::Unavailable(e),
                 },
             });
-            if input.station != PRIMARY_STATION {
-                presence_lines(PRIMARY_STATION, &mut lines);
-            }
         }
         None => {
-            for station in STATIONS {
-                presence_lines(station, &mut lines);
-            }
+            presence_lines(PRIMARY_STATION, &mut lines);
         }
     }
     lines
@@ -320,8 +313,6 @@ fn report(input: &AttestInput, lines: &[Line]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
-    use std::rc::Rc;
     use std::time::Duration;
     use wallop_verifier::_test_support::{
         V6Params, build_v6_bundle, build_valid_v5_bundle, v6_entries,
@@ -360,9 +351,9 @@ mod tests {
 
     #[test]
     fn from_bundle_reads_a_v6_bundle() {
-        let (json, _, _) = build_v6_bundle(&V6Params::backup());
+        let (json, _, _) = build_v6_bundle(&V6Params::weather());
         let i = AttestInput::from_bundle(&ProofBundle::from_json(&json).unwrap()).unwrap();
-        assert_eq!(i.station, "wmo-03462");
+        assert_eq!(i.station, "wmo-03749");
         assert_eq!(i.value.as_deref(), Some("184;1021;51;4114"));
     }
 
@@ -463,74 +454,14 @@ mod tests {
     }
 
     #[test]
-    fn backup_station_reports_the_primary() {
-        let mut server = mockito::Server::new();
-        server.mock("GET", "/gcrem9").with_body(ROW_03749).create();
-        server.mock("GET", "/gcnfur").with_body(ROW_03749).create();
-        mock_synop(&mut server, "03462", &SYNOP_03749.replace("03749", "03462"));
-        mock_synop(&mut server, "03749", SYNOP_03749);
-        let landobs = http::LandObsClient::new(&server.url(), "k");
-        let lines = attest(
-            &input("wmo-03462", Some("184;1021;51;4114")),
-            Some(&landobs),
-            &ogimet(&server),
-            WT_UNIX + 3600,
-        );
-        assert_eq!(lines.len(), 4);
-        assert!(
-            lines[2].label.contains("wmo-03749") && matches!(lines[2].outcome, Outcome::Present(_)),
-            "{lines:?}"
-        );
-        assert!(matches!(lines[3].outcome, Outcome::Present(_)));
-    }
-
-    #[test]
-    fn two_stations_share_one_ogimet_client_and_its_pacing() {
-        let mut server = mockito::Server::new();
-        let backup = mock_synop(&mut server, "03462", &SYNOP_03749.replace("03749", "03462"));
-        let primary = mock_synop(&mut server, "03749", SYNOP_03749);
-        let slept = Rc::new(RefCell::new(Vec::new()));
-        let record = Rc::clone(&slept);
-        let client = http::OgimetClient::with_pacing(
-            &server.url(),
-            Duration::from_secs(3600),
-            Box::new(move |d| record.borrow_mut().push(d)),
-        );
-        let lines = attest(
-            &input("wmo-03462", Some("184;1021;51;4114")),
-            None,
-            &client,
-            WT_UNIX + 3600,
-        );
-        backup.assert();
-        primary.assert();
-        assert_eq!(lines.len(), 4, "{lines:?}");
-        let slept = slept.borrow();
-        assert_eq!(
-            slept.len(),
-            1,
-            "one gap between the two SYNOP requests: {slept:?}"
-        );
-        assert!(slept[0] > Duration::from_secs(3500), "{slept:?}");
-    }
-
-    #[test]
     fn fallback_reports_both_stations() {
         let mut server = mockito::Server::new();
         let earlier = ROW_03749.replace("19:00:00Z", "18:00:00Z");
         server.mock("GET", "/gcnfur").with_body(&earlier).create();
-        server.mock("GET", "/gcrem9").with_body(&earlier).create();
         mock_synop(
             &mut server,
             "03749",
             &SYNOP_03749.replace(",19,00,", ",18,00,"),
-        );
-        mock_synop(
-            &mut server,
-            "03462",
-            &SYNOP_03749
-                .replace(",19,00,", ",20,00,")
-                .replace("03749", "03462"),
         );
         let landobs = http::LandObsClient::new(&server.url(), "k");
         let lines = attest(
@@ -539,7 +470,14 @@ mod tests {
             &ogimet(&server),
             WT_UNIX + 3600,
         );
-        assert_eq!(lines.len(), 4);
+        let labels: Vec<&str> = lines.iter().map(|l| l.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Land Observations, wmo-03749",
+                "SYNOP via Ogimet, wmo-03749"
+            ]
+        );
         assert!(
             lines
                 .iter()
@@ -558,9 +496,7 @@ mod tests {
         ] {
             let mut server = mockito::Server::new();
             server.mock("GET", "/gcnfur").with_body(body).create();
-            server.mock("GET", "/gcrem9").with_body(body).create();
             mock_synop(&mut server, "03749", SYNOP_03749);
-            mock_synop(&mut server, "03462", &SYNOP_03749.replace("03749", "03462"));
             let landobs = http::LandObsClient::new(&server.url(), "k");
             let checked = attest(
                 &input("wmo-03749", Some("184;1021;51;4114")),
@@ -599,11 +535,6 @@ mod tests {
             "03749",
             "Sorry, too many requests. Try later.\n",
         );
-        mock_synop(
-            &mut server,
-            "03462",
-            "Sorry, too many requests. Try later.\n",
-        );
         let lines = attest(
             &input("wmo-03749", None),
             None,
@@ -611,7 +542,7 @@ mod tests {
             WT_UNIX + 3600,
         );
         let synop: Vec<_> = lines.iter().filter(|l| l.label.contains("SYNOP")).collect();
-        assert_eq!(synop.len(), 2);
+        assert_eq!(synop.len(), 1);
         assert!(
             synop
                 .iter()
@@ -634,9 +565,7 @@ mod tests {
     fn fallback_with_records_that_no_longer_reach_back_is_unavailable() {
         let mut server = mockito::Server::new();
         server.mock("GET", "/gcnfur").with_body("[]").create();
-        server.mock("GET", "/gcrem9").with_body("[]").create();
         mock_synop(&mut server, "03749", "");
-        mock_synop(&mut server, "03462", "");
         let landobs = http::LandObsClient::new(&server.url(), "k");
         let lines = attest(
             &input("wmo-03749", None),
@@ -648,7 +577,7 @@ mod tests {
             .iter()
             .filter(|l| l.label.starts_with("Land"))
             .collect();
-        assert_eq!(land.len(), 2);
+        assert_eq!(land.len(), 1);
         assert!(
             land.iter()
                 .all(|l| matches!(l.outcome, Outcome::Unavailable(_))),
@@ -712,7 +641,6 @@ mod tests {
     fn fallback_with_no_ogimet_reports_around_the_hour_is_unavailable() {
         let mut server = mockito::Server::new();
         mock_synop(&mut server, "03749", "");
-        mock_synop(&mut server, "03462", "");
         let lines = attest(
             &input("wmo-03749", None),
             None,
@@ -720,7 +648,7 @@ mod tests {
             WT_UNIX + 3600,
         );
         let synop: Vec<_> = lines.iter().filter(|l| l.label.contains("SYNOP")).collect();
-        assert_eq!(synop.len(), 2);
+        assert_eq!(synop.len(), 1);
         assert!(
             synop
                 .iter()

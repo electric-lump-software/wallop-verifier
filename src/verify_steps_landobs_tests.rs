@@ -36,11 +36,7 @@ pub(super) fn assert_step_fails(report: &VerificationReport, name: StepName, nee
 
 #[test]
 fn v6_bundles_pass_bundle_shape() {
-    for p in [
-        V6Params::weather(),
-        V6Params::fallback(),
-        V6Params::backup(),
-    ] {
+    for p in [V6Params::weather(), V6Params::fallback()] {
         assert_eq!(
             status(&run(&p), StepName::BundleShape),
             &StepStatus::Pass,
@@ -74,7 +70,7 @@ fn v5_exec_with_inline_key_fails_bundle_shape() {
 }
 
 #[test]
-fn v6_lock_naming_the_backup_fails_bundle_shape() {
+fn v6_lock_naming_wittering_fails_bundle_shape() {
     let p = V6Params {
         lock_station: "wmo-03462".into(),
         ..V6Params::weather()
@@ -269,12 +265,8 @@ fn latest_lock(weather_time: i64) -> i64 {
 }
 
 #[test]
-fn v6_window_passes_for_weather_backup_and_fallback() {
-    for p in [
-        V6Params::weather(),
-        V6Params::backup(),
-        V6Params::fallback(),
-    ] {
+fn v6_window_passes_for_weather_and_fallback() {
+    for p in [V6Params::weather(), V6Params::fallback()] {
         assert_eq!(
             status(&run(&p), StepName::WeatherObservationWindow),
             &StepStatus::Pass,
@@ -439,29 +431,6 @@ fn legacy_v5_observation_an_hour_early_still_passes_the_window() {
 }
 
 #[test]
-fn v6_backup_station_passes_end_to_end() {
-    let report = run(&V6Params::backup());
-    assert_eq!(
-        status(&report, StepName::ReceiptFieldConsistency),
-        &StepStatus::Pass
-    );
-    assert!(report.passed(), "{:?}", report.steps);
-}
-
-#[test]
-fn fallback_naming_the_backup_fails_field_consistency() {
-    let p = V6Params {
-        exec_station: Some("wmo-03462".into()),
-        ..V6Params::fallback()
-    };
-    assert_step_fails(
-        &run(&p),
-        StepName::ReceiptFieldConsistency,
-        "primary station",
-    );
-}
-
-#[test]
 fn v6_exec_station_outside_the_list_fails_field_consistency() {
     let p = V6Params {
         exec_station: Some("wmo-03772".into()),
@@ -478,7 +447,8 @@ fn v6_exec_station_outside_the_list_fails_field_consistency() {
 fn v6_lock_station_not_primary_fails_field_consistency() {
     let p = V6Params {
         lock_station: "wmo-03462".into(),
-        ..V6Params::backup()
+        exec_station: Some("wmo-03462".into()),
+        ..V6Params::weather()
     };
     assert_step_fails(
         &run(&p),
@@ -518,47 +488,55 @@ fn legacy_v5_station_difference_still_fails_field_consistency() {
 }
 
 #[test]
-fn station_errors_name_the_station_without_option_debug_text() {
-    let exec = serde_json::json!({"weather_station": "wmo-03749", "weather_value": "x"});
+fn exec_naming_wittering_fails_shape_and_consistency() {
+    let report = run(&V6Params {
+        exec_station: Some("wmo-03462".into()),
+        ..V6Params::weather()
+    });
     assert_eq!(
-        check_landobs_stations(&serde_json::json!({}), &exec).unwrap_err(),
-        "lock weather_station missing or not a string is not the primary station wmo-03749"
-    );
-    assert_eq!(
-        check_landobs_stations(&serde_json::json!({"weather_station": 3749}), &exec).unwrap_err(),
-        "lock weather_station missing or not a string is not the primary station wmo-03749"
-    );
-    assert_eq!(
-        check_landobs_stations(&serde_json::json!({"weather_station": "wmo-03462"}), &exec)
-            .unwrap_err(),
-        "lock weather_station \"wmo-03462\" is not the primary station wmo-03749"
-    );
-    let lock = serde_json::json!({"weather_station": "wmo-03749"});
-    let off_list = serde_json::json!({"weather_station": "wmo-03772", "weather_value": "x"});
-    assert_eq!(
-        check_landobs_stations(&lock, &off_list).unwrap_err(),
-        "exec weather_station \"wmo-03772\" is not one of \"wmo-03749\", \"wmo-03462\""
-    );
-    assert_eq!(
-        check_landobs_stations(&lock, &serde_json::json!({"weather_value": "x"})).unwrap_err(),
-        "exec weather_station missing or not a string is not one of \"wmo-03749\", \"wmo-03462\""
+        failing(&report),
+        vec![StepName::ReceiptFieldConsistency, StepName::BundleShape]
     );
 }
 
 #[test]
-fn landobs_cross_checked_fields_swap_weather_station_for_slug_and_fair_pick() {
+fn lock_station_must_be_middle_wallop() {
+    assert_eq!(
+        check_landobs_station(&serde_json::json!({"weather_station": "wmo-03749"})),
+        Ok(())
+    );
+    assert_eq!(
+        check_landobs_station(&serde_json::json!({"weather_station": "wmo-03462"})),
+        Err("lock weather_station \"wmo-03462\" is not the station wmo-03749".to_string())
+    );
+    assert_eq!(
+        check_landobs_station(&serde_json::json!({"weather_station": 3749})),
+        Err(
+            "lock weather_station missing or not a string is not the station wmo-03749".to_string()
+        )
+    );
+    assert_eq!(
+        check_landobs_station(&serde_json::json!({})),
+        Err(
+            "lock weather_station missing or not a string is not the station wmo-03749".to_string()
+        )
+    );
+}
+
+#[test]
+fn v6_cross_checked_fields_add_slug_and_fair_pick_to_the_legacy_list() {
     let only_legacy: Vec<&str> = CROSS_CHECKED_FIELDS
         .iter()
         .copied()
-        .filter(|f| !CROSS_CHECKED_FIELDS_LANDOBS.contains(f))
+        .filter(|f| !CROSS_CHECKED_FIELDS_V6.contains(f))
         .collect();
-    let only_landobs: Vec<&str> = CROSS_CHECKED_FIELDS_LANDOBS
+    let only_v6: Vec<&str> = CROSS_CHECKED_FIELDS_V6
         .iter()
         .copied()
         .filter(|f| !CROSS_CHECKED_FIELDS.contains(f))
         .collect();
-    assert_eq!(only_legacy, ["weather_station"]);
-    assert_eq!(only_landobs, ["operator_slug", "fair_pick_version"]);
+    assert!(only_legacy.is_empty(), "{only_legacy:?}");
+    assert_eq!(only_v6, ["operator_slug", "fair_pick_version"]);
 }
 
 fn published() -> i64 {
@@ -567,11 +545,7 @@ fn published() -> i64 {
 
 #[test]
 fn v6_bundles_pass_every_step() {
-    for p in [
-        V6Params::weather(),
-        V6Params::fallback(),
-        V6Params::backup(),
-    ] {
+    for p in [V6Params::weather(), V6Params::fallback()] {
         let report = run(&p);
         assert!(report.passed(), "{p:?}: {:?}", report.steps);
         for step in &report.steps {
@@ -700,24 +674,19 @@ fn mismatched_schema_pairs_fail_exactly_shape_window_and_consistency() {
 }
 
 #[test]
-fn null_value_and_reason_naming_the_backup_fails_window_and_consistency() {
+fn null_value_and_reason_naming_wittering_fails_window_and_consistency() {
     let p = V6Params {
-        exec_station: Some(landobs_v1::STATIONS[1].into()),
+        exec_station: Some("wmo-03462".into()),
         weather_fallback_reason: None,
         ..V6Params::fallback()
     };
     let report = run(&p);
-    let failing: Vec<StepName> = report
-        .steps
-        .iter()
-        .filter(|s| matches!(s.status, StepStatus::Fail(_)))
-        .map(|s| s.name)
-        .collect();
     assert_eq!(
-        failing,
+        failing(&report),
         [
             StepName::ReceiptFieldConsistency,
-            StepName::WeatherObservationWindow
+            StepName::WeatherObservationWindow,
+            StepName::BundleShape
         ],
         "{:?}",
         report.steps
@@ -966,8 +935,8 @@ fn weather_rules_dispatch_on_the_schema_and_tag_pair() {
 #[test]
 fn entropy_composition_is_cross_checked_under_both_rule_sets() {
     assert!(CROSS_CHECKED_FIELDS.contains(&"entropy_composition"));
-    assert!(CROSS_CHECKED_FIELDS_LANDOBS.contains(&"entropy_composition"));
-    assert!(CROSS_CHECKED_FIELDS_FREQ.contains(&"entropy_composition"));
+    assert!(CROSS_CHECKED_FIELDS_V6.contains(&"entropy_composition"));
+    assert!(CROSS_CHECKED_FIELDS_V6.contains(&"weather_station"));
 }
 
 /// Today a lock/exec tag difference always leaves one receipt with an

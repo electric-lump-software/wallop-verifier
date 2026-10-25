@@ -360,8 +360,8 @@ pub const BEACON_V6_RANDOMNESS: &str =
 pub const V6_WEATHER_VALUE: &str = "184;1021;51;4114";
 
 /// Every field (signed receipts and the entropy block) a lock v6 /
-/// execution v5 fixture varies. Start from `weather()`, `fallback()` or
-/// `backup()` and change fields to build negative cases; `build_v6_bundle`
+/// execution v5 fixture varies. Start from `weather()` or `fallback()`
+/// and change fields to build negative cases; `build_v6_bundle`
 /// signs whatever it is given.
 #[doc(hidden)]
 #[derive(Clone, Debug)]
@@ -384,7 +384,7 @@ pub struct V6Params {
 }
 
 impl V6Params {
-    /// A valid draw that used the primary station's observation. The lock
+    /// A valid draw that used Middle Wallop's observation. The lock
     /// is one minute before the latest permitted lock time, and execution
     /// is five seconds after the round published.
     #[doc(hidden)]
@@ -422,15 +422,6 @@ impl V6Params {
             weather_value: None,
             weather_observation_time: None,
             weather_fallback_reason: Some(landobs_v1::FALLBACK_NO_OBSERVATION.into()),
-            ..Self::weather()
-        }
-    }
-
-    /// A valid draw that used the backup station's observation.
-    #[doc(hidden)]
-    pub fn backup() -> Self {
-        Self {
-            exec_station: Some(landobs_v1::STATIONS[1].into()),
             ..Self::weather()
         }
     }
@@ -591,7 +582,10 @@ pub const V6_NEGATIVE_CASES: &[(&str, &[&str])] = &[
         "exec_station_not_in_tag",
         &["bundle_shape", "receipt_field_consistency"],
     ),
-    ("backup_named_on_fallback", &["receipt_field_consistency"]),
+    (
+        "exec_station_wittering",
+        &["bundle_shape", "receipt_field_consistency"],
+    ),
     (
         "observation_time_not_weather_time",
         &["weather_observation_window"],
@@ -687,16 +681,16 @@ pub fn v6_negative_bundle(name: &str) -> (String, String, String) {
             ..base
         },
         "lock_station_not_first_in_tag" => V6Params {
-            lock_station: landobs_v1::STATIONS[1].into(),
+            lock_station: "wmo-03462".into(),
             ..base
         },
         "exec_station_not_in_tag" => V6Params {
             exec_station: Some("wmo-03772".into()),
             ..base
         },
-        "backup_named_on_fallback" => V6Params {
-            exec_station: Some(landobs_v1::STATIONS[1].into()),
-            ..V6Params::fallback()
+        "exec_station_wittering" => V6Params {
+            exec_station: Some("wmo-03462".into()),
+            ..base
         },
         "observation_time_not_weather_time" => V6Params {
             weather_observation_time: Some(at(wt + 3600)),
@@ -1122,22 +1116,6 @@ mod fixture_tests {
         assert_eq!(p.weather_time, "2026-10-01T19:00:00.000000Z");
         assert_eq!(p.locked_at, "2026-10-01T18:13:00.000000Z");
         assert_eq!(p.executed_at, "2026-10-01T20:00:05.000000Z");
-    }
-
-    #[test]
-    fn v6_backup_fixture_uses_wittering() {
-        let (json, _, _) = build_v6_bundle(&V6Params::backup());
-        let bundle: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let lock: serde_json::Value =
-            serde_json::from_str(bundle["lock_receipt"]["payload_jcs"].as_str().unwrap()).unwrap();
-        let exec: serde_json::Value =
-            serde_json::from_str(bundle["execution_receipt"]["payload_jcs"].as_str().unwrap())
-                .unwrap();
-        assert_eq!(exec["weather_station"], "wmo-03462");
-        assert_eq!(lock["weather_station"], "wmo-03749");
-        assert!(exec["weather_value"].is_string());
-        assert!(exec["weather_observation_time"].is_string());
-        assert!(exec["weather_fallback_reason"].is_null());
     }
 
     #[test]

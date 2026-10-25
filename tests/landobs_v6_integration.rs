@@ -57,15 +57,9 @@ const NEGATIVE_CASE_REASONS: &[(&str, &str)] = &[
         "round_published_before_lock",
         "not after lock receipt locked_at",
     ),
-    (
-        "lock_station_not_first_in_tag",
-        "is not the primary station",
-    ),
-    ("exec_station_not_in_tag", "\"wmo-03772\" is not one of"),
-    (
-        "backup_named_on_fallback",
-        "a fallback execution receipt must name the primary station",
-    ),
+    ("lock_station_not_first_in_tag", "got \"wmo-03462\""),
+    ("exec_station_not_in_tag", "got \"wmo-03772\""),
+    ("exec_station_wittering", "got \"wmo-03462\""),
     (
         "observation_time_not_weather_time",
         "weather_observation_time 2026-10-01T20:00:00.000000Z must equal lock weather_time",
@@ -213,12 +207,8 @@ fn wrong_entropy_composition_exec_and_lock_v5_with_exec_v5_fail() {
 }
 
 #[test]
-fn weather_backup_and_fallback_bundles_pass() {
-    for p in [
-        V6Params::weather(),
-        V6Params::backup(),
-        V6Params::fallback(),
-    ] {
+fn weather_and_fallback_bundles_pass() {
+    for p in [V6Params::weather(), V6Params::fallback()] {
         assert!(verify(&p).passed(), "{p:?}");
     }
 }

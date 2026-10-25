@@ -9,21 +9,16 @@ use crate::drand::quicknet_round_time;
 /// The `entropy_composition` value of lock v6 and execution v5 receipts.
 pub const ENTROPY_COMPOSITION: &str = "drand-quicknet+metoffice-landobs-v1";
 
-/// Weather stations, in order. Every lock receipt names the first. An
-/// execution receipt names the station whose observation was used.
-/// `wmo-03749` is Middle Wallop; `wmo-03462` is Wittering, the backup.
-pub const STATIONS: [&str; 2] = ["wmo-03749", "wmo-03462"];
-
-/// The station every lock receipt names.
-pub const PRIMARY_STATION: &str = STATIONS[0];
+/// Middle Wallop (ICAO EGVP), the tag's only station. Every lock and
+/// execution receipt under the tag names it.
+pub const PRIMARY_STATION: &str = "wmo-03749";
 
 /// W, in seconds: the observation for `weather_time` may be fetched until
 /// `weather_time + W_SECS`.
 ///
-/// 30 minutes: the measured Land Observations publication latency (p99 of
-/// 15 minutes) plus 10 minutes, rounded up so the primary source keeps 5
-/// minutes of headroom before the backup cutover. Every derived value,
-/// fixture and unit test follows this one constant.
+/// 30 minutes, frozen with the tag. Middle Wallop's publication latency
+/// drifts, so a reading can miss this deadline; the draw then falls back.
+/// Every derived value, fixture and unit test follows this one constant.
 pub const W_SECS: i64 = 30 * 60;
 
 /// Gap between the end of the fetch window and the drand round's
@@ -282,7 +277,6 @@ mod tests {
     #[test]
     fn constants_are_the_tag_values() {
         assert_eq!(ENTROPY_COMPOSITION, "drand-quicknet+metoffice-landobs-v1");
-        assert_eq!(STATIONS, ["wmo-03749", "wmo-03462"]);
         assert_eq!(PRIMARY_STATION, "wmo-03749");
         assert_eq!(LOCK_OFFSET_SECS, 46 * 60);
         assert_eq!(PUBLISH_MARGIN_SECS, 60);

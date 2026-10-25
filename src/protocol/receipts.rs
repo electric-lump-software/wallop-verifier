@@ -837,13 +837,13 @@ pub fn validate_execution_receipt_tags_v4(payload: &ExecutionReceiptV4) -> Resul
 /// Pins the `drand-quicknet+metoffice-landobs-v1` entropy tag (with the
 /// JCS, signature, drand and Merkle tags), the v6-era fallback reason set
 /// (`landobs_v1::VALID_WEATHER_FALLBACK_REASONS`), a `weather_station`
-/// that is present and one of `landobs_v1::STATIONS`, and the
+/// that is present and is `landobs_v1::PRIMARY_STATION`, and the
 /// `weather_value` grammar when a value is present.
 ///
 /// It checks each field on its own. `check_bundle_shape` and later steps
 /// own the rest: pairing lock schema 6 with execution schema 5 only, the
 /// coupling between `weather_value`, the observation time and the
-/// fallback reason, and which station a fallback must name.
+/// fallback reason, and the lock's station against the execution's.
 pub fn validate_execution_receipt_tags_v5(payload: &ExecutionReceiptV5) -> Result<(), String> {
     if payload.schema_version != EXECUTION_SCHEMA_VERSION_V5 {
         return Err(format!(
@@ -893,10 +893,11 @@ pub fn validate_execution_receipt_tags_v5(payload: &ExecutionReceiptV5) -> Resul
         .as_deref()
         .ok_or("weather_station is required under the Land Observations tag")?;
     validate_weather_station(station)?;
-    if !landobs_v1::STATIONS.contains(&station) {
+    if station != landobs_v1::PRIMARY_STATION {
         return Err(format!(
-            "weather_station {station:?} is not one of {:?}",
-            landobs_v1::STATIONS
+            "weather_station must be {} under {}, got {station:?}",
+            landobs_v1::PRIMARY_STATION,
+            landobs_v1::ENTROPY_COMPOSITION
         ));
     }
     if let Some(value) = &payload.weather_value {

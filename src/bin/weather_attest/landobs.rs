@@ -12,7 +12,7 @@ pub(crate) type Row = BTreeMap<String, Box<RawValue>>;
 /// Land Observations location for each tagged station. The API response
 /// carries no station identifier, so this table is the only link between
 /// a geohash and a WMO station. It is not part of the signed protocol.
-pub(crate) const GEOHASHES: [(&str, &str); 2] = [("wmo-03749", "gcnfur"), ("wmo-03462", "gcrem9")];
+pub(crate) const GEOHASHES: [(&str, &str); 1] = [("wmo-03749", "gcnfur")];
 
 pub(crate) fn geohash_for(station: &str) -> Option<&'static str> {
     GEOHASHES
@@ -106,12 +106,13 @@ mod tests {
     const ROW: &str = r#"[{"datetime":"2026-10-01T19:00:00Z","temperature":18.38,"mslp":1021,"humidity":51,"visibility":41140.0,"wind_speed":7.4,"weather_code":1}]"#;
 
     #[test]
-    fn every_station_has_a_geohash() {
-        for station in wallop_verifier::protocol::landobs_v1::STATIONS {
-            assert!(geohash_for(station).is_some(), "{station}");
-        }
+    fn middle_wallop_alone_has_a_geohash() {
+        assert_eq!(
+            geohash_for(wallop_verifier::protocol::landobs_v1::PRIMARY_STATION),
+            Some("gcnfur")
+        );
         assert_eq!(geohash_for("wmo-03749"), Some("gcnfur"));
-        assert_eq!(geohash_for("wmo-03462"), Some("gcrem9"));
+        assert_eq!(geohash_for("wmo-03462"), None);
         assert_eq!(geohash_for("wmo-03772"), None);
     }
 

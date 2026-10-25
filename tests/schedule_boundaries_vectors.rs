@@ -8,9 +8,7 @@
 //! Every case must match the verifier's own schedule functions: the round's
 //! publication time, `weather_time` and the latest lock for the Land Obs
 //! tag, and `freq_start` and the latest lock for the grid-frequency tag.
-//! The fetch deadlines follow from the tags' constants. The backup cutover
-//! is not checked: the verifier doesn't model which station may be stored
-//! when, only which one was used.
+//! The fetch deadlines follow from the tags' constants.
 //!
 //! Read under the rules in `tests/common`: the vendored copy; a failure if
 //! it is missing once any v6 vector is vendored; before that,

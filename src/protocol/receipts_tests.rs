@@ -1121,10 +1121,17 @@ fn exec_v5(edit: impl FnOnce(&mut serde_json::Value)) -> ExecutionReceiptV5 {
 }
 
 #[test]
-fn exec_v5_accepts_weather_backup_and_fallback() {
+fn exec_v5_accepts_middle_wallop_only() {
     assert!(validate_execution_receipt_tags_v5(&exec_v5(|_| {})).is_ok());
-    let backup = exec_v5(|v| v["weather_station"] = serde_json::json!("wmo-03462"));
-    assert!(validate_execution_receipt_tags_v5(&backup).is_ok());
+    for station in ["wmo-03462", "wmo-03772"] {
+        let other = exec_v5(|v| v["weather_station"] = serde_json::json!(station));
+        let err = validate_execution_receipt_tags_v5(&other).unwrap_err();
+        assert!(err.contains("must be wmo-03749"), "{station}: {err}");
+    }
+}
+
+#[test]
+fn exec_v5_accepts_a_fallback_naming_middle_wallop() {
     let fallback = exec_v5(|v| {
         v["weather_value"] = serde_json::Value::Null;
         v["weather_observation_time"] = serde_json::Value::Null;

@@ -51,10 +51,9 @@ pub enum StepName {
     /// also match. Closes splice-attack class per spec §4.2.5. Appended
     /// rather than inserted mid-list so external consumers pinning step
     /// ordinals are not broken. Under lock v6 / execution v5,
-    /// `weather_station` is checked against the Land Observations tag's
-    /// station list instead: the lock names the primary station, the
-    /// execution receipt names a listed station, and a fallback names the
-    /// primary. Under lock v6 / execution v5, `operator_slug` and
+    /// `weather_station` is compared for equality, and under the Land
+    /// Observations tag the lock must name Middle Wallop. Under lock v6 /
+    /// execution v5, `operator_slug` and
     /// `fair_pick_version` are also byte-identical across the receipts, and
     /// `fair_pick_version` must be one this verifier implements. The rules
     /// are chosen by each receipt's `(schema_version, entropy_composition)`
@@ -807,10 +806,11 @@ pub fn verify_bundle_with<R: KeyResolver>(
     // Fields checked (spec §4.2.5): draw_id, operator_id, sequence,
     // drand_chain, drand_round, weather_station, entropy_composition.
     // Bundle envelope draw_id also cross-checked. Lock v6 / exec v5:
-    // `weather_station` is not compared for equality; it is checked
-    // against the Land Observations tag's station list (`check_landobs_stations`). See
-    // `StepName::ReceiptFieldConsistency`. signing_key_id deliberately NOT
-    // checked (lock = operator key, exec = infra key; different by design).
+    // `weather_station` is compared for equality too, and under the Land
+    // Observations tag the lock must name Middle Wallop
+    // (`check_landobs_station`). See `StepName::ReceiptFieldConsistency`.
+    // signing_key_id deliberately NOT checked (lock = operator key, exec =
+    // infra key; different by design).
     // Before lock v6 / exec v5, operator_slug and fair_pick_version are NOT
     // checked (operator_slug is derivative of operator_id). Lock v6 / exec
     // v5 compares both, and fair_pick_version must also be in
@@ -1752,28 +1752,12 @@ const CROSS_CHECKED_FIELDS: &[&str] = &[
     "entropy_composition",
 ];
 
-// Under lock v6 / execution v5, `weather_station` is not compared for
-// equality: the lock names the primary station and the execution receipt
-// names the station actually used (see `check_landobs_stations`).
-// `operator_slug` and `fair_pick_version` are compared as well, and
-// `fair_pick_version` must name a release this verifier implements (see
-// `check_fair_pick_version`). Older schemas compare neither, so their
-// verification is unchanged.
-const CROSS_CHECKED_FIELDS_LANDOBS: &[&str] = &[
-    "draw_id",
-    "operator_id",
-    "sequence",
-    "drand_chain",
-    "drand_round",
-    "entropy_composition",
-    "operator_slug",
-    "fair_pick_version",
-];
-
-// Under the grid-frequency tag: the Land Observations v6 list
-// (operator_slug and fair_pick_version included), plus weather_station,
-// which both receipts carry as null.
-const CROSS_CHECKED_FIELDS_FREQ: &[&str] = &[
+// Under lock v6 / execution v5, either tag: the legacy list plus
+// operator_slug and fair_pick_version, with fair_pick_version a release
+// this verifier implements (see `check_fair_pick_version`). weather_station
+// is compared for equality: under the Land Observations tag both receipts
+// name Middle Wallop; under grid frequency both carry null.
+const CROSS_CHECKED_FIELDS_V6: &[&str] = &[
     "draw_id",
     "operator_id",
     "sequence",
@@ -1785,46 +1769,20 @@ const CROSS_CHECKED_FIELDS_FREQ: &[&str] = &[
     "weather_station",
 ];
 
-fn check_landobs_stations(
-    lock: &serde_json::Value,
-    exec: &serde_json::Value,
-) -> Result<(), String> {
-    use crate::protocol::landobs_v1::{PRIMARY_STATION, STATIONS};
-    // A station renders as its quoted string, or `missing or not a string`.
-    fn station(receipt: &serde_json::Value) -> Option<&str> {
-        receipt.get("weather_station").and_then(|v| v.as_str())
+/// Under the Land Observations tag the lock names Middle Wallop. The
+/// execution receipt's station is then held to the lock's by
+/// `CROSS_CHECKED_FIELDS_V6`.
+fn check_landobs_station(lock: &serde_json::Value) -> Result<(), String> {
+    use crate::protocol::landobs_v1::PRIMARY_STATION;
+    match lock.get("weather_station").and_then(|v| v.as_str()) {
+        Some(PRIMARY_STATION) => Ok(()),
+        Some(other) => Err(format!(
+            "lock weather_station {other:?} is not the station {PRIMARY_STATION}"
+        )),
+        None => Err(format!(
+            "lock weather_station missing or not a string is not the station {PRIMARY_STATION}"
+        )),
     }
-    let render = |s: Option<&str>| {
-        s.map_or_else(
-            || "missing or not a string".to_string(),
-            |s| format!("{s:?}"),
-        )
-    };
-    let lock_station = station(lock);
-    if lock_station != Some(PRIMARY_STATION) {
-        return Err(format!(
-            "lock weather_station {} is not the primary station {PRIMARY_STATION}",
-            render(lock_station)
-        ));
-    }
-    let exec_station = match station(exec) {
-        Some(s) if STATIONS.contains(&s) => s,
-        other => {
-            let listed: Vec<String> = STATIONS.iter().map(|s| format!("{s:?}")).collect();
-            return Err(format!(
-                "exec weather_station {} is not one of {}",
-                render(other),
-                listed.join(", ")
-            ));
-        }
-    };
-    let fallback = exec.get("weather_value").is_none_or(|v| v.is_null());
-    if fallback && exec_station != PRIMARY_STATION {
-        return Err(format!(
-            "a fallback execution receipt must name the primary station {PRIMARY_STATION}, not {exec_station}"
-        ));
-    }
-    Ok(())
 }
 
 fn check_receipt_field_consistency(bundle: &ProofBundle) -> StepResult {
@@ -1871,8 +1829,7 @@ fn check_receipt_field_consistency(bundle: &ProofBundle) -> StepResult {
     let rules = weather_rules(&lock, &exec);
     let fields = match &rules {
         WeatherRules::Legacy => CROSS_CHECKED_FIELDS,
-        WeatherRules::LandObs => CROSS_CHECKED_FIELDS_LANDOBS,
-        WeatherRules::Freq => CROSS_CHECKED_FIELDS_FREQ,
+        WeatherRules::LandObs | WeatherRules::Freq => CROSS_CHECKED_FIELDS_V6,
         WeatherRules::Mismatched => {
             return StepResult {
                 name: StepName::ReceiptFieldConsistency,
@@ -1907,7 +1864,7 @@ fn check_receipt_field_consistency(bundle: &ProofBundle) -> StepResult {
 
     if rules == WeatherRules::LandObs
         && let Err(reason) =
-            check_landobs_stations(&lock, &exec).and_then(|()| check_fair_pick_version(&lock))
+            check_landobs_station(&lock).and_then(|()| check_fair_pick_version(&lock))
     {
         return StepResult {
             name: StepName::ReceiptFieldConsistency,
