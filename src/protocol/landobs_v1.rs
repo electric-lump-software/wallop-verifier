@@ -789,4 +789,42 @@ mod tests {
         out_of_bounds(r#""temperature":1.0,"mslp":1000,"humidity":101,"visibility":1000"#);
         out_of_bounds(r#""temperature":1.0,"mslp":1000,"humidity":50,"visibility":100005"#);
     }
+
+    /// The facts the fallback rule relies on, for every draw second of the
+    /// hour: pub = wt + 1860 + d, d in 0..=3597 step 3.
+    #[test]
+    fn both_stores_settle_before_drand_for_every_draw_second() {
+        use crate::protocol::freq_v1;
+        const GENESIS: i64 = 1_692_803_367;
+        // 2026-10-25T00:00Z, 01:00Z (clock change), 2026-03-29T00:00Z, 2026-12-31T23:00Z.
+        for wt in [
+            1_792_886_400_i64,
+            1_792_890_000,
+            1_774_742_400,
+            1_798_758_000,
+        ] {
+            for d in (0..=3597_i64).step_by(3) {
+                let pub_ = wt + 1860 + d;
+                let round = u64::try_from((pub_ - GENESIS) / 3 + 1).unwrap();
+                assert_eq!(
+                    crate::drand::quicknet_round_time(round),
+                    Some(pub_),
+                    "d={d}"
+                );
+                assert_eq!(weather_time_for_round(round), Some(wt), "d={d}");
+                let t = freq_v1::freq_start_for_round(round).unwrap();
+                let f = wt + W_SECS;
+                let f_freq = t + freq_v1::SPAN_SECS + freq_v1::W_FREQ_SECS;
+                assert_eq!(t, wt + 1500 + d - d % 15, "d={d}");
+                assert!(f_freq - f >= 45, "d={d}");
+                assert!(f + 60 <= pub_, "d={d}");
+                assert!(f_freq + freq_v1::MARGIN_SECS <= pub_, "d={d}");
+                assert!(
+                    latest_lock_at(wt).unwrap() <= t - freq_v1::LOCK_GAP_SECS,
+                    "d={d}"
+                );
+                assert!(t >= wt + 25 * 60, "d={d}");
+            }
+        }
+    }
 }
