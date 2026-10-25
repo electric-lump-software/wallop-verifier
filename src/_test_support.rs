@@ -359,10 +359,15 @@ pub const BEACON_V6_RANDOMNESS: &str =
 #[doc(hidden)]
 pub const V6_WEATHER_VALUE: &str = "184;1021;51;4114";
 
+/// A grammar-valid grid-frequency value (eight readings in mHz), the same
+/// as the grid-frequency fixture's. Used for the weather tag's state (b).
+#[doc(hidden)]
+pub const V6_FREQ_VALUE: &str = "50012;50018;50012;49983;49980;49953;49912;49883";
+
 /// Every field (signed receipts and the entropy block) a lock v6 /
-/// execution v5 fixture varies. Start from `weather()` or `fallback()`
-/// and change fields to build negative cases; `build_v6_bundle`
-/// signs whatever it is given.
+/// execution v5 fixture varies. Start from `weather()`, `freq_fallback()`
+/// or `fallback()` (the tag's three states) and change fields to build
+/// negative cases; `build_v6_bundle` signs whatever it is given.
 #[doc(hidden)]
 #[derive(Clone, Debug)]
 pub struct V6Params {
@@ -432,14 +437,26 @@ impl V6Params {
         }
     }
 
-    /// A valid draw with no observation by the deadline: drand only.
+    /// State (b): no observation by the deadline; the round's grid-frequency window.
     #[doc(hidden)]
-    pub fn fallback() -> Self {
+    pub fn freq_fallback() -> Self {
         Self {
             weather_value: None,
             weather_observation_time: None,
             weather_fallback_reason: Some(landobs_v1::FALLBACK_NO_OBSERVATION.into()),
+            freq_value: Some(V6_FREQ_VALUE.into()),
+            freq_fallback_reason: None,
             ..Self::weather()
+        }
+    }
+
+    /// State (c): no observation and no window: drand only.
+    #[doc(hidden)]
+    pub fn fallback() -> Self {
+        Self {
+            freq_value: None,
+            freq_fallback_reason: Some(crate::protocol::freq_v1::FALLBACK_NO_FREQUENCY.into()),
+            ..Self::freq_fallback()
         }
     }
 }
@@ -462,7 +479,12 @@ pub fn v6_entries() -> Vec<Entry> {
 
 /// Build and sign a resolver-driven bundle (no inline keys) from `p`. The
 /// seed and winners are recomputed from `p`, so they always agree with
-/// the receipt. Returns `(bundle_json, public_key_hex, signing_key_id)`.
+/// the receipt. Under the Land Observations tag the seed follows the
+/// three-state table (`landobs_v1::exec_state`), so the fixtures for
+/// states (b) and (c) carry the seed an honest draw would. Outside the
+/// table, or under another tag, the first non-null value is used; the
+/// verifier refuses an out-of-table receipt whatever its seed. Returns
+/// `(bundle_json, public_key_hex, signing_key_id)`.
 #[doc(hidden)]
 pub fn build_v6_bundle(p: &V6Params) -> (String, String, String) {
     let sk = test_signing_key();
@@ -472,10 +494,27 @@ pub fn build_v6_bundle(p: &V6Params) -> (String, String, String) {
     let entries = v6_entries();
     let draw_id = "22222222-2222-2222-2222-222222222222";
     let (ehash, _) = entry_hash(draw_id, &entries);
-    let (seed_bytes, _) = match (p.weather_value.as_deref(), p.freq_value.as_deref()) {
-        (Some(w), _) => compute_seed(&ehash, &p.drand_randomness, w),
-        (None, Some(f)) => compute_seed_freq(&ehash, &p.drand_randomness, f),
-        (None, None) => compute_seed_drand_only(&ehash, &p.drand_randomness),
+    let five = serde_json::json!({
+        "weather_value": &p.weather_value,
+        "weather_observation_time": &p.weather_observation_time,
+        "weather_fallback_reason": &p.weather_fallback_reason,
+        "freq_value": &p.freq_value,
+        "freq_fallback_reason": &p.freq_fallback_reason,
+    });
+    let state = (p.exec_entropy_composition == landobs_v1::ENTROPY_COMPOSITION)
+        .then(|| landobs_v1::exec_state(&five).ok())
+        .flatten();
+    let (seed_bytes, _) = match state {
+        Some(landobs_v1::ExecState::Weather(w)) => compute_seed(&ehash, &p.drand_randomness, w),
+        Some(landobs_v1::ExecState::Freq(f)) => compute_seed_freq(&ehash, &p.drand_randomness, f),
+        Some(landobs_v1::ExecState::DrandOnly) => {
+            compute_seed_drand_only(&ehash, &p.drand_randomness)
+        }
+        None => match (p.weather_value.as_deref(), p.freq_value.as_deref()) {
+            (Some(w), _) => compute_seed(&ehash, &p.drand_randomness, w),
+            (None, Some(f)) => compute_seed_freq(&ehash, &p.drand_randomness, f),
+            (None, None) => compute_seed_drand_only(&ehash, &p.drand_randomness),
+        },
     };
     let winners = draw(&entries, &seed_bytes, 2).unwrap();
     let results: Vec<String> = winners.iter().map(|w| w.entry_id.clone()).collect();
@@ -627,21 +666,20 @@ pub const V6_NEGATIVE_CASES: &[(&str, &[&str])] = &[
         "observation_time_not_weather_time",
         &["weather_observation_window"],
     ),
-    (
-        "partial_fallback_value_null_reason_null",
-        &["weather_observation_window"],
-    ),
-    (
-        "partial_fallback_reason_set_value_set",
-        &["weather_observation_window"],
-    ),
+    ("partial_fallback_value_null_reason_null", OUT_OF_TABLE),
+    ("partial_fallback_reason_set_value_set", OUT_OF_TABLE),
     ("value_grammar_minus_zero", &["bundle_shape"]),
     ("value_grammar_leading_zero", &["bundle_shape"]),
     ("value_grammar_three_parts", &["bundle_shape"]),
     ("value_out_of_bounds", &["bundle_shape"]),
     (
         "v5_reason_in_v6_exec",
-        &["bundle_shape", "weather_observation_window"],
+        &[
+            "bundle_shape",
+            "weather_observation_window",
+            "receipt_field_consistency",
+            "seed_recomputation",
+        ],
     ),
     (
         "wrong_entropy_composition",
@@ -678,11 +716,61 @@ pub const V6_NEGATIVE_CASES: &[(&str, &[&str])] = &[
     ("inline_key_on_lock_v6", &["bundle_shape"]),
     ("inline_key_on_exec_v5", &["bundle_shape"]),
     ("executed_before_round_published", &["drand_bls_signature"]),
+    ("weather_with_freq_value", OUT_OF_TABLE),
+    ("weather_with_freq_fallback_reason", OUT_OF_TABLE),
+    ("freq_fallback_value_null_reason_null", OUT_OF_TABLE),
+    ("freq_value_without_weather_fallback_reason", OUT_OF_TABLE),
+    ("freq_start_plus_15s", &["weather_observation_window"]),
+    (
+        "freq_start_plus_15s_on_freq_fallback",
+        &["weather_observation_window"],
+    ),
+    (
+        "freq_start_off_grid",
+        &["bundle_shape", "weather_observation_window"],
+    ),
+    (
+        "freq_start_null",
+        &[
+            "bundle_shape",
+            "lock_signature",
+            "weather_observation_window",
+        ],
+    ),
+    (
+        "freq_start_missing",
+        &[
+            "bundle_shape",
+            "lock_signature",
+            "weather_observation_window",
+        ],
+    ),
+    (
+        "freq_bundle_relabelled_landobs",
+        &[
+            "bundle_shape",
+            "lock_signature",
+            "weather_observation_window",
+            "receipt_field_consistency",
+            "seed_recomputation",
+        ],
+    ),
+];
+
+/// What an execution receipt outside the three-state table fails: the
+/// window and field-consistency steps, and the seed step, which enforces
+/// the table itself rather than choosing a seed.
+const OUT_OF_TABLE: &[&str] = &[
+    "weather_observation_window",
+    "receipt_field_consistency",
+    "seed_recomputation",
 ];
 
 /// The signed bundle for one case in `V6_NEGATIVE_CASES`. Each case changes
-/// `V6Params::weather()` (or `fallback()`) and re-signs, so exactly the
-/// steps listed in `V6_NEGATIVE_CASES` fail. Returns `(bundle_json, public_key_hex, signing_key_id)`.
+/// `V6Params::weather()` (or `freq_fallback()` / `fallback()`) and
+/// re-signs, so exactly the steps listed in `V6_NEGATIVE_CASES` fail;
+/// `freq_bundle_relabelled_landobs` relabels a grid-frequency bundle
+/// instead. Returns `(bundle_json, public_key_hex, signing_key_id)`.
 #[doc(hidden)]
 pub fn v6_negative_bundle(name: &str) -> (String, String, String) {
     let wt = landobs_v1::weather_time_for_round(BEACON_V6_ROUND)
@@ -698,6 +786,8 @@ pub fn v6_negative_bundle(name: &str) -> (String, String, String) {
         weather_observation_time: Some(s),
         ..V6Params::weather()
     };
+    let freq_start =
+        freq_v1::freq_start_for_round(BEACON_V6_ROUND).expect("fixture round has a window start");
     let forecast_tag = crate::protocol::receipts::ENTROPY_COMPOSITION.to_string();
     let base = V6Params::weather();
     let p = match name {
@@ -784,6 +874,49 @@ pub fn v6_negative_bundle(name: &str) -> (String, String, String) {
             executed_at: at(published - 1),
             ..base
         },
+        "weather_with_freq_value" => V6Params {
+            freq_value: Some(V6_FREQ_VALUE.into()),
+            ..base
+        },
+        "weather_with_freq_fallback_reason" => V6Params {
+            freq_fallback_reason: Some(freq_v1::FALLBACK_NO_FREQUENCY.into()),
+            ..base
+        },
+        "freq_fallback_value_null_reason_null" => V6Params {
+            freq_value: None,
+            ..V6Params::freq_fallback()
+        },
+        "freq_value_without_weather_fallback_reason" => V6Params {
+            weather_fallback_reason: None,
+            ..V6Params::freq_fallback()
+        },
+        "freq_start_plus_15s" => V6Params {
+            freq_start: Some(at(freq_start + 15)),
+            ..base
+        },
+        "freq_start_plus_15s_on_freq_fallback" => V6Params {
+            freq_start: Some(at(freq_start + 15)),
+            ..V6Params::freq_fallback()
+        },
+        "freq_start_off_grid" => V6Params {
+            freq_start: Some(at(freq_start + 1)),
+            ..base
+        },
+        "freq_start_null" => V6Params {
+            freq_start: None,
+            ..base
+        },
+        "freq_start_missing" => V6Params {
+            omit_freq_start: true,
+            ..base
+        },
+        "freq_bundle_relabelled_landobs" => {
+            return build_freq_bundle(&FreqParams {
+                lock_entropy_composition: landobs_v1::ENTROPY_COMPOSITION.into(),
+                exec_entropy_composition: landobs_v1::ENTROPY_COMPOSITION.into(),
+                ..FreqParams::value()
+            });
+        }
         "inline_key_on_lock_v6" | "inline_key_on_exec_v5" => {
             let (json, pk_hex, kid) = build_v6_bundle(&base);
             let mut v: serde_json::Value =

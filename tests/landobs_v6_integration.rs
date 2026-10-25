@@ -66,11 +66,13 @@ const NEGATIVE_CASE_REASONS: &[(&str, &str)] = &[
     ),
     (
         "partial_fallback_value_null_reason_null",
-        "it has weather_value null, weather_observation_time null, weather_fallback_reason null",
+        "weather_value null, weather_observation_time null, weather_fallback_reason null, \
+         freq_value null, freq_fallback_reason no_frequency_by_deadline",
     ),
     (
         "partial_fallback_reason_set_value_set",
-        "it has weather_value set, weather_observation_time set, weather_fallback_reason set",
+        "weather_value set, weather_observation_time set, \
+         weather_fallback_reason no_observation_by_deadline, freq_value null",
     ),
     ("value_grammar_minus_zero", "weather_value t is -0"),
     ("value_grammar_leading_zero", "has a leading zero"),
@@ -78,7 +80,7 @@ const NEGATIVE_CASE_REASONS: &[(&str, &str)] = &[
     ("value_out_of_bounds", "is outside [-900, 600]"),
     (
         "v5_reason_in_v6_exec",
-        "weather_fallback_reason \"unreachable\" is not \"no_observation_by_deadline\"",
+        "weather_fallback_reason unreachable, freq_value null",
     ),
     (
         "wrong_entropy_composition",
@@ -101,6 +103,49 @@ const NEGATIVE_CASE_REASONS: &[(&str, &str)] = &[
     (
         "executed_before_round_published",
         "is before drand round 32693812 was published",
+    ),
+    (
+        "weather_with_freq_value",
+        "weather_value set, weather_observation_time set, weather_fallback_reason null, \
+         freq_value set, freq_fallback_reason null",
+    ),
+    (
+        "weather_with_freq_fallback_reason",
+        "weather_value set, weather_observation_time set, weather_fallback_reason null, \
+         freq_value null, freq_fallback_reason no_frequency_by_deadline",
+    ),
+    (
+        "freq_fallback_value_null_reason_null",
+        "weather_fallback_reason no_observation_by_deadline, freq_value null, \
+         freq_fallback_reason null",
+    ),
+    (
+        "freq_value_without_weather_fallback_reason",
+        "weather_fallback_reason null, freq_value set, freq_fallback_reason null",
+    ),
+    (
+        "freq_start_plus_15s",
+        "is not the window start for drand round",
+    ),
+    (
+        "freq_start_plus_15s_on_freq_fallback",
+        "is not the window start for drand round",
+    ),
+    (
+        "freq_start_off_grid",
+        "is not a whole multiple of 15 seconds",
+    ),
+    (
+        "freq_start_null",
+        "lock receipt freq_start is missing or not a string",
+    ),
+    (
+        "freq_start_missing",
+        "the receipt's keys are not the lock v6 / execution v5 key set",
+    ),
+    (
+        "freq_bundle_relabelled_landobs",
+        "exec receipt is in none of the three states",
     ),
 ];
 
@@ -127,9 +172,12 @@ fn every_negative_case_fails_at_exactly_its_expected_steps() {
         want.sort();
         assert_eq!(failing_steps(&report), want, "{name}: {:?}", report.steps);
 
-        // Every step outside the expected set passes, except that a pair
-        // with no seed rule skips the seed and winner steps (a Skip never
-        // passes the report).
+        // Every step outside the expected set passes, except for skips a
+        // failing step causes (a Skip never passes the report): a pair with
+        // no seed rule skips the seed and winner steps, a failed seed step
+        // skips the winner step, and a failed lock signature skips the
+        // steps that need a verified lock.
+        let fails = |n: &str| steps.contains(&n);
         for step in &report.steps {
             if matches!(step.status, StepStatus::Fail(_)) {
                 continue;
@@ -138,6 +186,20 @@ fn every_negative_case_fails_at_exactly_its_expected_steps() {
                 &step.status,
                 StepStatus::Skip(r) if r.starts_with("no seed rule for this tag pair")
             );
+            let after_seed = step.name == StepName::WinnerSelection
+                && fails("seed_recomputation")
+                && step.status == StepStatus::Skip("seed or exec signature failed".into());
+            let after_lock_signature = fails("lock_signature")
+                && matches!(
+                    (step.name, &step.status),
+                    (StepName::ReceiptLinkage, StepStatus::Skip(r)) if r == "signature check failed"
+                ) | matches!(
+                    (step.name, &step.status),
+                    (StepName::LockReceiptEntryHash, StepStatus::Skip(r)) if r == "lock signature failed"
+                );
+            if after_seed || after_lock_signature {
+                continue;
+            }
             if no_seed_rule {
                 assert!(
                     matches!(
@@ -208,7 +270,11 @@ fn wrong_entropy_composition_exec_and_lock_v5_with_exec_v5_fail() {
 
 #[test]
 fn weather_and_fallback_bundles_pass() {
-    for p in [V6Params::weather(), V6Params::fallback()] {
+    for p in [
+        V6Params::weather(),
+        V6Params::freq_fallback(),
+        V6Params::fallback(),
+    ] {
         assert!(verify(&p).passed(), "{p:?}");
     }
 }

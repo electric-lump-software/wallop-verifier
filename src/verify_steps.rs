@@ -37,6 +37,11 @@ pub enum StepName {
     /// `commitment_hash` must equal that entry hash too.
     LockReceiptEntryHash,
     ExecReceiptEntryHash,
+    /// The execution receipt's `seed` is recomputed from the entry hash,
+    /// the drand randomness and the signed entropy value. The rule comes
+    /// from the receipts' `(schema_version, entropy_composition)` pair; the
+    /// seed input is chosen by the three-state table under the Land
+    /// Observations tag, and a receipt in none of the states fails here.
     SeedRecomputation,
     WinnerSelection,
     /// The drand beacon in the signed execution receipt: BLS signature
@@ -57,7 +62,9 @@ pub enum StepName {
     /// `fair_pick_version` are also byte-identical across the receipts, and
     /// `fair_pick_version` must be one this verifier implements. The rules
     /// are chosen by each receipt's `(schema_version, entropy_composition)`
-    /// pair; a pair the verifier does not know fails this step.
+    /// pair; a pair the verifier does not know fails this step. Under the
+    /// Land Observations tag, the execution receipt is in one of the three
+    /// states (see `WeatherObservationWindow`).
     ReceiptFieldConsistency,
     /// Weather observation window. Lock v4/v5: the execution receipt's
     /// `weather_observation_time` falls in
@@ -66,10 +73,10 @@ pub enum StepName {
     /// on a drand-only draw. Lock v6 / execution v5: `weather_time` is the
     /// observation hour the drand round implies, `freq_start` is the window
     /// start the round implies, `locked_at` is at least
-    /// 46 minutes before it, and the execution receipt carries either an
-    /// observation of exactly that hour or the fallback reason
-    /// `no_observation_by_deadline`, never a mix of the two. Always `Pass`
-    /// or `Fail` under v6, fallback included, because the schedule is
+    /// 46 minutes before it, and the execution receipt is in one of the
+    /// tag's three states: Middle Wallop's reading of exactly that hour; no
+    /// reading, with the round's grid-frequency window; or neither. Always
+    /// `Pass` or `Fail` under v6, fallback included, because the schedule is
     /// checked either way. On a fallback, `Pass` means the schedule holds.
     /// Whether the archive really had no observation is checked by
     /// `wallop-verify weather-attest`, not here. The rules are chosen by
@@ -1054,8 +1061,8 @@ enum SeedInput<'a> {
     DrandOnly,
     /// `compute_seed` with the signed `weather_value`.
     Weather(&'a str),
-    /// `compute_seed_freq` with the signed `freq_value` (grid-frequency
-    /// pair only).
+    /// `compute_seed_freq` with the signed `freq_value`, under the
+    /// grid-frequency pair or the Land Observations pair's state (b).
     Freq(&'a str),
 }
 
@@ -1073,10 +1080,13 @@ enum SeedError {
 
 impl<'a> SeedInput<'a> {
     /// Under the grid-frequency pair the seed comes from `freq_value`, and a
-    /// non-null `weather_value` is refused. Under the forecast and Land
-    /// Observations pairs it comes from `weather_value` as before. A
-    /// mismatched or unrecognised pair has no seed rule (`SeedError::NoRule`).
-    /// Absent or null means drand only; any other non-string value fails.
+    /// non-null `weather_value` is refused. Under the forecast pairs it comes
+    /// from `weather_value` as before; absent or null means drand only, and
+    /// any other non-string value fails. Under the Land Observations pair it
+    /// follows the three-state table (`landobs_v1::exec_state`): (a)
+    /// `weather_value`, (b) `freq_value`, (c) drand only, and a receipt in
+    /// none of the three is `SeedError::Invalid`. A mismatched or
+    /// unrecognised pair has no seed rule (`SeedError::NoRule`).
     fn from_receipts(
         lock: &serde_json::Value,
         exec: &'a serde_json::Value,
@@ -1102,8 +1112,17 @@ impl<'a> SeedInput<'a> {
                 }
                 Ok(signed_text(exec, "freq_value")?.map_or(SeedInput::DrandOnly, SeedInput::Freq))
             }
-            WeatherRules::Legacy | WeatherRules::LandObs => Ok(signed_text(exec, "weather_value")?
+            WeatherRules::Legacy => Ok(signed_text(exec, "weather_value")?
                 .map_or(SeedInput::DrandOnly, SeedInput::Weather)),
+            // The seed step enforces the table itself: an earlier step's
+            // failure does not gate this one, and a receipt in no state
+            // must never choose its own seed.
+            WeatherRules::LandObs => match crate::protocol::landobs_v1::exec_state(exec) {
+                Ok(crate::protocol::landobs_v1::ExecState::Weather(v)) => Ok(SeedInput::Weather(v)),
+                Ok(crate::protocol::landobs_v1::ExecState::Freq(v)) => Ok(SeedInput::Freq(v)),
+                Ok(crate::protocol::landobs_v1::ExecState::DrandOnly) => Ok(SeedInput::DrandOnly),
+                Err(reason) => Err(SeedError::Invalid(reason)),
+            },
             WeatherRules::Mismatched => Err(SeedError::NoRule(format!(
                 "no seed rule for this tag pair: {}",
                 mismatch_reason(lock, exec)
@@ -1864,8 +1883,9 @@ fn check_receipt_field_consistency(bundle: &ProofBundle) -> StepResult {
     }
 
     if rules == WeatherRules::LandObs
-        && let Err(reason) =
-            check_landobs_station(&lock).and_then(|()| check_fair_pick_version(&lock))
+        && let Err(reason) = check_landobs_station(&lock)
+            .and_then(|()| check_fair_pick_version(&lock))
+            .and_then(|()| crate::protocol::landobs_v1::exec_state(&exec).map(|_| ()))
     {
         return StepResult {
             name: StepName::ReceiptFieldConsistency,
@@ -2041,8 +2061,9 @@ fn mismatch_reason(lock: &serde_json::Value, exec: &serde_json::Value) -> &'stat
 /// its `freq_start` must be the grid-frequency window start the round
 /// implies, the lock must be at least `LOCK_OFFSET_SECS` before
 /// `weather_time` (compared to the microsecond), and the execution receipt
-/// must carry either an observation of exactly that hour with no fallback
-/// reason, or no observation with reason `no_observation_by_deadline`.
+/// must be in one of the tag's three states (`landobs_v1::exec_state`): an
+/// observation of exactly that hour; no observation, with the round's
+/// grid-frequency window; or neither.
 fn check_landobs_weather(lock: &serde_json::Value, exec: &serde_json::Value) -> Result<(), String> {
     use crate::protocol::landobs_v1;
     let lock_str = |field: &str| {
@@ -2094,17 +2115,14 @@ fn check_landobs_weather(lock: &serde_json::Value, exec: &serde_json::Value) -> 
         ));
     }
 
-    let field = |name: &str| exec.get(name).filter(|v| !v.is_null());
-    let shown = |v: Option<&serde_json::Value>| if v.is_some() { "set" } else { "null" };
-    match (
-        field("weather_value"),
-        field("weather_observation_time"),
-        field("weather_fallback_reason"),
-    ) {
-        (Some(_), Some(observation), None) => {
-            let observation = observation.as_str().ok_or_else(|| {
-                "exec receipt weather_observation_time is not a string".to_string()
-            })?;
+    match landobs_v1::exec_state(exec)? {
+        landobs_v1::ExecState::Weather(_) => {
+            let observation = exec
+                .get("weather_observation_time")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    "exec receipt weather_observation_time is not a string".to_string()
+                })?;
             if observation == weather_time {
                 Ok(())
             } else {
@@ -2113,24 +2131,7 @@ fn check_landobs_weather(lock: &serde_json::Value, exec: &serde_json::Value) -> 
                 ))
             }
         }
-        (None, None, Some(reason)) => {
-            if reason.as_str() == Some(landobs_v1::FALLBACK_NO_OBSERVATION) {
-                Ok(())
-            } else {
-                Err(format!(
-                    "exec weather_fallback_reason {reason} is not \"{}\"",
-                    landobs_v1::FALLBACK_NO_OBSERVATION
-                ))
-            }
-        }
-        (value, observation, reason) => Err(format!(
-            "exec receipt must carry weather_value and weather_observation_time with no \
-             weather_fallback_reason, or a weather_fallback_reason with neither; it has \
-             weather_value {}, weather_observation_time {}, weather_fallback_reason {}",
-            shown(value),
-            shown(observation),
-            shown(reason)
-        )),
+        landobs_v1::ExecState::Freq(_) | landobs_v1::ExecState::DrandOnly => Ok(()),
     }
 }
 

@@ -313,20 +313,63 @@ fn the_seed_input_is_chosen_by_the_pair_from_the_signed_receipt() {
         SeedInput::from_receipts(&lock(freq), &e),
         Ok(SeedInput::Freq(v))
     );
-    // Under the Land Observations pair, freq_value is never read.
-    let e = exec(landobs, serde_json::json!({"freq_value": v}));
-    assert_eq!(
-        SeedInput::from_receipts(&lock(landobs), &e),
-        Ok(SeedInput::DrandOnly)
-    );
-    let e = exec(
-        landobs,
-        serde_json::json!({"weather_value": "141;1025;85;2432"}),
-    );
+    // Under the Land Observations pair, the three-state table decides,
+    // and a receipt in none of the states is refused, never seeded.
+    let state = |w: serde_json::Value,
+                 r: serde_json::Value,
+                 f: serde_json::Value,
+                 fr: serde_json::Value| {
+        let o = if w.is_null() {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!("2026-10-01T19:00:00.000000Z")
+        };
+        exec(
+            landobs,
+            serde_json::json!({
+                "weather_value": w, "weather_observation_time": o,
+                "weather_fallback_reason": r, "freq_value": f, "freq_fallback_reason": fr
+            }),
+        )
+    };
+    let null = serde_json::Value::Null;
+    let no_obs = serde_json::json!(landobs_v1::FALLBACK_NO_OBSERVATION);
+    let no_freq = serde_json::json!(freq_v1::FALLBACK_NO_FREQUENCY);
+    let w = serde_json::json!("141;1025;85;2432");
+    let e = state(w.clone(), null.clone(), null.clone(), null.clone());
     assert_eq!(
         SeedInput::from_receipts(&lock(landobs), &e),
         Ok(SeedInput::Weather("141;1025;85;2432"))
     );
+    let e = state(
+        null.clone(),
+        no_obs.clone(),
+        serde_json::json!(v),
+        null.clone(),
+    );
+    assert_eq!(
+        SeedInput::from_receipts(&lock(landobs), &e),
+        Ok(SeedInput::Freq(v))
+    );
+    let e = state(null.clone(), no_obs.clone(), null.clone(), no_freq.clone());
+    assert_eq!(
+        SeedInput::from_receipts(&lock(landobs), &e),
+        Ok(SeedInput::DrandOnly)
+    );
+    for e in [
+        state(w.clone(), null.clone(), serde_json::json!(v), null.clone()),
+        state(w, null.clone(), null.clone(), no_freq),
+        state(null.clone(), no_obs, null.clone(), null.clone()),
+        exec(landobs, serde_json::json!({"freq_value": v})),
+    ] {
+        assert!(
+            matches!(
+                SeedInput::from_receipts(&lock(landobs), &e),
+                Err(SeedError::Invalid(_))
+            ),
+            "{e}"
+        );
+    }
     // A mismatched or unknown pair has no seed rule at all.
     for (l, e) in [
         (

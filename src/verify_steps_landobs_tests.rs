@@ -396,7 +396,11 @@ fn v6_partial_weather_fails() {
         },
     ];
     for p in cases {
-        assert_step_fails(&run(&p), StepName::WeatherObservationWindow, "must carry");
+        assert_step_fails(
+            &run(&p),
+            StepName::WeatherObservationWindow,
+            "none of the three states",
+        );
     }
 }
 
@@ -674,7 +678,7 @@ fn mismatched_schema_pairs_fail_exactly_shape_window_and_consistency() {
 }
 
 #[test]
-fn null_value_and_reason_naming_wittering_fails_window_and_consistency() {
+fn null_value_and_reason_naming_wittering_fails_window_consistency_and_seed() {
     let p = V6Params {
         exec_station: Some("wmo-03462".into()),
         weather_fallback_reason: None,
@@ -684,6 +688,7 @@ fn null_value_and_reason_naming_wittering_fails_window_and_consistency() {
     assert_eq!(
         failing(&report),
         [
+            StepName::SeedRecomputation,
             StepName::ReceiptFieldConsistency,
             StepName::WeatherObservationWindow,
             StepName::BundleShape
@@ -1299,5 +1304,169 @@ fn freq_start_must_be_the_rounds_window_start() {
             ..V6Params::weather()
         });
         assert_eq!(failing(&report), steps, "offset {off}");
+    }
+}
+
+#[test]
+fn freq_start_left_out_of_the_lock_fails_shape_signature_and_window() {
+    let report = run(&V6Params {
+        omit_freq_start: true,
+        ..V6Params::weather()
+    });
+    assert_eq!(
+        failing(&report),
+        [
+            StepName::LockSignature,
+            StepName::WeatherObservationWindow,
+            StepName::BundleShape
+        ],
+        "{:?}",
+        report.steps
+    );
+}
+
+// ── The three execution states ────────────────────────────────────────
+
+/// The signed payload of `wrapper` (`lock_receipt` or `execution_receipt`).
+fn payload_of(json: &str, wrapper: &str) -> serde_json::Value {
+    let bundle: serde_json::Value = serde_json::from_str(json).unwrap();
+    serde_json::from_str(bundle[wrapper]["payload_jcs"].as_str().unwrap()).unwrap()
+}
+
+fn exec_of(json: &str) -> serde_json::Value {
+    payload_of(json, "execution_receipt")
+}
+
+fn lock_of(json: &str) -> serde_json::Value {
+    payload_of(json, "lock_receipt")
+}
+
+#[test]
+fn all_three_states_pass_end_to_end() {
+    for p in [
+        V6Params::weather(),
+        V6Params::freq_fallback(),
+        V6Params::fallback(),
+    ] {
+        let report = run(&p);
+        assert!(report.passed(), "{:?}", failing(&report));
+        for step in &report.steps {
+            assert_eq!(step.status, StepStatus::Pass, "{p:?}: {}", step.name);
+        }
+    }
+}
+
+#[test]
+fn the_seed_step_follows_the_table_and_names_the_mode() {
+    use crate::_test_support::{V6_FREQ_VALUE, V6_WEATHER_VALUE, resign_exec};
+    // (b) uses the frequency seed.
+    let (json, _, _) = build_v6_bundle(&V6Params::freq_fallback());
+    let exec = exec_of(&json);
+    let lock = lock_of(&json);
+    assert_eq!(
+        SeedInput::from_receipts(&lock, &exec),
+        Ok(SeedInput::Freq(V6_FREQ_VALUE))
+    );
+    assert_eq!(
+        SeedInput::from_receipts(&lock, &exec).unwrap().mode(),
+        "drand + grid frequency"
+    );
+
+    // (a) and (c) name their own modes.
+    let (json_a, _, _) = build_v6_bundle(&V6Params::weather());
+    assert_eq!(
+        SeedInput::from_receipts(&lock_of(&json_a), &exec_of(&json_a))
+            .unwrap()
+            .mode(),
+        "drand + weather"
+    );
+    let (json_c, _, _) = build_v6_bundle(&V6Params::fallback());
+    assert_eq!(
+        SeedInput::from_receipts(&lock_of(&json_c), &exec_of(&json_c)),
+        Ok(SeedInput::DrandOnly)
+    );
+
+    // Both set: the seed step refuses rather than choosing one.
+    let both = resign_exec(&json, |e| {
+        e["weather_value"] = serde_json::json!(V6_WEATHER_VALUE)
+    });
+    let e: serde_json::Value =
+        serde_json::from_str(both["execution_receipt"]["payload_jcs"].as_str().unwrap()).unwrap();
+    assert!(matches!(
+        SeedInput::from_receipts(&lock, &e),
+        Err(SeedError::Invalid(_))
+    ));
+}
+
+#[test]
+fn state_b_signed_with_another_seed_fails_only_the_seed_and_winner_steps() {
+    // A (b) receipt whose seed is the drand-only seed: the table says the
+    // frequency seed, so the seed step fails on the mismatch.
+    let (json, pk_hex, kid) = build_v6_bundle(&V6Params::freq_fallback());
+    let drand_only = build_v6_bundle(&V6Params::fallback()).0;
+    let seed = exec_of(&drand_only)["seed"].clone();
+    let edited = crate::_test_support::resign_exec(&json, |e| e["seed"] = seed);
+    let report = run_json(&edited.to_string(), &pk_hex, &kid);
+    assert_eq!(
+        failing(&report),
+        [StepName::SeedRecomputation],
+        "{:?}",
+        report.steps
+    );
+    assert_eq!(
+        status(&report, StepName::WinnerSelection),
+        &StepStatus::Skip("seed or exec signature failed".into())
+    );
+    assert_step_fails(
+        &report,
+        StepName::SeedRecomputation,
+        "(drand + grid frequency)",
+    );
+}
+
+#[test]
+fn a_receipt_outside_the_table_fails_window_consistency_and_seed() {
+    use crate::_test_support::V6_FREQ_VALUE;
+    let cases = [
+        V6Params {
+            freq_value: Some(V6_FREQ_VALUE.into()),
+            ..V6Params::weather()
+        },
+        V6Params {
+            freq_fallback_reason: Some(crate::protocol::freq_v1::FALLBACK_NO_FREQUENCY.into()),
+            ..V6Params::weather()
+        },
+        V6Params {
+            freq_value: None,
+            ..V6Params::freq_fallback()
+        },
+        V6Params {
+            weather_fallback_reason: None,
+            ..V6Params::freq_fallback()
+        },
+        V6Params {
+            freq_fallback_reason: Some(crate::protocol::freq_v1::FALLBACK_NO_FREQUENCY.into()),
+            ..V6Params::freq_fallback()
+        },
+    ];
+    for p in cases {
+        let report = run(&p);
+        assert_eq!(
+            failing(&report),
+            [
+                StepName::SeedRecomputation,
+                StepName::ReceiptFieldConsistency,
+                StepName::WeatherObservationWindow
+            ],
+            "{p:?}: {:?}",
+            report.steps
+        );
+        for name in [
+            StepName::SeedRecomputation,
+            StepName::ReceiptFieldConsistency,
+            StepName::WeatherObservationWindow,
+        ] {
+            assert_step_fails(&report, name, "none of the three states");
+        }
     }
 }

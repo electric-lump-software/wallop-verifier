@@ -261,6 +261,66 @@ pub fn row_to_value<'a>(field_text: impl Fn(&str) -> Option<&'a str>) -> Result<
     Ok(value)
 }
 
+/// Which of the tag's three execution states a receipt is in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecState<'a> {
+    /// (a) Middle Wallop's reading fed the seed.
+    Weather(&'a str),
+    /// (b) No reading by the deadline: the round's grid-frequency window fed the seed.
+    Freq(&'a str),
+    /// (c) Neither: drand alone.
+    DrandOnly,
+}
+
+/// The receipt's state under the three-state table, or why it is in none.
+/// Every one of the five keys must be present, each a string or null.
+///
+/// | state | `weather_value`, `weather_observation_time` | `weather_fallback_reason` | `freq_value` | `freq_fallback_reason` |
+/// |---|---|---|---|---|
+/// | (a) weather | set | null | null | null |
+/// | (b) frequency | null | `no_observation_by_deadline` | set | null |
+/// | (c) drand only | null | `no_observation_by_deadline` | null | `no_frequency_by_deadline` |
+///
+/// Any other combination is invalid. Grammar and grid checks on the values
+/// themselves belong to the receipt validators, not to this table.
+pub fn exec_state(exec: &serde_json::Value) -> Result<ExecState<'_>, String> {
+    use super::freq_v1::FALLBACK_NO_FREQUENCY;
+    let text = |k: &str| -> Result<Option<&str>, String> {
+        match exec.get(k) {
+            None => Err(format!("exec receipt has no {k}")),
+            Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::String(s)) => Ok(Some(s.as_str())),
+            Some(_) => Err(format!("exec receipt {k} is neither a string nor null")),
+        }
+    };
+    let fields = (
+        text("weather_value")?,
+        text("weather_observation_time")?,
+        text("weather_fallback_reason")?,
+        text("freq_value")?,
+        text("freq_fallback_reason")?,
+    );
+    let shown = |v: Option<&str>| if v.is_some() { "set" } else { "null" };
+    match fields {
+        (Some(v), Some(_), None, None, None) => Ok(ExecState::Weather(v)),
+        (None, None, Some(FALLBACK_NO_OBSERVATION), Some(f), None) => Ok(ExecState::Freq(f)),
+        (None, None, Some(FALLBACK_NO_OBSERVATION), None, Some(FALLBACK_NO_FREQUENCY)) => {
+            Ok(ExecState::DrandOnly)
+        }
+        (v, o, r, f, fr) => Err(format!(
+            "exec receipt is in none of the three states (weather; frequency after \
+             {FALLBACK_NO_OBSERVATION}; drand only after both reasons): weather_value {}, \
+             weather_observation_time {}, weather_fallback_reason {}, freq_value {}, \
+             freq_fallback_reason {}",
+            shown(v),
+            shown(o),
+            r.unwrap_or("null"),
+            shown(f),
+            fr.unwrap_or("null")
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -789,6 +849,77 @@ mod tests {
         out_of_bounds(r#""temperature":1.0,"mslp":1101,"humidity":50,"visibility":1000"#);
         out_of_bounds(r#""temperature":1.0,"mslp":1000,"humidity":101,"visibility":1000"#);
         out_of_bounds(r#""temperature":1.0,"mslp":1000,"humidity":50,"visibility":100005"#);
+    }
+
+    #[test]
+    fn exec_state_is_the_three_state_table_and_nothing_else() {
+        use serde_json::json;
+        let x = |v: serde_json::Value,
+                 o: serde_json::Value,
+                 r: serde_json::Value,
+                 f: serde_json::Value,
+                 fr: serde_json::Value| {
+            json!({
+                "weather_value": v, "weather_observation_time": o, "weather_fallback_reason": r,
+                "freq_value": f, "freq_fallback_reason": fr
+            })
+        };
+        let n = serde_json::Value::Null;
+        let w = json!("184;1021;51;4114");
+        let t = json!("2026-10-01T19:00:00.000000Z");
+        let no_obs = json!(FALLBACK_NO_OBSERVATION);
+        let no_freq = json!(super::super::freq_v1::FALLBACK_NO_FREQUENCY);
+        let f = json!("50012;50018;50012;49983;49980;49953;49912;49883");
+
+        assert_eq!(
+            exec_state(&x(w.clone(), t.clone(), n.clone(), n.clone(), n.clone())),
+            Ok(ExecState::Weather("184;1021;51;4114"))
+        );
+        assert!(matches!(
+            exec_state(&x(
+                n.clone(),
+                n.clone(),
+                no_obs.clone(),
+                f.clone(),
+                n.clone()
+            )),
+            Ok(ExecState::Freq(_))
+        ));
+        assert_eq!(
+            exec_state(&x(
+                n.clone(),
+                n.clone(),
+                no_obs.clone(),
+                n.clone(),
+                no_freq.clone()
+            )),
+            Ok(ExecState::DrandOnly)
+        );
+        for bad in [
+            x(w.clone(), t.clone(), n.clone(), f.clone(), n.clone()),
+            x(w.clone(), t.clone(), n.clone(), n.clone(), no_freq.clone()),
+            x(n.clone(), n.clone(), no_obs.clone(), n.clone(), n.clone()),
+            x(n.clone(), n.clone(), n.clone(), f.clone(), n.clone()),
+            x(
+                n.clone(),
+                n.clone(),
+                no_obs.clone(),
+                f.clone(),
+                no_freq.clone(),
+            ),
+            x(w.clone(), n.clone(), n.clone(), n.clone(), n.clone()),
+            x(
+                n.clone(),
+                n.clone(),
+                json!("unreachable"),
+                n.clone(),
+                no_freq.clone(),
+            ),
+            x(json!(7), t.clone(), n.clone(), n.clone(), n.clone()),
+            json!({"weather_value": null}),
+        ] {
+            assert!(exec_state(&bad).is_err(), "{bad}");
+        }
     }
 
     /// The facts the fallback rule relies on, for every draw second of the

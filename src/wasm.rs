@@ -548,7 +548,11 @@ mod wasm_resolved_keys_gate_tests {
     #[wasm_bindgen_test]
     fn v6_bundle_passes_the_browser_gate() {
         use crate::_test_support::{V6Params, build_v6_bundle};
-        for p in [V6Params::weather(), V6Params::fallback()] {
+        for p in [
+            V6Params::weather(),
+            V6Params::freq_fallback(),
+            V6Params::fallback(),
+        ] {
             let (json, pk_hex, kid) = build_v6_bundle(&p);
             assert!(
                 verify_bundle_with_resolved_keys_wasm(
@@ -591,6 +595,27 @@ mod wasm_resolved_keys_gate_tests {
             )
             .unwrap()
         );
+    }
+
+    #[wasm_bindgen_test]
+    fn v6_state_outside_the_table_fails_the_browser_gate() {
+        use crate::_test_support::v6_negative_bundle;
+        for name in [
+            "weather_with_freq_value",
+            "freq_bundle_relabelled_landobs",
+            "exec_station_wittering",
+        ] {
+            let (json, pk_hex, kid) = v6_negative_bundle(name);
+            assert!(
+                !verify_bundle_with_resolved_keys_wasm(
+                    &json,
+                    resolved_keys(&pk_hex, &kid),
+                    "attestable"
+                )
+                .unwrap(),
+                "{name}"
+            );
+        }
     }
 }
 
