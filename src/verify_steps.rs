@@ -45,8 +45,8 @@ pub enum StepName {
     ExecSignature,
     ReceiptLinkage,
     /// The lock receipt's `entry_hash` equals the entry hash recomputed
-    /// from the bundle. Under lock v6 (the Land Observations tag), its
-    /// `commitment_hash` must equal that entry hash too.
+    /// from the bundle. Under lock v6 (either tag), its `commitment_hash`
+    /// must equal that entry hash too.
     LockReceiptEntryHash,
     ExecReceiptEntryHash,
     /// The execution receipt's `seed` is recomputed from the entry hash,

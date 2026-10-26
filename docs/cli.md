@@ -26,7 +26,7 @@ The verifier runs 13 steps. They are reported in this order:
 2. **Lock receipt signature** — verify the Ed25519 signature on the lock receipt
 3. **Exec receipt signature** — verify the Ed25519 signature on the execution receipt
 4. **Receipt linkage** — confirm `lock_receipt_hash` in the exec receipt matches the computed hash of the lock receipt
-5. **Entry hash (lock receipt)** — confirm the lock receipt's `entry_hash` matches the computed value. Under the lock schema 6 weather tag, its `commitment_hash` must match too
+5. **Entry hash (lock receipt)** — confirm the lock receipt's `entry_hash` matches the computed value. Under lock schema 6, either tag, its `commitment_hash` must match too
 6. **Entry hash (exec receipt)** — confirm the exec receipt's `entry_hash` matches the computed value
 7. **Seed recomputation** — recompute the seed from `entry_hash`, `drand_randomness` and the signed entropy value, and compare it with the exec receipt's `seed`. The formula is chosen from the signed receipts, never from which field is present. Under lock schema 6 / execution schema 5 the exec receipt must be in one of its tag's states
 8. **Winner selection** — re-run the draw algorithm with the recomputed seed and compare against the exec receipt's `results`, and the bundle's `results` against the receipt
@@ -92,23 +92,27 @@ wallop-verify selftest
 Example output:
 
 ```
-wallop-verify 0.5.0 selftest
+wallop-verify 0.17.0 selftest
 
-Running 9 tamper scenarios...
+Running 22 tamper scenarios...
 
 PASS: lock_signature_byte_flip caught at Lock receipt signature
 PASS: exec_signature_byte_flip caught at Exec receipt signature
-PASS: entry_set_add_entry caught at Entry hash
+PASS: entry_weight_tamper caught at Entry hash (lock receipt)
+PASS: entry_add_fake caught at Entry hash (lock receipt)
 ...
 
-Coverage check: 9/9 StepName variants covered at runtime
-9 scenarios run, 9 passed, 0 P0 failures, 0 caught by wrong step, 0 skipped
+Coverage check: 11/13 StepName variants covered at runtime
+
+22 scenarios run, 22 passed, 0 P0 failures, 0 caught by wrong step, 0 skipped
 ```
+
+The coverage check counts 11 of the 13 steps. The other two can't be triggered from the catalog: **Entry hash** only computes the hash, and the comparisons that can fail are the two receipt entry-hash steps. **Temporal binding** does not apply in the self-consistency mode selftest runs in, so its unit tests cover it.
 
 ### What selftest proves
 
 - Every known attack in the catalog is caught by the declared verification step
-- Every verification step has at least one scenario that exercises it at runtime (not just declared — "declarations rot, runtime assertions don't")
+- Every verification step the catalog can reach has at least one scenario that exercises it at runtime (not just declared — "declarations rot, runtime assertions don't")
 - The binary you downloaded actually works
 
 ### When to run it

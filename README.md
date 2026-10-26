@@ -102,7 +102,7 @@ Runs the inner algorithmic pipeline — `entry_hash → compute_seed → draw �
 
 ### `verify_freq(draw_id, entries, drand_randomness, freq_value, count, expected_results) -> bool`
 
-`verify` for a grid-frequency draw: the seed is `compute_seed_freq` with `freq_value`, or drand alone when it is `None`. Choose it from the receipts' `entropy_composition`, never from which value happens to be present. In the browser: `verify_freq_wasm` and `compute_seed_freq_wasm`.
+`verify` with the grid-frequency seed: `compute_seed_freq` with `freq_value`, or drand alone when it is `None`. Choose between `verify` and `verify_freq` from the signed execution receipt, never from which value happens to be present. Under the grid-frequency tag, use `verify_freq`. Under the weather tag, the receipt's state decides (`landobs_v1::exec_state`, or `landobs_exec_state_wasm` in the browser): `verify` with the value in state (a), `verify_freq` with the value in state (b), and either with no value in state (c). In the browser: `verify_freq_wasm` and `compute_seed_freq_wasm`.
 
 ---
 
@@ -179,7 +179,7 @@ The rules live in `protocol::landobs_v1`, and every value there is frozen by the
 
 When Middle Wallop's record holds the hour, its lines read `PRESENT (publication time unknown; a late reading can't be told from a withheld one)`, and a PRESENT Elexon line carries the same caveat. This needs network access and is never part of `passed()`. Exit 0 means no mismatch was found, not that anything is confirmed.
 
-**What no bundle can show:** that a reading really was missing when a draw fell back. That rests on trust in wallop.
+**What no bundle can show:** that a reading really was missing when a draw fell back. On its own, a dishonest wallop must decide to withhold a reading before the drand round publishes, so it chooses blind. Colluding with drand's network, it could choose among at most three candidate seeds (weather, grid frequency, drand only), so a favoured entry's odds rise at most threefold. So the fallback relies on fewer than drand's threshold of nodes colluding. See the protocol spec, [§4.4](https://github.com/electric-lump-software/wallop/blob/main/spec/protocol.md#44-historical-verifiability).
 
 Draws on earlier schemas used a Met Office forecast, which can't be fetched again later, so no third party can check their weather value against a public record.
 
