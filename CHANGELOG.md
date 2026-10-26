@@ -20,6 +20,60 @@ The drand step was compiled only into the CLI build, so the WASM verifier on the
 - **Seed recomputation rejects a non-string `weather_value`.** A `weather_value` in the signed execution receipt that is present but neither a string nor null now fails the step. Before, it was read as a drand-only draw.
 - **`verify_full` checks drand.** It now verifies the drand BLS signature and randomness, and that the lock and execution receipts name the same round and chain. A receipt missing `drand_round` or `drand_chain`, or an execution receipt missing `drand_signature`, is now an `Err`, as other missing fields already were. An execution receipt `weather_value` that is present but neither a string nor null is also an `Err`; before, it was read as a drand-only draw.
 
+### Added — weather observations anyone can check (lock receipt schema 6, execution receipt schema 5)
+
+Draws under the new entropy tag `drand-quicknet+metoffice-landobs-v1` take a real Met Office observation from Middle Wallop, Hampshire (`wmo-03749`), for an hour at least 46 minutes after the entries are locked. Earlier schemas used a forecast value.
+
+- **New schemas.** Lock receipt schema 6 and execution receipt schema 5. Each pairs only with the other. Bundles using them carry no inline keys; verify them with `verify_bundle_with` (in the browser, `verify_bundle_with_resolved_keys_wasm`). Both lock 6 tags share one key set, and so do both execution 5 tags: 20 keys on the lock (with `freq_start`) and 28 on the execution receipt (with `freq_value` and `freq_fallback_reason`), checked exactly. Under this tag they parse as `ParsedLockReceipt::V6` and `ParsedExecutionReceipt::V5`, with `validate_lock_receipt_tags_v6` and `validate_execution_receipt_tags_v5`.
+- **Middle Wallop only.** The tag has one station. Both receipts name `wmo-03749` whatever happens, fallbacks included.
+- **Three states.** An execution receipt under this tag is in exactly one of three states. Any other combination is invalid.
+
+  | State | `weather_value`, `weather_observation_time` | `weather_fallback_reason` | `freq_value` | `freq_fallback_reason` | Seed |
+  |---|---|---|---|---|---|
+  | (a) weather | set | null | null | null | `compute_seed(entry_hash, drand_randomness, weather_value)` |
+  | (b) grid frequency | null | `no_observation_by_deadline` | set | null | `compute_seed_freq(entry_hash, drand_randomness, freq_value)` |
+  | (c) drand only | null | `no_observation_by_deadline` | null | `no_frequency_by_deadline` | `compute_seed_drand_only(entry_hash, drand_randomness)` |
+
+  State (b) uses the grid-frequency window of the same drand round, under the `drand-quicknet+elexon-freq-v1` rules: 8 readings from `freq_start`, 15 seconds apart.
+- **`wallop_verifier::protocol::landobs_v1`.** Holds everything the tag freezes:
+  - the station, `PRIMARY_STATION` (`wmo-03749`);
+  - the fetch window `W_SECS` (30 minutes), the 60-second margin before the drand round and the 46-minute lock offset;
+  - the fallback reason `no_observation_by_deadline`;
+  - the `weather_value` grammar `t;mslp;rh;vis` and its bounds, with `parse_weather_value`, and `row_to_value`, which turns a Land Observations row into a value from its decimal text, never through a float;
+  - `weather_time_for_round`, `latest_lock_at` and `parse_weather_time`;
+  - `exec_state`, which reads the three-state table from a signed execution receipt.
+- **`landobs_exec_state_wasm(exec_payload_jcs)`** returns `"weather"`, `"frequency"` or `"drand_only"`, so a page picks its seed formula from the signed receipt, never from which field happens to be set. It is not a check and never a gate.
+- **Offline checks for schema 6 / 5.** None of these needs a network request. All are part of `passed()`:
+  - The **weather observation window** step checks that:
+    - `weather_time` is a whole UTC hour, and the latest hour h with h + 30 minutes + 60 s no later than the drand round's publication;
+    - `freq_start` is the round's grid-frequency window start;
+    - `locked_at` is at least 46 minutes before `weather_time`, to the microsecond;
+    - the execution receipt is in one of the three states, and in state (a) its `weather_observation_time` equals `weather_time`.
+
+    Under this tag the step is always Pass or Fail, never N/A. On a fallback, a Pass means the schedule holds. It does not show that the reading was missing; no bundle can.
+  - **Bundle shape** pins the tag and the station on both receipts, rejects any other fallback reason, checks `weather_value` and `freq_value` against their grammars, and requires every signed timestamp to be canonical and to round-trip (`18:60` is rejected, not normalised).
+  - **Receipt field consistency** also compares `entropy_composition`, `operator_slug`, `fair_pick_version` and `weather_station` for equality across the two receipts. The lock must name Middle Wallop, `fair_pick_version` must be a release this verifier implements, and the execution receipt must be in one of the three states.
+  - **Entry hash (lock receipt)** also requires `commitment_hash` to equal the entry hash.
+  - **Seed recomputation** enforces the table: the seed is chosen by the state of the signed execution receipt, and a receipt in no state fails here.
+  - The **drand** step also requires `executed_at` to be no earlier than the round's publication. `entropy.freq_value` must equal the signed `freq_value`, so it is present only in state (b).
+  - Earlier schemas are checked exactly as before.
+- **`wallop-verify weather-attest <bundle>`** (CLI only) compares the signed details with public records:
+  - In state (a): the Met Office Land Observations record for Middle Wallop (an exact match on the whole value; needs a free DataHub key, and the record keeps only about 48 hours, so an hour more than 46 hours old is UNAVAILABLE), and the WMO SYNOP via Ogimet (temperature and pressure only).
+  - In states (b) and (c): whether Middle Wallop's records hold that hour now, and Elexon's FREQ record for the window from `freq_start` to 105 s after it: compared with the signed readings in state (b), present or absent in state (c). When a record holds the hour, Middle Wallop's lines read `PRESENT (publication time unknown; a late reading can't be told from a withheld one)`, and a PRESENT Elexon line carries the same caveat.
+  - Each line reads MATCH, MISMATCH, UNAVAILABLE, PRESENT or ABSENT. Exit 0 means no mismatch was found, not that anything is confirmed. Exit 1 means a public record disagrees with the receipt. Exit 2 means the input is unusable. It never affects verification and does not check signatures.
+  - The Met Office key comes from `--metoffice-key` or `WALLOP_METOFFICE_KEY` and is never sent through a redirect. Ogimet requests are spaced at least 20 seconds apart, as Ogimet asks.
+
+### Changed — **breaking:** receipt enums are `#[non_exhaustive]`
+
+- `ParsedLockReceipt` gains `V6` and `V6Freq`, and `ParsedExecutionReceipt` gains `V5` and `V5Freq`.
+- Both enums are now `#[non_exhaustive]`; in 0.16 they were not. A `match` on either outside this crate needs a wildcard arm, so code that matched every variant no longer compiles. Treat a variant you do not recognise as a verification failure. Later variants can then be added without another breaking change.
+- `verify_full` (deprecated) returns `Err` for a lock receipt with schema 6 or an execution receipt with schema 5, under either tag. It does not check their rules.
+
+### Changed — a schema pairing mismatch fails 3 steps
+
+- A lock 6 receipt paired with anything but execution 5, or an execution 5 receipt with anything but lock 6, fails **bundle shape**, **weather observation window** and **receipt field consistency**. There is no seed rule for such a pair, so the seed and winner steps are skipped, never passed. Two different lock 6 / execution 5 tags fail the same three steps.
+- The bundle shape message now names both directions: "lock schema_version 6 must pair with execution schema_version 5, and execution schema_version 5 with lock schema_version 6".
+
 ### Changed — **breaking:** a skipped check never counts as a pass
 
 - New `StepStatus::NotApplicable(String)`, for checks that genuinely do not apply (no weather on a drand-only draw; temporal binding in self-consistency mode). Exhaustive `match`es on `StepStatus` need a new arm.
@@ -43,13 +97,25 @@ The drand step was compiled only into the CLI build, so the WASM verifier on the
 - `verify_drand_wasm(chain_hash, round, signature_hex, randomness_hex) -> bool`: the drand check on its own, so the proof page can show it as a separate line. True only if the chain is the pinned quicknet chain, the BLS signature is valid for `round`, and `sha256(signature) == randomness`. `round` is a `u64`, so JavaScript passes a `BigInt`. Pass the values from the signed execution receipt, never from unsigned page data, and pass hex in lower case: an upper-case chain hash or randomness is rejected. It is never a gate; the proof page gates on `verify_bundle_with_resolved_keys_wasm` in attestable mode, with keys from `/operator/:slug/keys`.
 
 - **Grid-frequency draws** (lock receipt schema 6 / execution receipt schema 5, tag `drand-quicknet+elexon-freq-v1`): the lock signs `freq_start`, and the execution receipt signs exactly one of `freq_value` (8 Elexon FREQ readings, whole mHz) and `freq_fallback_reason` (`no_frequency_by_deadline`). The key sets are exact: `freq_v1::LOCK_KEYS` (20), `freq_v1::EXEC_KEYS` (28), checked by `freq_v1::exact_keys`. In the proof bundle, `entropy.freq_value` is an additive key chosen by the receipt's tag; the bundle format version is unchanged. The details follow.
-- Grid-frequency receipt types for the `drand-quicknet+elexon-freq-v1` tag: `protocol::freq_v1` (the tag's constants, window timing and grammar), `LockReceiptV6Freq`, `ExecutionReceiptV5Freq`, their tag validators, `compute_seed_freq` (`SHA-256(JCS{drand_randomness, entry_hash, freq_value})`) and `Entropy.freq_value`. A schema "6" lock or schema "5" execution receipt under this tag parses as the new variants `ParsedLockReceipt::V6Freq` / `ParsedExecutionReceipt::V5Freq`, with its key set checked exactly. Both enums are `#[non_exhaustive]`, so this is not a breaking change. An `entropy.freq_value` must equal the signed execution receipt's `freq_value`, so every other bundle must not carry one.
+- Grid-frequency receipt types for the `drand-quicknet+elexon-freq-v1` tag: `protocol::freq_v1` (the tag's constants, window timing and grammar), `LockReceiptV6Freq`, `ExecutionReceiptV5Freq`, their tag validators, `compute_seed_freq` (`SHA-256(JCS{drand_randomness, entry_hash, freq_value})`) and `Entropy.freq_value`. A schema "6" lock or schema "5" execution receipt under this tag parses as the new variants `ParsedLockReceipt::V6Freq` / `ParsedExecutionReceipt::V5Freq`, with its key set checked exactly (see the breaking enum change above). An `entropy.freq_value` must equal the signed execution receipt's `freq_value`, so every other bundle must not carry one.
 - `verify_bundle_with` verifies grid-frequency bundles. The weather observation window step checks that `freq_start` is the window start for the drand round, that the lock is at least 60 s before it (to the microsecond), and that the execution receipt carries exactly one of `freq_value` and `freq_fallback_reason` (`no_frequency_by_deadline`). Both receipts must carry the same tag: two different lock 6 / execution 5 tags fail bundle shape, the window and field consistency. `fair_pick_version`, `operator_slug` and `commitment_hash` get the same checks as under the Land Observations tag. The seed is chosen by the receipts' (schema, tag) pair from the signed execution receipt: `compute_seed_freq` with `freq_value`, the drand-only seed on a fallback, and a `weather_value` on a frequency receipt fails the seed step. A pair with no seed rule (a mismatched or unknown (schema, tag) pair) skips the seed and winner steps rather than guessing a derivation; a skip never passes, and bundle shape and field consistency fail such a pair.
 - `wallop-verify weather-attest` handles grid-frequency bundles: it fetches the window's 8 readings from Elexon's public BMRS FREQ dataset (no key; https only, no redirects, a 1 MiB body cap) and reports MATCH, MISMATCH or UNAVAILABLE, or PRESENT / ABSENT on a fallback. A valid Elexon window that differs from the signed one is a MISMATCH (exit 1), and so is an invalid window (a 0, out of bounds, a duplicate, malformed or stuck) when every one of the 8 reading times has a row: Elexon does not revise readings, so that contradicts the receipt. A fetch error, an unreadable response or a reading time with no row is UNAVAILABLE. Unusable input exits 2. It is informational and never changes a verification result. `freq_v1::rows_from_body` reads Elexon bodies under core's row rule and refuses a body that repeats a key in any object, at any depth (`{"data":[],"data":[...]}`, or a row with two `frequency` keys), since first-wins and last-wins readers would see different readings in the same bytes; `freq_v1::rows_at_every_reading_time` says whether all 8 times have a row. `protocol::refuse_duplicate_keys` is the shared check, and `weather-attest` also applies it to Land Observations bodies. The Ogimet client now matches the others: https only, no redirects, a 1 MiB body cap. Also, `serde_json`'s `raw_value` feature is now always on so readings keep their exact number text.
-- Integration tests read the shared lock 6 / execution 5 vectors: both tamper files, the grid-frequency window, schedule, value, receipt and proof bundle vectors, and the schedule boundaries (`schedule-boundaries-v1.json`), which both tags' schedule functions must match across both UK clock changes, a month end, a year end and leap days. Once any of them is vendored under `vendor/wallop`, a missing one fails the tests instead of skipping. Before that, `WALLOP_CORE_VECTORS_DIR` (or the tamper and window files' own variables) points at a wallop checkout.
+- Integration tests read the shared lock 6 / execution 5 vectors for both tags: the tamper files, the schedule, value, receipt, proof bundle and negative vectors, the grid-frequency window, and the schedule boundaries (`schedule-boundaries-v1.json`), which both tags' schedule functions must match across both UK clock changes, a month end, a year end and leap days.
 - `verify_freq` and, in the browser, `verify_freq_wasm` and `compute_seed_freq_wasm`: the winner check and seed for a grid-frequency draw. `verify` / `verify_wasm` are unchanged and never accept a frequency seed. `verify_full` still refuses every lock 6 / execution 5 receipt, under either tag.
 
 The WASM bundle is larger, since the BLS pairing code is now linked in.
+
+### Security
+
+- Bump `rustls-webpki` 0.103.15 → 0.103.16 and `webpki-roots` 1.0.7 → 1.0.11 (RUSTSEC-2026-0381, RUSTSEC-2026-0382). Both reach the verifier only through the CLI's HTTP client; patch-level, no API change.
+
+### For contributors: release checks
+
+- A `v*` release now fails unless:
+  - the tagged commit is on wallop_rs `main`;
+  - the vendored wallop commit is on wallop `main`, and its `spec/vectors` tree equals the one at wallop `main`'s tip;
+  - `cargo test` and `cargo test --features cli` pass.
+- A vector missing from the vendored tree now fails the tests instead of skipping them. A path set with `WALLOP_CORE_VECTORS_DIR` (or a file's own variable) still overrides a vendored copy, but never stands in for a missing one.
 
 ## [0.16.1] - unreleased
 
