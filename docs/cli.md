@@ -20,19 +20,23 @@ wallop-verify proof.json
 curl -s https://example.com/proof/abc123.json | wallop-verify -
 ```
 
-The verifier runs 9 steps in order:
+The verifier runs 13 steps. They are reported in this order:
 
 1. **Entry hash** — recompute the SHA-256 hash of the canonicalised entry list
 2. **Lock receipt signature** — verify the Ed25519 signature on the lock receipt
 3. **Exec receipt signature** — verify the Ed25519 signature on the execution receipt
 4. **Receipt linkage** — confirm `lock_receipt_hash` in the exec receipt matches the computed hash of the lock receipt
-5. **Entry hash (lock receipt)** — confirm the lock receipt's `entry_hash` matches the computed value
+5. **Entry hash (lock receipt)** — confirm the lock receipt's `entry_hash` matches the computed value. Under lock schema 6, either tag, its `commitment_hash` must match too
 6. **Entry hash (exec receipt)** — confirm the exec receipt's `entry_hash` matches the computed value
-7. **Seed recomputation** — recompute the seed from `entry_hash` + `drand_randomness` (+ optional `weather_value`) and compare against the exec receipt's `seed`
-8. **Winner selection** — re-run the draw algorithm with the recomputed seed and compare against the exec receipt's `results`
-9. **Drand BLS signature** — verify the drand round's BLS signature against the pinned quicknet chain keys
+7. **Seed recomputation** — recompute the seed from `entry_hash`, `drand_randomness` and the signed entropy value, and compare it with the exec receipt's `seed`. The formula is chosen from the signed receipts, never from which field is present. Under lock schema 6 / execution schema 5 the exec receipt must be in one of its tag's states
+8. **Winner selection** — re-run the draw algorithm with the recomputed seed and compare against the exec receipt's `results`, and the bundle's `results` against the receipt
+9. **Drand BLS signature** — verify the signed drand beacon against the pinned quicknet chain, check the bundle's `entropy` block matches the receipt, and check the round published after the lock. Under lock schema 6 / execution schema 5, also check `executed_at` is no earlier than the round's publication
+10. **Receipt field consistency** — the fields both receipts carry must match. Under lock schema 6 / execution schema 5 that includes the tag, `operator_slug`, `fair_pick_version` and `weather_station`; under the weather tag the lock must name Middle Wallop (`wmo-03749`)
+11. **Weather observation window** — the weather timing rules. Under the lock schema 6 weather tag: `weather_time` is the observation hour the drand round implies, `freq_start` is the round's grid-frequency window start, `locked_at` is at least 46 minutes before `weather_time`, and the exec receipt is in one of the three states (weather; grid frequency; drand only). On a fallback, a pass means the schedule holds, not that the reading was missing
+12. **Bundle shape** — both receipts parse against their exact schemas, carry the pinned algorithm tags and canonical timestamps, and pair correctly (lock schema 6 only with execution schema 5). Under schema 6 / 5 it also pins the tag, the station, the fallback reasons and the value grammars
+13. **Temporal binding** — each signing key was in the keyring before the receipt it signed
 
-Each step reports PASS, FAIL (with reason), or SKIP (when an upstream step failed).
+Each step reports PASS, FAIL (with reason), SKIP (it could not run, for example because an earlier step failed) or N/A (it does not apply to this bundle, such as the weather window on an older drand-only draw). A SKIP always fails the report.
 
 ## Trust anchors (`--pin-key`)
 
@@ -88,23 +92,27 @@ wallop-verify selftest
 Example output:
 
 ```
-wallop-verify 0.5.0 selftest
+wallop-verify 0.17.0 selftest
 
-Running 9 tamper scenarios...
+Running 22 tamper scenarios...
 
 PASS: lock_signature_byte_flip caught at Lock receipt signature
 PASS: exec_signature_byte_flip caught at Exec receipt signature
-PASS: entry_set_add_entry caught at Entry hash
+PASS: entry_weight_tamper caught at Entry hash (lock receipt)
+PASS: entry_add_fake caught at Entry hash (lock receipt)
 ...
 
-Coverage check: 9/9 StepName variants covered at runtime
-9 scenarios run, 9 passed, 0 P0 failures, 0 caught by wrong step, 0 skipped
+Coverage check: 11/13 StepName variants covered at runtime
+
+22 scenarios run, 22 passed, 0 P0 failures, 0 caught by wrong step, 0 skipped
 ```
+
+The coverage check counts 11 of the 13 steps. The other two can't be triggered from the catalog: **Entry hash** only computes the hash, and the comparisons that can fail are the two receipt entry-hash steps. **Temporal binding** does not apply in the self-consistency mode selftest runs in, so its unit tests cover it.
 
 ### What selftest proves
 
 - Every known attack in the catalog is caught by the declared verification step
-- Every verification step has at least one scenario that exercises it at runtime (not just declared — "declarations rot, runtime assertions don't")
+- Every verification step the catalog can reach has at least one scenario that exercises it at runtime (not just declared — "declarations rot, runtime assertions don't")
 - The binary you downloaded actually works
 
 ### When to run it
@@ -182,6 +190,39 @@ wallop-verify selftest --demo --record demo.cast
 
 Demo mode runs through all scenarios automatically with animations: a braille ripple on the dots while computing, a character scramble on the PASS/FAIL status text as it resolves, and a completion screen summarising all results. Press **q** at any time to exit.
 
+## Weather attestation (`wallop-verify weather-attest`)
+
+```bash
+WALLOP_METOFFICE_KEY="$KEY" wallop-verify weather-attest proof.json
+# or, though the key then shows in `ps` and shell history
+wallop-verify weather-attest proof.json --metoffice-key "$KEY"
+```
+
+For a bundle with lock receipt schema 6 and execution receipt schema 5, this compares the signed weather and grid-frequency details with public records. It does not check signatures and never changes a verification result: run `wallop-verify proof.json` (with `--mode attestable --wallop-base-url ...` for keys from wallop) for the verdict. The top-level flags, such as `--mode` and the `--pin-*` flags, do not apply to this command.
+
+Under the weather tag (`drand-quicknet+metoffice-landobs-v1`), what it checks depends on the execution receipt's state:
+
+- **(a) weather.** The signed value is compared with:
+  - **Land Observations** (Met Office DataHub; needs a free API key): an exact match on every part of the value. The record keeps only about 48 hours, so an hour more than 46 hours old is UNAVAILABLE.
+  - **SYNOP via Ogimet**: temperature and pressure, at any age. Requests are spaced at least 20 seconds apart, as Ogimet asks.
+- **(b) grid frequency** and **(c) drand only.** It reports whether Middle Wallop's Land Observations and SYNOP records hold that hour now, and fetches Elexon's FREQ readings from `freq_start` to 105 seconds after it (no key needed). In state (b) those are compared with the signed readings; in state (c) it reports whether Elexon holds a valid window now.
+
+When a record holds the hour, Middle Wallop's lines read `PRESENT (publication time unknown; a late reading can't be told from a withheld one)`, and a PRESENT Elexon line carries the same caveat. A reading can arrive after the deadline, so PRESENT does not show anything was withheld.
+
+Under the grid-frequency tag (`drand-quicknet+elexon-freq-v1`), it compares the signed readings with Elexon's, or on a fallback reports whether Elexon holds a valid window now.
+
+Each line reads MATCH, MISMATCH, UNAVAILABLE, PRESENT or ABSENT. UNAVAILABLE means the record could not tell: no key, a fetch error, an hour too old, or no row for it. It is never a mismatch.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | No mismatch was found. This is not a confirmation: lines may be UNAVAILABLE, PRESENT or ABSENT |
+| 1 | At least one public record disagrees with the receipt (MISMATCH). This is not a failed verification |
+| 2 | The bundle could not be read, is not lock schema 6 / execution schema 5, or its execution receipt is in none of its tag's states |
+
+Pages and reports that show grid-frequency readings carry "Contains BMRS data © Elexon Limited copyright and database right [year]".
+
 ## Feature flag
 
 All CLI functionality is gated behind the `cli` Cargo feature:
@@ -195,7 +236,7 @@ Two feature flags are available:
 
 | Feature | Includes | Install command |
 |---|---|---|
-| `cli` | Plain CLI: verify, selftest, pin-key | `cargo install wallop_verifier --features cli` |
+| `cli` | Plain CLI: verify, selftest, pin-key, weather-attest | `cargo install wallop_verifier --features cli` |
 | `tui` | Everything in `cli` + interactive TUI, demo mode, asciicast export | `cargo install wallop_verifier --features tui` |
 
-Without either feature, the crate compiles as a library only — no binary target, no clap/ratatui/drand-verify dependencies. WASM builds are unaffected.
+Without either feature, the crate compiles as a library only — no binary target, no clap, ratatui or HTTP client dependencies. WASM builds are unaffected. `drand-verify` is an ordinary dependency, so every build checks drand.

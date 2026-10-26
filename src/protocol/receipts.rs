@@ -1,6 +1,9 @@
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+use crate::protocol::freq_v1;
+use crate::protocol::landobs_v1;
+
 // Pinned algorithm identity tags embedded verbatim into every signed
 // receipt. Rotating any of these requires a new tag value plus a schema
 // version bump. The verifier rejects any receipt whose tag value does
@@ -10,6 +13,16 @@ pub const SIGNATURE_ALGORITHM: &str = "ed25519";
 pub const ENTROPY_COMPOSITION: &str = "drand-quicknet+openmeteo-v1";
 pub const DRAND_SIGNATURE_ALGORITHM: &str = "bls12_381_g2";
 pub const MERKLE_ALGORITHM: &str = "sha256-pairwise-v1";
+
+/// `fair_pick` releases whose winner selection this verifier implements
+/// (through `fair_pick_rs`). A receipt's `fair_pick_version` names the
+/// release of the `fair_pick` package that picked the winners. 0.1.0 and
+/// 0.2.0 select identically: 0.2.0 changed only which functions are
+/// public, and both pass the same frozen algorithm vectors. Lock v6 /
+/// execution v5 receipts must carry one of these; older schemas are not
+/// checked. A new `fair_pick` release is added here only once
+/// `fair_pick_rs` is shown to select identically to it.
+pub const FAIR_PICK_VERSIONS: &[&str] = &["0.1.0", "0.2.0"];
 
 // Current supported schema versions. Verifier rejects anything else.
 //
@@ -21,6 +34,8 @@ pub const MERKLE_ALGORITHM: &str = "sha256-pairwise-v1";
 //        verifiers MUST resolve operator keys via `KeyResolver`. Field set
 //        on the signed payload is byte-identical to v4 — the schema_version
 //        difference encodes verifier behaviour, not receipt bytes.
+//   v6 — same field set as v5; carries the
+//        `drand-quicknet+metoffice-landobs-v1` tag. Resolver-driven.
 //
 // Execution receipt history:
 //   v2 — pre-F2 shape, no `signing_key_id` on the signed payload.
@@ -29,13 +44,16 @@ pub const MERKLE_ALGORITHM: &str = "sha256-pairwise-v1";
 //        `public_key_hex` from the bundle's execution_receipt wrapper, and
 //        verifiers MUST resolve infrastructure keys via `KeyResolver`. Field
 //        set on the signed payload is byte-identical to v3.
+//   v5 — same field set as v4; pairs only with lock v6.
 //
 // All historical schemas remain verifiable for the life of 1.x.
 pub const LOCK_SCHEMA_VERSION: &str = "4";
 pub const LOCK_SCHEMA_VERSION_V5: &str = "5";
+pub const LOCK_SCHEMA_VERSION_V6: &str = "6";
 pub const EXECUTION_SCHEMA_VERSION: &str = "2";
 pub const EXECUTION_SCHEMA_VERSION_V3: &str = "3";
 pub const EXECUTION_SCHEMA_VERSION_V4: &str = "4";
+pub const EXECUTION_SCHEMA_VERSION_V5: &str = "5";
 
 // Allowed values for execution receipt's weather_fallback_reason.
 // A fifth value requires a receipt schema bump.
@@ -85,6 +103,35 @@ pub struct LockReceiptV5 {
     pub entropy_composition: String,
     pub entry_hash: String,
     pub fair_pick_version: String,
+    pub jcs_version: String,
+    pub locked_at: String,
+    pub operator_id: String,
+    pub operator_slug: String,
+    pub schema_version: String,
+    pub sequence: u64,
+    pub signature_algorithm: String,
+    pub signing_key_id: String,
+    pub wallop_core_version: String,
+    pub weather_station: String,
+    pub weather_time: String,
+    pub winner_count: u64,
+}
+
+/// V6 lock receipt: the shared v6 field set under the
+/// `drand-quicknet+metoffice-landobs-v1` tag (see `landobs_v1`): V5's
+/// fields plus `freq_start`, the grid-frequency window the draw falls back
+/// to. Resolver-driven like V5. Pairs only with `ExecutionReceiptV5`.
+#[derive(serde::Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct LockReceiptV6 {
+    pub commitment_hash: String,
+    pub draw_id: String,
+    pub drand_chain: String,
+    pub drand_round: u64,
+    pub entropy_composition: String,
+    pub entry_hash: String,
+    pub fair_pick_version: String,
+    pub freq_start: String,
     pub jcs_version: String,
     pub locked_at: String,
     pub operator_id: String,
@@ -179,6 +226,108 @@ pub struct ExecutionReceiptV4 {
     pub entry_hash: String,
     pub executed_at: String,
     pub fair_pick_version: String,
+    pub jcs_version: String,
+    pub lock_receipt_hash: String,
+    pub merkle_algorithm: String,
+    pub operator_id: String,
+    pub operator_slug: String,
+    pub results: Vec<String>,
+    pub schema_version: String,
+    pub seed: String,
+    pub sequence: u64,
+    pub signature_algorithm: String,
+    pub signing_key_id: String,
+    pub wallop_core_version: String,
+    pub weather_fallback_reason: Option<String>,
+    pub weather_observation_time: Option<String>,
+    pub weather_station: Option<String>,
+    pub weather_value: Option<String>,
+}
+
+/// V5 execution receipt: the shared v6 field set under the
+/// `drand-quicknet+metoffice-landobs-v1` tag: V4's fields plus
+/// `freq_value` and `freq_fallback_reason`, set when the draw fell back
+/// from the weather to the grid frequency. Resolver-driven. Pairs only
+/// with `LockReceiptV6`.
+#[derive(serde::Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionReceiptV5 {
+    pub drand_chain: String,
+    pub drand_randomness: String,
+    pub drand_round: u64,
+    pub drand_signature: String,
+    pub drand_signature_algorithm: String,
+    pub draw_id: String,
+    pub entropy_composition: String,
+    pub entry_hash: String,
+    pub executed_at: String,
+    pub fair_pick_version: String,
+    pub freq_fallback_reason: Option<String>,
+    pub freq_value: Option<String>,
+    pub jcs_version: String,
+    pub lock_receipt_hash: String,
+    pub merkle_algorithm: String,
+    pub operator_id: String,
+    pub operator_slug: String,
+    pub results: Vec<String>,
+    pub schema_version: String,
+    pub seed: String,
+    pub sequence: u64,
+    pub signature_algorithm: String,
+    pub signing_key_id: String,
+    pub wallop_core_version: String,
+    pub weather_fallback_reason: Option<String>,
+    pub weather_observation_time: Option<String>,
+    pub weather_station: Option<String>,
+    pub weather_value: Option<String>,
+}
+
+/// V6 lock receipt under the `drand-quicknet+elexon-freq-v1` tag (see
+/// `freq_v1`): the V6 field set plus `freq_start`, with both weather
+/// fields null. Resolver-driven. Pairs only with `ExecutionReceiptV5Freq`.
+#[derive(serde::Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct LockReceiptV6Freq {
+    pub commitment_hash: String,
+    pub draw_id: String,
+    pub drand_chain: String,
+    pub drand_round: u64,
+    pub entropy_composition: String,
+    pub entry_hash: String,
+    pub fair_pick_version: String,
+    pub freq_start: String,
+    pub jcs_version: String,
+    pub locked_at: String,
+    pub operator_id: String,
+    pub operator_slug: String,
+    pub schema_version: String,
+    pub sequence: u64,
+    pub signature_algorithm: String,
+    pub signing_key_id: String,
+    pub wallop_core_version: String,
+    pub weather_station: Option<String>,
+    pub weather_time: Option<String>,
+    pub winner_count: u64,
+}
+
+/// V5 execution receipt under the `drand-quicknet+elexon-freq-v1` tag: the
+/// V5 field set plus `freq_fallback_reason` and `freq_value`, with every
+/// weather field null. Pairs only with `LockReceiptV6Freq`.
+#[derive(serde::Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionReceiptV5Freq {
+    pub drand_chain: String,
+    pub drand_randomness: String,
+    pub drand_round: u64,
+    pub drand_signature: String,
+    pub drand_signature_algorithm: String,
+    pub draw_id: String,
+    pub entropy_composition: String,
+    pub entry_hash: String,
+    pub executed_at: String,
+    pub fair_pick_version: String,
+    pub freq_fallback_reason: Option<String>,
+    pub freq_value: Option<String>,
     pub jcs_version: String,
     pub lock_receipt_hash: String,
     pub merkle_algorithm: String,
@@ -601,6 +750,44 @@ pub fn validate_lock_receipt_tags_v5(payload: &LockReceiptV5) -> Result<(), Stri
     Ok(())
 }
 
+pub fn validate_lock_receipt_tags_v6(payload: &LockReceiptV6) -> Result<(), String> {
+    if payload.schema_version != LOCK_SCHEMA_VERSION_V6 {
+        return Err(format!(
+            "unknown lock receipt schema_version: {} (expected {})",
+            payload.schema_version, LOCK_SCHEMA_VERSION_V6
+        ));
+    }
+    if payload.jcs_version != JCS_VERSION {
+        return Err(format!("unknown jcs_version: {}", payload.jcs_version));
+    }
+    if payload.signature_algorithm != SIGNATURE_ALGORITHM {
+        return Err(format!(
+            "unknown signature_algorithm: {}",
+            payload.signature_algorithm
+        ));
+    }
+    if payload.entropy_composition != landobs_v1::ENTROPY_COMPOSITION {
+        return Err(format!(
+            "unknown entropy_composition: {}",
+            payload.entropy_composition
+        ));
+    }
+    if payload.signing_key_id.is_empty() {
+        return Err("signing_key_id is empty".into());
+    }
+    validate_weather_station(&payload.weather_station)?;
+    if payload.weather_station != landobs_v1::PRIMARY_STATION {
+        return Err(format!(
+            "weather_station must be {} under {}, got {:?}",
+            landobs_v1::PRIMARY_STATION,
+            landobs_v1::ENTROPY_COMPOSITION,
+            payload.weather_station
+        ));
+    }
+    freq_v1::parse_freq_start(&payload.freq_start).map(|_| ())?;
+    Ok(())
+}
+
 pub fn validate_execution_receipt_tags_v4(payload: &ExecutionReceiptV4) -> Result<(), String> {
     if payload.schema_version != EXECUTION_SCHEMA_VERSION_V4 {
         return Err(format!(
@@ -648,6 +835,199 @@ pub fn validate_execution_receipt_tags_v4(payload: &ExecutionReceiptV4) -> Resul
     }
     if let Some(station) = &payload.weather_station {
         validate_weather_station(station)?;
+    }
+    Ok(())
+}
+
+/// Validate the algorithm-identity tags of an execution receipt v5.
+///
+/// Pins the `drand-quicknet+metoffice-landobs-v1` entropy tag (with the
+/// JCS, signature, drand and Merkle tags), the v6-era fallback reason set
+/// (`landobs_v1::VALID_WEATHER_FALLBACK_REASONS`), a `weather_station`
+/// that is present and is `landobs_v1::PRIMARY_STATION`, and the
+/// `weather_value` grammar when a value is present.
+///
+/// It checks each field on its own. `check_bundle_shape` and later steps
+/// own the rest: pairing lock schema 6 with execution schema 5 only, the
+/// coupling between `weather_value`, the observation time and the
+/// fallback reason, and the lock's station against the execution's.
+pub fn validate_execution_receipt_tags_v5(payload: &ExecutionReceiptV5) -> Result<(), String> {
+    if payload.schema_version != EXECUTION_SCHEMA_VERSION_V5 {
+        return Err(format!(
+            "unknown execution receipt schema_version: {} (expected {})",
+            payload.schema_version, EXECUTION_SCHEMA_VERSION_V5
+        ));
+    }
+    if payload.jcs_version != JCS_VERSION {
+        return Err(format!("unknown jcs_version: {}", payload.jcs_version));
+    }
+    if payload.signature_algorithm != SIGNATURE_ALGORITHM {
+        return Err(format!(
+            "unknown signature_algorithm: {}",
+            payload.signature_algorithm
+        ));
+    }
+    if payload.entropy_composition != landobs_v1::ENTROPY_COMPOSITION {
+        return Err(format!(
+            "unknown entropy_composition: {}",
+            payload.entropy_composition
+        ));
+    }
+    if payload.drand_signature_algorithm != DRAND_SIGNATURE_ALGORITHM {
+        return Err(format!(
+            "unknown drand_signature_algorithm: {}",
+            payload.drand_signature_algorithm
+        ));
+    }
+    if payload.merkle_algorithm != MERKLE_ALGORITHM {
+        return Err(format!(
+            "unknown merkle_algorithm: {}",
+            payload.merkle_algorithm
+        ));
+    }
+    if payload.signing_key_id.is_empty() {
+        return Err("signing_key_id is empty".into());
+    }
+    let reason = payload.weather_fallback_reason.as_deref();
+    if !landobs_v1::VALID_WEATHER_FALLBACK_REASONS.contains(&reason) {
+        return Err(format!(
+            "unknown weather_fallback_reason: {:?}",
+            payload.weather_fallback_reason
+        ));
+    }
+    let station = payload
+        .weather_station
+        .as_deref()
+        .ok_or("weather_station is required under the Land Observations tag")?;
+    validate_weather_station(station)?;
+    if station != landobs_v1::PRIMARY_STATION {
+        return Err(format!(
+            "weather_station must be {} under {}, got {station:?}",
+            landobs_v1::PRIMARY_STATION,
+            landobs_v1::ENTROPY_COMPOSITION
+        ));
+    }
+    if let Some(value) = &payload.weather_value {
+        landobs_v1::parse_weather_value(value)?;
+    }
+    let freq_reason = payload.freq_fallback_reason.as_deref();
+    if !freq_v1::VALID_FREQ_FALLBACK_REASONS.contains(&freq_reason) {
+        return Err(format!(
+            "unknown freq_fallback_reason: {:?}",
+            payload.freq_fallback_reason
+        ));
+    }
+    if let Some(value) = &payload.freq_value {
+        freq_v1::parse_freq_value(value)?;
+    }
+    Ok(())
+}
+
+/// Validate a lock receipt v6 under the grid-frequency tag: the algorithm
+/// tags, null weather fields, and a canonical 15-second `freq_start`.
+///
+/// It checks each field on its own. The verification steps own the rest:
+/// pairing with execution receipt v5 under the same tag, `freq_start`
+/// against the drand round, and the lock deadline.
+pub fn validate_lock_receipt_tags_v6_freq(payload: &LockReceiptV6Freq) -> Result<(), String> {
+    if payload.schema_version != LOCK_SCHEMA_VERSION_V6 {
+        return Err(format!(
+            "unknown lock receipt schema_version: {} (expected {})",
+            payload.schema_version, LOCK_SCHEMA_VERSION_V6
+        ));
+    }
+    if payload.jcs_version != JCS_VERSION {
+        return Err(format!("unknown jcs_version: {}", payload.jcs_version));
+    }
+    if payload.signature_algorithm != SIGNATURE_ALGORITHM {
+        return Err(format!(
+            "unknown signature_algorithm: {}",
+            payload.signature_algorithm
+        ));
+    }
+    if payload.entropy_composition != freq_v1::ENTROPY_COMPOSITION {
+        return Err(format!(
+            "unknown entropy_composition: {}",
+            payload.entropy_composition
+        ));
+    }
+    if payload.signing_key_id.is_empty() {
+        return Err("signing_key_id is empty".into());
+    }
+    if payload.weather_station.is_some() || payload.weather_time.is_some() {
+        return Err(format!(
+            "weather_station and weather_time must be null under {}",
+            freq_v1::ENTROPY_COMPOSITION
+        ));
+    }
+    freq_v1::parse_freq_start(&payload.freq_start).map(|_| ())
+}
+
+/// Validate an execution receipt v5 under the grid-frequency tag: the
+/// algorithm tags, null weather fields, the reason set, and the value
+/// grammar when a value is present.
+///
+/// It checks each field on its own. The verification steps own the rest:
+/// pairing with lock receipt v6 under the same tag, and the rule that
+/// exactly one of `freq_value` and `freq_fallback_reason` is set.
+pub fn validate_execution_receipt_tags_v5_freq(
+    payload: &ExecutionReceiptV5Freq,
+) -> Result<(), String> {
+    if payload.schema_version != EXECUTION_SCHEMA_VERSION_V5 {
+        return Err(format!(
+            "unknown execution receipt schema_version: {} (expected {})",
+            payload.schema_version, EXECUTION_SCHEMA_VERSION_V5
+        ));
+    }
+    if payload.jcs_version != JCS_VERSION {
+        return Err(format!("unknown jcs_version: {}", payload.jcs_version));
+    }
+    if payload.signature_algorithm != SIGNATURE_ALGORITHM {
+        return Err(format!(
+            "unknown signature_algorithm: {}",
+            payload.signature_algorithm
+        ));
+    }
+    if payload.entropy_composition != freq_v1::ENTROPY_COMPOSITION {
+        return Err(format!(
+            "unknown entropy_composition: {}",
+            payload.entropy_composition
+        ));
+    }
+    if payload.drand_signature_algorithm != DRAND_SIGNATURE_ALGORITHM {
+        return Err(format!(
+            "unknown drand_signature_algorithm: {}",
+            payload.drand_signature_algorithm
+        ));
+    }
+    if payload.merkle_algorithm != MERKLE_ALGORITHM {
+        return Err(format!(
+            "unknown merkle_algorithm: {}",
+            payload.merkle_algorithm
+        ));
+    }
+    if payload.signing_key_id.is_empty() {
+        return Err("signing_key_id is empty".into());
+    }
+    if payload.weather_station.is_some()
+        || payload.weather_value.is_some()
+        || payload.weather_observation_time.is_some()
+        || payload.weather_fallback_reason.is_some()
+    {
+        return Err(format!(
+            "every weather field must be null under {}",
+            freq_v1::ENTROPY_COMPOSITION
+        ));
+    }
+    let reason = payload.freq_fallback_reason.as_deref();
+    if !freq_v1::VALID_FREQ_FALLBACK_REASONS.contains(&reason) {
+        return Err(format!(
+            "unknown freq_fallback_reason: {:?}",
+            payload.freq_fallback_reason
+        ));
+    }
+    if let Some(value) = &payload.freq_value {
+        freq_v1::parse_freq_value(value)?;
     }
     Ok(())
 }
@@ -703,13 +1083,25 @@ pub fn validate_weather_station(station: &str) -> Result<(), String> {
 /// error MUST upgrade, MUST NOT retry. Mirrors `parse_execution_receipt`'s
 /// dispatcher pattern.
 ///
-/// V4 and V5 carry byte-identical field sets; the discriminant exists so
-/// callers can route on whether the bundle's wrapper is expected to carry
-/// inline keys (V4) or to be resolver-driven (V5). See spec §4.2.4.
+/// V4 and V5 carry byte-identical field sets; the discriminant exists
+/// so callers can route on whether the bundle's wrapper is expected to
+/// carry inline keys (V4) or to be resolver-driven (V5). See spec §4.2.4.
+/// V6 is resolver-driven like V5, adds `freq_start`, carries the
+/// `drand-quicknet+metoffice-landobs-v1` tag, and pairs only with
+/// execution receipt V5. Both schema "6" tags share one key set, checked
+/// exactly before parsing; the grid-frequency tag parses as `V6Freq`.
+/// Any other tag parses as `V6` without the key-set check, and its
+/// validator then rejects the unknown tag by name.
+///
+/// The enum is `#[non_exhaustive]`: callers MUST treat an unrecognised
+/// variant as a verification failure, never as a pass.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ParsedLockReceipt {
     V4(LockReceiptV4),
     V5(LockReceiptV5),
+    V6(LockReceiptV6),
+    V6Freq(LockReceiptV6Freq),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -727,7 +1119,7 @@ impl std::fmt::Display for ParseLockReceiptError {
             Self::MissingSchemaVersion => write!(f, "missing schema_version"),
             Self::UnknownSchemaVersion(v) => write!(
                 f,
-                "unknown lock receipt schema_version: {} (expected \"4\" or \"5\")",
+                "unknown lock receipt schema_version: {} (expected \"4\", \"5\" or \"6\")",
                 v
             ),
             Self::PayloadShapeMismatch(e) => write!(
@@ -761,6 +1153,32 @@ pub fn parse_lock_receipt(payload_jcs: &str) -> Result<ParsedLockReceipt, ParseL
                 .map_err(|e| ParseLockReceiptError::PayloadShapeMismatch(e.to_string()))?;
             Ok(ParsedLockReceipt::V5(parsed))
         }
+        "6" => match value.get("entropy_composition").and_then(|v| v.as_str()) {
+            Some(freq_v1::ENTROPY_COMPOSITION) => {
+                // serde reads a missing Option as None: the key set is
+                // checked first, so a missing null field fails closed.
+                freq_v1::exact_keys(&value, &freq_v1::LOCK_KEYS)
+                    .map_err(ParseLockReceiptError::PayloadShapeMismatch)?;
+                let parsed: LockReceiptV6Freq = serde_json::from_str(payload_jcs)
+                    .map_err(|e| ParseLockReceiptError::PayloadShapeMismatch(e.to_string()))?;
+                Ok(ParsedLockReceipt::V6Freq(parsed))
+            }
+            Some(landobs_v1::ENTROPY_COMPOSITION) => {
+                // Both tags share one key set; checked first, so a missing
+                // or extra key fails closed before serde reads it.
+                freq_v1::exact_keys(&value, &landobs_v1::LOCK_KEYS)
+                    .map_err(ParseLockReceiptError::PayloadShapeMismatch)?;
+                let parsed: LockReceiptV6 = serde_json::from_str(payload_jcs)
+                    .map_err(|e| ParseLockReceiptError::PayloadShapeMismatch(e.to_string()))?;
+                Ok(ParsedLockReceipt::V6(parsed))
+            }
+            // An unknown tag, which the V6 validator then rejects by name.
+            _ => {
+                let parsed: LockReceiptV6 = serde_json::from_str(payload_jcs)
+                    .map_err(|e| ParseLockReceiptError::PayloadShapeMismatch(e.to_string()))?;
+                Ok(ParsedLockReceipt::V6(parsed))
+            }
+        },
         other => Err(ParseLockReceiptError::UnknownSchemaVersion(
             other.to_string(),
         )),
@@ -775,11 +1193,22 @@ pub fn parse_lock_receipt(payload_jcs: &str) -> Result<ParsedLockReceipt, ParseL
 /// (spec §4.2.1 — older-schema rejection).
 /// V4 carries a byte-identical field set to V3; the discriminant signals
 /// resolver-driven verification, mirroring `ParsedLockReceipt::V5`.
+/// V5 carries V4's field set plus `freq_value` and `freq_fallback_reason`
+/// under the `drand-quicknet+metoffice-landobs-v1` tag and pairs only with
+/// `ParsedLockReceipt::V6`. Both schema "5" tags share one key set, checked
+/// exactly before parsing; the grid-frequency tag parses as `V5Freq` and
+/// pairs only with `ParsedLockReceipt::V6Freq`.
+///
+/// The enum is `#[non_exhaustive]`: callers MUST treat an unrecognised
+/// variant as a verification failure, never as a pass.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ParsedExecutionReceipt {
     V2(ExecutionReceiptV2),
     V3(ExecutionReceiptV3),
     V4(ExecutionReceiptV4),
+    V5(ExecutionReceiptV5),
+    V5Freq(ExecutionReceiptV5Freq),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -797,7 +1226,7 @@ impl std::fmt::Display for ParseExecutionReceiptError {
             Self::MissingSchemaVersion => write!(f, "missing schema_version"),
             Self::UnknownSchemaVersion(v) => write!(
                 f,
-                "unknown execution receipt schema_version: {} (expected \"2\", \"3\", or \"4\")",
+                "unknown execution receipt schema_version: {} (expected \"2\", \"3\", \"4\" or \"5\")",
                 v
             ),
             Self::PayloadShapeMismatch(e) => write!(
@@ -838,6 +1267,31 @@ pub fn parse_execution_receipt(
                 .map_err(|e| ParseExecutionReceiptError::PayloadShapeMismatch(e.to_string()))?;
             Ok(ParsedExecutionReceipt::V4(parsed))
         }
+        "5" => match value.get("entropy_composition").and_then(|v| v.as_str()) {
+            Some(freq_v1::ENTROPY_COMPOSITION) => {
+                freq_v1::exact_keys(&value, &freq_v1::EXEC_KEYS)
+                    .map_err(ParseExecutionReceiptError::PayloadShapeMismatch)?;
+                let parsed: ExecutionReceiptV5Freq = serde_json::from_str(payload_jcs)
+                    .map_err(|e| ParseExecutionReceiptError::PayloadShapeMismatch(e.to_string()))?;
+                Ok(ParsedExecutionReceipt::V5Freq(parsed))
+            }
+            Some(landobs_v1::ENTROPY_COMPOSITION) => {
+                // Both tags share one key set; checked first, so a missing
+                // null field or an extra key fails closed before serde
+                // reads it.
+                freq_v1::exact_keys(&value, &landobs_v1::EXEC_KEYS)
+                    .map_err(ParseExecutionReceiptError::PayloadShapeMismatch)?;
+                let parsed: ExecutionReceiptV5 = serde_json::from_str(payload_jcs)
+                    .map_err(|e| ParseExecutionReceiptError::PayloadShapeMismatch(e.to_string()))?;
+                Ok(ParsedExecutionReceipt::V5(parsed))
+            }
+            // An unknown tag, which the V5 validator then rejects by name.
+            _ => {
+                let parsed: ExecutionReceiptV5 = serde_json::from_str(payload_jcs)
+                    .map_err(|e| ParseExecutionReceiptError::PayloadShapeMismatch(e.to_string()))?;
+                Ok(ParsedExecutionReceipt::V5(parsed))
+            }
+        },
         other => Err(ParseExecutionReceiptError::UnknownSchemaVersion(
             other.to_string(),
         )),

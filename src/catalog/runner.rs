@@ -180,7 +180,7 @@ pub(crate) fn run_catalog(catalog: &Catalog) -> CatalogReport {
     // TemporalBinding is also excluded: the selftest runs `verify_bundle`,
     // which uses `BundleEmbeddedResolver` in `VerifierMode::SelfConsistencyOnly`.
     // Under that mode the temporal-binding step always returns
-    // `StepStatus::Skip` (the comparison is vacuous against a bundle-
+    // `StepStatus::NotApplicable` (the comparison is vacuous against a bundle-
     // self-attesting trust root). Triggering a `TemporalBinding` fail
     // requires a non-bundle resolver, which the catalog runner cannot
     // construct from the catalog JSON. Coverage of this step lives in
@@ -367,19 +367,14 @@ fn run_single_with_report(
         })
         .collect();
 
-    // The selftest's baseline bundle uses a stub BLS signature
-    // (`drand_signature: "00" * 48`), so step `drand_bls_signature` always
-    // fails at runtime regardless of the tamper. For scenarios that break
-    // an earlier step, that earlier step is reported as the first-failing
-    // step as intended. For scenarios whose expected catch step is AFTER
-    // drand_bls_signature in the pipeline (e.g. the v0.10 cross-receipt
-    // consistency checks at steps 10 and 11), the always-failing BLS step
-    // would otherwise mask them. Rule: a scenario passes if ANY failing
-    // step is in the expected set — not just the first. This matches the
-    // semantic intent ("did the defence-in-depth we care about actually
-    // catch it") without changing existing scenario outcomes, since every
-    // pre-v0.10 scenario's first-failing step is already in its expected
-    // set.
+    // Rule: a scenario passes if ANY failing step is in the expected set,
+    // not just the first. The baseline bundle is genuine end to end (real
+    // quicknet beacon, valid receipts), so an untampered bundle fails no
+    // step. A tamper can still trip more than one defence, and an earlier
+    // step (e.g. the drand step's entropy binding) may fail before the
+    // step a scenario targets (e.g. the cross-receipt consistency check at
+    // step 10). This matches the semantic intent ("did the defence we care
+    // about actually catch it") rather than pinning one runtime order.
     let first_in_expected = report
         .steps
         .iter()

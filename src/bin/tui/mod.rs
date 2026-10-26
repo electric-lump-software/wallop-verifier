@@ -7,7 +7,7 @@ use std::process::ExitCode;
 
 use wallop_verifier::bundle::ProofBundle;
 use wallop_verifier::catalog::runner::ScenarioOutcome;
-use wallop_verifier::verify_steps::{StepName, StepStatus, verify_bundle};
+use wallop_verifier::verify_steps::verify_bundle;
 
 use state::{Mode, PinState, ScenarioEntry, VerificationSession};
 
@@ -104,32 +104,7 @@ pub(crate) fn run_selftest_tui(demo: bool, record: Option<String>) -> ExitCode {
         })
         .collect();
 
-    // 3. Override DrandBlsSignature to SKIP on scenario reports where BLS is NOT the
-    //    expected catch step. For scenarios that specifically test BLS tampering,
-    //    keep the real BLS result so the step panel shows the correct failure.
-    let scenario_reports: Vec<Option<wallop_verifier::verify_steps::VerificationReport>> =
-        scenario_reports
-            .into_iter()
-            .enumerate()
-            .map(|(i, opt_report)| {
-                let bls_is_catch_step = catalog_report
-                    .results
-                    .get(i)
-                    .is_some_and(|r| matches!(&r.outcome, ScenarioOutcome::Passed { caught_at } if *caught_at == StepName::DrandBlsSignature));
-                opt_report.map(|mut report| {
-                    if !bls_is_catch_step {
-                        for step in &mut report.steps {
-                            if step.name == StepName::DrandBlsSignature {
-                                step.status = StepStatus::Skip("test fixture".into());
-                            }
-                        }
-                    }
-                    report
-                })
-            })
-            .collect();
-
-    // Populate step_statuses from the (now-overridden) per-scenario reports
+    // 3. Populate step_statuses from the per-scenario reports
     for (i, scenario) in scenarios.iter_mut().enumerate() {
         if let Some(Some(report)) = scenario_reports.get(i) {
             scenario.step_statuses = report.steps.iter().map(|s| s.status.clone()).collect();
@@ -238,14 +213,22 @@ fn build_first_scenario_report() -> wallop_verifier::verify_steps::VerificationR
 
     let bundle_json = wallop_verifier::_test_support::build_valid_bundle(&entries, Some("1013"), 2);
     let bundle = ProofBundle::from_json(&bundle_json).expect("generated bundle must parse");
-    let mut report = verify_bundle(&bundle);
+    verify_bundle(&bundle)
+}
 
-    // Override the DrandBlsSignature step to SKIP since this is a test fixture
-    for step in &mut report.steps {
-        if step.name == StepName::DrandBlsSignature {
-            step.status = StepStatus::Skip("test fixture".into());
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wallop_verifier::verify_steps::{StepName, StepStatus};
+
+    #[test]
+    fn first_scenario_report_shows_the_real_drand_result() {
+        let report = build_first_scenario_report();
+        let drand = report
+            .steps
+            .iter()
+            .find(|s| s.name == StepName::DrandBlsSignature)
+            .unwrap();
+        assert_eq!(drand.status, StepStatus::Pass);
     }
-
-    report
 }

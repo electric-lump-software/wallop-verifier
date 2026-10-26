@@ -3,11 +3,12 @@
 //! These tests verify that the step-by-step pipeline and verify_full()
 //! agree on all inputs.
 
-use wallop_verifier::_test_support::build_valid_bundle;
+use wallop_verifier::_test_support::{build_valid_bundle, build_valid_drand_only_bundle};
 use wallop_verifier::Entry;
 use wallop_verifier::bundle::ProofBundle;
 use wallop_verifier::verify_steps::{StepStatus, verify_bundle};
 
+#[allow(deprecated)] // drift guard against verify_full
 fn run_verify_full(bundle: &ProofBundle) -> bool {
     let entries: Vec<Entry> = bundle
         .entries
@@ -58,7 +59,7 @@ fn run_verify_full(bundle: &ProofBundle) -> bool {
     .unwrap_or(false)
 }
 
-/// Drift guard: step-by-step (steps 1-7) must agree with verify_full() on valid bundles.
+/// Drift guard: the step-by-step report must agree with verify_full() on valid bundles.
 #[test]
 fn step_by_step_agrees_with_verify_full() {
     let entries = vec![
@@ -80,27 +81,26 @@ fn step_by_step_agrees_with_verify_full() {
     let json = build_valid_bundle(&entries, Some("1013"), 2);
     let bundle = ProofBundle::from_json(&json).unwrap();
     let report = verify_bundle(&bundle);
-    // Check steps 1-7 individually (step 8 BLS is a skip without real drand sig)
-    let steps_1_to_7_pass = report.steps[..7]
-        .iter()
-        .all(|s| matches!(s.status, StepStatus::Pass));
+    // Fixtures carry a genuine quicknet beacon, so the drand BLS step
+    // runs for real and the whole report must agree with verify_full.
+    let report_pass = report.passed();
     let vf_pass = run_verify_full(&bundle);
+    assert!(vf_pass, "valid bundle must pass verify_full");
     assert_eq!(
-        steps_1_to_7_pass, vf_pass,
-        "drift detected: steps 1-7 all pass={steps_1_to_7_pass}, verify_full={vf_pass}"
+        report_pass, vf_pass,
+        "drift detected: report passed={report_pass}, verify_full={vf_pass}"
     );
 
-    // Test drand-only
-    let json2 = build_valid_bundle(&entries, None, 1);
+    // Test drand-only, in the shape wallop_core emits on weather fallback
+    let (json2, _) = build_valid_drand_only_bundle();
     let bundle2 = ProofBundle::from_json(&json2).unwrap();
     let report2 = verify_bundle(&bundle2);
-    let steps_1_to_7_pass2 = report2.steps[..7]
-        .iter()
-        .all(|s| matches!(s.status, StepStatus::Pass));
+    let report_pass2 = report2.passed();
     let vf_pass2 = run_verify_full(&bundle2);
+    assert!(vf_pass2, "valid drand-only bundle must pass verify_full");
     assert_eq!(
-        steps_1_to_7_pass2, vf_pass2,
-        "drift detected (drand-only): steps={steps_1_to_7_pass2}, verify_full={vf_pass2}"
+        report_pass2, vf_pass2,
+        "drift detected (drand-only): report passed={report_pass2}, verify_full={vf_pass2}"
     );
 }
 
@@ -137,4 +137,6 @@ fn drand_only_bundle_omits_weather() {
             step.status
         );
     }
+    // The drand-only fixture is a complete, valid bundle.
+    assert!(report.passed(), "steps: {:?}", report.steps);
 }

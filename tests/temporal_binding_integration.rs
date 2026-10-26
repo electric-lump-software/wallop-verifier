@@ -36,7 +36,7 @@ fn three_uuid_entries() -> Vec<Entry> {
 #[test]
 fn verify_bundle_with_rejects_when_inserted_at_postdates_locked_at() {
     // The default v5 bundle's lock receipt has
-    // `locked_at = 2026-04-09T12:00:00.000000Z`. A resolver returning
+    // `locked_at = 2023-08-23T15:50:00.000000Z`. A resolver returning
     // `inserted_at` one second later violates §4.2.4
     // (`operator_signing_key.inserted_at <= lock.locked_at`); the
     // pipeline MUST reject.
@@ -46,7 +46,7 @@ fn verify_bundle_with_rejects_when_inserted_at_postdates_locked_at() {
     let pk: [u8; 32] = hex::decode(&pk_hex).unwrap().try_into().unwrap();
 
     let mut resolver = MockResolver::new(signing_key_id, pk);
-    resolver.inserted_at = InsertedAt::At("2026-04-09T12:00:01.000000Z".into());
+    resolver.inserted_at = InsertedAt::At("2023-08-23T15:50:01.000000Z".into());
 
     let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attestable);
 
@@ -83,7 +83,7 @@ fn verify_bundle_with_passes_when_inserted_at_predates_locked_at() {
     let pk: [u8; 32] = hex::decode(&pk_hex).unwrap().try_into().unwrap();
 
     let mut resolver = MockResolver::new(signing_key_id, pk);
-    resolver.inserted_at = InsertedAt::At("2026-01-01T00:00:00.000000Z".into());
+    resolver.inserted_at = InsertedAt::At("2023-08-01T00:00:00.000000Z".into());
 
     let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attestable);
 

@@ -76,6 +76,9 @@ fn render_scenario_list(session: &VerificationSession, frame: &mut Frame, area: 
                         StepStatus::Pass => ("▓", Color::Green),
                         StepStatus::Fail(_) => ("▓", Color::Red),
                         StepStatus::Skip(_) => ("░", Color::DarkGray),
+                        StepStatus::NotApplicable(_) => ("░", Color::Gray),
+                        // A status this build does not know: show it as a failure.
+                        _ => ("▓", Color::Red),
                     };
                     hm_spans.push(Span::from(ch).style(Style::default().fg(color)));
                 }
@@ -155,6 +158,9 @@ fn render_step_panel(session: &VerificationSession, frame: &mut Frame, area: Rec
                 StepStatus::Pass => ("PASS", Color::Green),
                 StepStatus::Fail(_) => ("FAIL", Color::Red),
                 StepStatus::Skip(_) => ("SKIP", Color::DarkGray),
+                StepStatus::NotApplicable(_) => (" N/A", Color::Gray),
+                // A status this build does not know: show it as a failure.
+                _ => ("  ? ", Color::Red),
             };
 
             // Calculate dots to fill between name and status.
@@ -262,6 +268,9 @@ fn render_step_panel(session: &VerificationSession, frame: &mut Frame, area: Rec
                         StepStatus::Pass => ("PASS", Color::Green),
                         StepStatus::Fail(_) => ("FAIL", Color::Red),
                         StepStatus::Skip(_) => ("SKIP", Color::DarkGray),
+                        StepStatus::NotApplicable(_) => (" N/A", Color::Gray),
+                        // A status this build does not know: show it as a failure.
+                        _ => ("  ? ", Color::Red),
                     };
                     let status_chars: Vec<char> = status_label.chars().collect();
                     let total = status_chars.len(); // always 4
@@ -390,6 +399,9 @@ fn render_demo_complete(session: &VerificationSession, frame: &mut Frame, area: 
                 StepStatus::Pass => ("▓", Color::Green),
                 StepStatus::Fail(_) => ("▓", Color::Red),
                 StepStatus::Skip(_) => ("░", Color::DarkGray),
+                StepStatus::NotApplicable(_) => ("░", Color::Gray),
+                // A status this build does not know: show it as a failure.
+                _ => ("▓", Color::Red),
             };
             spans.push(Span::from(ch).style(Style::default().fg(c)));
         }

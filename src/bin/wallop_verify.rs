@@ -9,6 +9,7 @@ use wallop_verifier::verify_steps::{StepStatus, VerifierMode, verify_bundle, ver
 
 mod endpoint_resolver;
 mod pinned_resolver;
+mod weather_attest;
 use endpoint_resolver::EndpointResolver;
 
 #[cfg(feature = "tui")]
@@ -138,12 +139,48 @@ enum Commands {
         #[cfg(feature = "tui")]
         record: Option<String>,
     },
+    /// Compare a bundle's weather details with public records
+    ///
+    /// Checks the weather details in a schema 6 bundle's execution receipt
+    /// against Met Office Land Observations (which keeps about 48 hours)
+    /// and the WMO SYNOP via Ogimet. When the draw fell back from Middle
+    /// Wallop's reading, it also checks the grid-frequency window, and for
+    /// a grid-frequency bundle its 8 readings, against Elexon's public BMRS
+    /// FREQ record (no key needed). This is informational: it does not
+    /// check signatures and never changes a verification result. Run
+    /// `wallop-verify <BUNDLE>` to verify the bundle. Top-level flags such
+    /// as --mode and --pin-* do not apply to this command.
+    ///
+    /// Exit status: 0 means no mismatch was found, not that the weather is
+    /// confirmed. 1 means a public record disagrees with the receipt, not a
+    /// failed verification. 2 means the bundle could not be read, is not
+    /// schema 6, or its execution receipt is in none of the three states
+    /// (weather, grid frequency, drand only).
+    WeatherAttest {
+        /// Path to proof bundle JSON file, or "-" for stdin
+        bundle: String,
+        /// Met Office DataHub API key for Land Observations. Prefer setting
+        /// WALLOP_METOFFICE_KEY instead: a flag shows in `ps` and shell
+        /// history. Without a key, that check is reported as unavailable.
+        #[arg(long, value_name = "KEY")]
+        metoffice_key: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match (cli.command, cli.path.as_deref()) {
+        (
+            Some(Commands::WeatherAttest {
+                bundle,
+                metoffice_key,
+            }),
+            _,
+        ) => {
+            let key = metoffice_key.or_else(|| std::env::var("WALLOP_METOFFICE_KEY").ok());
+            weather_attest::run(&bundle, key.as_deref())
+        }
         (
             Some(Commands::Selftest {
                 #[cfg(feature = "tui")]
@@ -453,7 +490,7 @@ fn run_verify(path: &str, pins: &PinConfig, mode: VerifierMode) -> ExitCode {
     println!("wallop-verify {version}");
     println!();
     println!("  Mode ................ {}", report.mode);
-    println!("  Draw ................ {}", &bundle.draw_id);
+    println!("  Draw ................ {}", bundle.draw_id);
     if let Some(ref kid) = report.operator_key_id {
         println!("  Operator key ........ {kid}");
     }
@@ -473,6 +510,10 @@ fn run_verify(path: &str, pins: &PinConfig, mode: VerifierMode) -> ExitCode {
             StepStatus::Pass => println!("  {} {} PASS", name_str, dots),
             StepStatus::Fail(reason) => println!("  {} {} FAIL ({})", name_str, dots, reason),
             StepStatus::Skip(reason) => println!("  {} {} SKIP ({})", name_str, dots, reason),
+            StepStatus::NotApplicable(reason) => {
+                println!("  {} {} N/A ({})", name_str, dots, reason)
+            }
+            other => println!("  {} {} UNKNOWN ({:?})", name_str, dots, other),
         }
     }
 
@@ -899,7 +940,7 @@ fn print_report(
     for line in trust_root.unwrap_or_default() {
         println!("  Trust root .......... {line}");
     }
-    println!("  Draw ................ {}", &bundle.draw_id);
+    println!("  Draw ................ {}", bundle.draw_id);
     if let Some(ref kid) = report.operator_key_id {
         println!("  Operator key ........ {kid}");
     }
@@ -915,12 +956,19 @@ fn print_report(
             StepStatus::Pass => println!("  {} {} PASS", name_str, dots),
             StepStatus::Fail(reason) => println!("  {} {} FAIL ({})", name_str, dots, reason),
             StepStatus::Skip(reason) => println!("  {} {} SKIP ({})", name_str, dots, reason),
+            StepStatus::NotApplicable(reason) => {
+                println!("  {} {} N/A ({})", name_str, dots, reason)
+            }
+            other => println!("  {} {} UNKNOWN ({:?})", name_str, dots, other),
         }
     }
 
     println!();
 }
 
+// Belt-and-braces cross-check against the deprecated receipt-level
+// verify_full. The step pipeline is the gate; this only flags drift.
+#[allow(deprecated)]
 fn run_verify_full_check(bundle: &ProofBundle) -> bool {
     let entries: Vec<wallop_verifier::Entry> = bundle
         .entries

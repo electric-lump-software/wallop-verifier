@@ -7,7 +7,6 @@ mod wasm;
 #[cfg(feature = "cli")]
 pub mod anchors;
 
-#[cfg(feature = "cli")]
 pub mod drand;
 
 /// Internal catalog infrastructure for the `wallop-verify selftest` command.
@@ -35,17 +34,42 @@ pub use protocol::receipts::{
     validate_execution_receipt_tags, validate_execution_receipt_tags_v3,
     validate_lock_receipt_tags,
 };
-pub use protocol::{compute_seed, compute_seed_drand_only, entry_hash};
+pub use protocol::{compute_seed, compute_seed_drand_only, compute_seed_freq, entry_hash};
 
 // Re-export fair_pick_rs types for convenience
 pub use fair_pick_rs::{Entry, Winner, draw};
 
-/// Full v2 verification pipeline.
+/// Receipt-level verification of a lock / execution receipt pair.
 ///
-/// Chains: sig checks → lock receipt parse → linkage → entry_hash → seed → draw → compare.
-/// `winner_count` is extracted from the signed lock receipt, not passed externally.
-/// Returns Ok(true) if all checks pass, Ok(false) if any check fails,
-/// Err with reason if inputs are structurally invalid (unparseable JSON).
+/// **Deprecated: it checks less than the step pipeline.** Use
+/// `verify_steps::verify_bundle_with` (or `verify_bundle` for legacy
+/// inline-key bundles) and gate on `VerificationReport::passed()`.
+///
+/// What it checks, in order: both Ed25519 signatures against the keys the
+/// caller passes in; `lock_receipt_hash` linkage; `entry_hash` on both
+/// receipts against the recomputed value; the seed, recomputed from the
+/// execution receipt's `drand_randomness` and `weather_value`; the draw,
+/// recomputed with the lock receipt's `winner_count` and compared with the
+/// execution receipt's `results`; that both receipts name the same drand
+/// round and chain; the drand BLS signature and randomness on the pinned
+/// quicknet chain; and that the round published strictly after the lock
+/// receipt's `locked_at`.
+///
+/// What it does not check, and the step pipeline does: receipt shape
+/// (typed schema parse, algorithm tags, canonical timestamps), the other
+/// cross-receipt fields (`draw_id`, `operator_id`, `sequence`,
+/// `weather_station`, `entropy_composition`), the weather observation
+/// window and fallback reason, key resolution and temporal binding (it trusts whatever keys it is
+/// given), and anything in the proof bundle outside the two receipts
+/// (the `entropy` block, `results`).
+///
+/// Returns `Ok(true)` if every check above passes, `Ok(false)` if any
+/// fails, and `Err` if the inputs are structurally invalid (unparseable
+/// JSON or a missing field).
+///
+/// Returns `Err` for a lock receipt with schema 6 or an execution receipt
+/// with schema 5, under either tag (Land Observations or grid frequency).
+#[deprecated(note = "checks less than verify_bundle_with; use verify_bundle_with")]
 #[allow(clippy::too_many_arguments)]
 pub fn verify_full(
     lock_receipt_jcs: &str,
@@ -56,6 +80,21 @@ pub fn verify_full(
     infrastructure_public_key: &[u8; 32],
     entries: &[Entry],
 ) -> Result<bool, String> {
+    // Lock schema 6 / execution schema 5, under either tag, carry rules this
+    // function does not check (observation hour or frequency window, lock
+    // offset, the station, fallback, and the frequency seed). Refuse rather
+    // than pass them without those checks.
+    if protocol::receipts::receipt_schema_version(lock_receipt_jcs).as_deref()
+        == Some(protocol::receipts::LOCK_SCHEMA_VERSION_V6)
+        || protocol::receipts::receipt_schema_version(execution_receipt_jcs).as_deref()
+            == Some(protocol::receipts::EXECUTION_SCHEMA_VERSION_V5)
+    {
+        return Err(
+            "lock receipt schema 6 / execution receipt schema 5 are verified only by verify_bundle_with"
+                .into(),
+        );
+    }
+
     // Step 1: Verify lock receipt signature
     if !protocol::crypto::verify_receipt(
         lock_receipt_jcs.as_bytes(),
@@ -110,7 +149,15 @@ pub fn verify_full(
         .and_then(|v| v.as_str())
         .ok_or("missing drand_randomness in execution receipt")?;
 
-    let weather_value = exec_parsed.get("weather_value").and_then(|v| v.as_str());
+    // Absent or null means a drand-only draw. Any other non-string value
+    // is malformed, not "no weather".
+    let weather_value = match exec_parsed.get("weather_value").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => Some(
+            v.as_str()
+                .ok_or("weather_value in execution receipt is not a string")?,
+        ),
+    };
 
     let exec_seed = exec_parsed
         .get("seed")
@@ -171,6 +218,48 @@ pub fn verify_full(
         return Ok(false);
     }
 
+    // Step 9: drand. The randomness must be the genuine quicknet beacon
+    // for the round the lock receipt committed to.
+    let lock_round = lock_parsed
+        .get("drand_round")
+        .and_then(|v| v.as_u64())
+        .ok_or("missing drand_round in lock receipt")?;
+    let lock_chain = lock_parsed
+        .get("drand_chain")
+        .and_then(|v| v.as_str())
+        .ok_or("missing drand_chain in lock receipt")?;
+    let exec_round = exec_parsed
+        .get("drand_round")
+        .and_then(|v| v.as_u64())
+        .ok_or("missing drand_round in execution receipt")?;
+    let exec_chain = exec_parsed
+        .get("drand_chain")
+        .and_then(|v| v.as_str())
+        .ok_or("missing drand_chain in execution receipt")?;
+    let drand_signature = exec_parsed
+        .get("drand_signature")
+        .and_then(|v| v.as_str())
+        .ok_or("missing drand_signature in execution receipt")?;
+
+    if exec_round != lock_round || exec_chain != lock_chain {
+        return Ok(false);
+    }
+    if crate::drand::verify_drand_round(exec_chain, exec_round, drand_signature, drand_randomness)
+        .is_err()
+    {
+        return Ok(false);
+    }
+
+    // Step 10: the round must publish strictly after the lock. `locked_at`
+    // is the lock signer's claim, so this is a consistency check.
+    let locked_at = lock_parsed
+        .get("locked_at")
+        .and_then(|v| v.as_str())
+        .ok_or("missing locked_at in lock receipt")?;
+    if verify_steps::drand_round_after_lock(exec_round, locked_at).is_err() {
+        return Ok(false);
+    }
+
     Ok(true)
 }
 
@@ -199,9 +288,95 @@ pub fn verify(
     }
 }
 
+/// Like `verify`, for a grid-frequency draw: the seed is
+/// `compute_seed_freq` with `freq_value`, or drand alone when it is `None`.
+/// The caller chooses this function from the receipts' tag, never from
+/// which value is present.
+pub fn verify_freq(
+    draw_id: &str,
+    entries: &[Entry],
+    drand_randomness: &str,
+    freq_value: Option<&str>,
+    count: u32,
+    expected_results: &[Winner],
+) -> bool {
+    let (ehash, _) = entry_hash(draw_id, entries);
+    let (seed, _) = match freq_value {
+        Some(v) => compute_seed_freq(&ehash, drand_randomness, v),
+        None => compute_seed_drand_only(&ehash, drand_randomness),
+    };
+    match draw(entries, &seed, count) {
+        Ok(results) => results == expected_results,
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
+#[allow(deprecated)] // exercises verify_full
 mod tests {
     use super::*;
+
+    #[test]
+    fn verify_full_refuses_frequency_receipts() {
+        use crate::_test_support::{FreqParams, build_freq_bundle, v6_entries};
+        for p in [FreqParams::value(), FreqParams::fallback()] {
+            let (json, pk_hex, _) = build_freq_bundle(&p);
+            let b: serde_json::Value = serde_json::from_str(&json).unwrap();
+            let pk: [u8; 32] = hex::decode(&pk_hex).unwrap().try_into().unwrap();
+            let sig = |w: &serde_json::Value| -> [u8; 64] {
+                hex::decode(w["signature_hex"].as_str().unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap()
+            };
+            let result = verify_full(
+                b["lock_receipt"]["payload_jcs"].as_str().unwrap(),
+                &sig(&b["lock_receipt"]),
+                &pk,
+                b["execution_receipt"]["payload_jcs"].as_str().unwrap(),
+                &sig(&b["execution_receipt"]),
+                &pk,
+                &v6_entries(),
+            );
+            assert!(
+                matches!(&result, Err(e) if e.contains("verified only by verify_bundle_with")),
+                "{p:?}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn verify_freq_checks_the_frequency_seed_and_verify_does_not_accept_it() {
+        let entries = crate::_test_support::v6_entries();
+        let draw_id = "22222222-2222-2222-2222-222222222222";
+        let r = "140117383b03a0c0c7a899a32b8cbd2ffff9e2569504037c358ee8c7c2efe2fd";
+        let v = "50012;50018;50012;49983;49980;49953;49912;49883";
+        let (ehash, _) = entry_hash(draw_id, &entries);
+        let (seed, _) = compute_seed_freq(&ehash, r, v);
+        let winners = draw(&entries, &seed, 2).unwrap();
+        assert!(verify_freq(draw_id, &entries, r, Some(v), 2, &winners));
+        assert!(
+            !verify(draw_id, &entries, r, Some(v), 2, &winners),
+            "the weather seed must not match"
+        );
+        let (drand_seed, _) = compute_seed_drand_only(&ehash, r);
+        let drand_winners = draw(&entries, &drand_seed, 2).unwrap();
+        assert!(verify_freq(draw_id, &entries, r, None, 2, &drand_winners));
+        // Some value never verifies a drand-only draw, and the reverse.
+        for other in ["50012;50018;50012;49983;49980;49953;49912;49884", v] {
+            let (s, _) = compute_seed_freq(&ehash, r, other);
+            if draw(&entries, &s, 2).unwrap() != drand_winners {
+                assert!(!verify_freq(
+                    draw_id,
+                    &entries,
+                    r,
+                    Some(other),
+                    2,
+                    &drand_winners
+                ));
+            }
+        }
+    }
     use ed25519_dalek::{Signer, SigningKey};
 
     const END_TO_END_VECTOR: &str = include_str!("../vendor/wallop/spec/vectors/end-to-end.json");
@@ -313,6 +488,205 @@ mod tests {
                 .try_into()
                 .unwrap();
         SigningKey::from_bytes(&secret_bytes)
+    }
+
+    struct SignedPair {
+        lock: String,
+        lock_sig: [u8; 64],
+        exec: String,
+        exec_sig: [u8; 64],
+        pk: [u8; 32],
+        entries: Vec<Entry>,
+    }
+
+    impl SignedPair {
+        fn run(&self) -> Result<bool, String> {
+            verify_full(
+                &self.lock,
+                &self.lock_sig,
+                &self.pk,
+                &self.exec,
+                &self.exec_sig,
+                &self.pk,
+                &self.entries,
+            )
+        }
+    }
+
+    fn signed_pair_with_randomness(
+        randomness: &str,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> SignedPair {
+        signed_pair_edited(randomness, |_| {}, edit)
+    }
+
+    fn signed_pair_edited(
+        randomness: &str,
+        lock_edit: impl FnOnce(&mut serde_json::Value),
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> SignedPair {
+        use crate::_test_support::{BEACON_ROUND, BEACON_SIGNATURE};
+        let sk = test_signing_key();
+        let pk = sk.verifying_key().to_bytes();
+        let draw_id = "22222222-2222-2222-2222-222222222222";
+        let entries = vec![
+            Entry {
+                id: "11111111-1111-1111-1111-111111111111".into(),
+                weight: 1,
+            },
+            Entry {
+                id: "33333333-3333-3333-3333-333333333333".into(),
+                weight: 1,
+            },
+            Entry {
+                id: "44444444-4444-4444-4444-444444444444".into(),
+                weight: 1,
+            },
+        ];
+        let (ehash, _) = entry_hash(draw_id, &entries);
+        let (seed, _) = compute_seed(&ehash, randomness, "1013");
+        let winners: Vec<String> = draw(&entries, &seed, 1)
+            .unwrap()
+            .into_iter()
+            .map(|w| w.entry_id)
+            .collect();
+
+        let mut lock = serde_json::json!({
+            "draw_id": draw_id,
+            "winner_count": 1,
+            "entry_hash": ehash,
+            "drand_chain": crate::drand::QUICKNET_CHAIN_HASH,
+            "drand_round": BEACON_ROUND,
+            "locked_at": "2023-08-23T15:50:00.000000Z",
+        });
+        lock_edit(&mut lock);
+        let lock = lock.to_string();
+        let lock_sig = sk.sign(lock.as_bytes()).to_bytes();
+
+        let mut exec = serde_json::json!({
+            "lock_receipt_hash": protocol::receipts::lock_receipt_hash(&lock),
+            "entry_hash": ehash,
+            "drand_chain": crate::drand::QUICKNET_CHAIN_HASH,
+            "drand_round": BEACON_ROUND,
+            "drand_signature": BEACON_SIGNATURE,
+            "drand_randomness": randomness,
+            "weather_value": "1013",
+            "seed": hex::encode(seed),
+            "results": winners,
+        });
+        edit(&mut exec);
+        let exec = exec.to_string();
+        let exec_sig = sk.sign(exec.as_bytes()).to_bytes();
+
+        SignedPair {
+            lock,
+            lock_sig,
+            exec,
+            exec_sig,
+            pk,
+            entries,
+        }
+    }
+
+    fn signed_pair_with(edit: impl FnOnce(&mut serde_json::Value)) -> SignedPair {
+        signed_pair_with_randomness(crate::_test_support::BEACON_RANDOMNESS, edit)
+    }
+
+    #[test]
+    fn verify_full_rejects_fake_drand_signature() {
+        let args = signed_pair_with(|exec| {
+            exec["drand_signature"] = serde_json::json!("00".repeat(48));
+        });
+        assert_eq!(args.run(), Ok(false));
+    }
+
+    #[test]
+    fn verify_full_rejects_randomness_not_from_signature() {
+        // Genuine signature for round 1000, but randomness from round 1001,
+        // with seed and winners recomputed from that randomness, so only
+        // the drand check can catch it.
+        let args = signed_pair_with_randomness(crate::_test_support::BEACON_2_RANDOMNESS, |_| {});
+        assert_eq!(args.run(), Ok(false));
+    }
+
+    #[test]
+    fn verify_full_rejects_exec_round_different_from_lock() {
+        // Exec carries the genuine round-1001 beacon, but lock committed round 1000.
+        let args = signed_pair_with_randomness(crate::_test_support::BEACON_2_RANDOMNESS, |exec| {
+            exec["drand_round"] = serde_json::json!(crate::_test_support::BEACON_2_ROUND);
+            exec["drand_signature"] = serde_json::json!(crate::_test_support::BEACON_2_SIGNATURE);
+        });
+        assert_eq!(args.run(), Ok(false));
+    }
+
+    #[test]
+    fn verify_full_rejects_exec_chain_different_from_lock() {
+        let args = signed_pair_with(|exec| {
+            exec["drand_chain"] = serde_json::json!("00".repeat(32));
+        });
+        assert_eq!(args.run(), Ok(false));
+    }
+
+    #[test]
+    fn verify_full_errors_when_lock_lacks_drand_round() {
+        let args = signed_pair_edited(
+            crate::_test_support::BEACON_RANDOMNESS,
+            |lock| {
+                lock.as_object_mut().unwrap().remove("drand_round");
+            },
+            |_| {},
+        );
+        let result = args.run();
+        assert!(
+            matches!(&result, Err(e) if e.contains("drand_round") && e.contains("lock receipt")),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_full_errors_when_weather_value_is_not_a_string() {
+        // A numeric weather_value must not be read as "no weather" and
+        // fall through to the drand-only seed.
+        let args = signed_pair_with(|exec| {
+            exec["weather_value"] = serde_json::json!(1013);
+        });
+        let result = args.run();
+        assert!(
+            matches!(&result, Err(e) if e.contains("weather_value")),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_full_rejects_round_published_before_lock() {
+        // Round 1000 published at 2023-08-23T15:59:24Z.
+        let pair = signed_pair_edited(
+            crate::_test_support::BEACON_RANDOMNESS,
+            |lock| lock["locked_at"] = serde_json::json!("2023-08-23T15:59:30.000000Z"),
+            |_| {},
+        );
+        assert_eq!(pair.run(), Ok(false));
+    }
+
+    #[test]
+    fn verify_full_errors_when_lock_lacks_locked_at() {
+        let pair = signed_pair_edited(
+            crate::_test_support::BEACON_RANDOMNESS,
+            |lock| {
+                lock.as_object_mut().unwrap().remove("locked_at");
+            },
+            |_| {},
+        );
+        let result = pair.run();
+        assert!(
+            matches!(&result, Err(e) if e.contains("locked_at")),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_full_accepts_genuine_beacon() {
+        assert_eq!(signed_pair_with(|_| {}).run(), Ok(true));
     }
 
     #[test]
@@ -499,5 +873,44 @@ mod tests {
             result.unwrap_err().contains("not a string"),
             "error should mention non-string element"
         );
+    }
+
+    /// `verify_full` over the receipts of a signed bundle.
+    fn verify_full_on(json: &str, pk_hex: &str) -> Result<bool, String> {
+        let b = crate::bundle::ProofBundle::from_json(json).unwrap();
+        let pk: [u8; 32] = hex::decode(pk_hex).unwrap().try_into().unwrap();
+        let sig = |h: &str| -> [u8; 64] { hex::decode(h).unwrap().try_into().unwrap() };
+        verify_full(
+            &b.lock_receipt.payload_jcs,
+            &sig(&b.lock_receipt.signature_hex),
+            &pk,
+            &b.execution_receipt.payload_jcs,
+            &sig(&b.execution_receipt.signature_hex),
+            &pk,
+            &crate::_test_support::v6_entries(),
+        )
+    }
+
+    const REFUSES_LANDOBS: &str = "lock receipt schema 6 / execution receipt schema 5 are verified only by verify_bundle_with";
+
+    #[test]
+    fn verify_full_refuses_lock_schema_6() {
+        use crate::_test_support::{V6Params, build_v6_bundle};
+        let (json, pk_hex, _) = build_v6_bundle(&V6Params::weather());
+        assert_eq!(verify_full_on(&json, &pk_hex).unwrap_err(), REFUSES_LANDOBS);
+    }
+
+    #[test]
+    fn verify_full_refuses_either_schema_alone() {
+        use crate::_test_support::v6_negative_bundle;
+        // Lock 6 with exec 4, and lock 5 with exec 5.
+        for name in ["lock_v6_with_exec_v4", "lock_v5_with_exec_v5"] {
+            let (json, pk_hex, _) = v6_negative_bundle(name);
+            assert_eq!(
+                verify_full_on(&json, &pk_hex).unwrap_err(),
+                REFUSES_LANDOBS,
+                "{name}"
+            );
+        }
     }
 }

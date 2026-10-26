@@ -34,6 +34,10 @@ pub struct Entropy {
     pub drand_signature: String,
     pub drand_chain_hash: String,
     pub weather_value: Option<String>,
+    /// The grid-frequency `freq_value`, on bundles whose receipts carry
+    /// the `drand-quicknet+elexon-freq-v1` tag. Bound to the signed
+    /// execution receipt like `weather_value`.
+    pub freq_value: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,7 +74,7 @@ impl ProofBundle {
     }
 
     pub fn is_drand_only(&self) -> bool {
-        self.entropy.weather_value.is_none()
+        self.entropy.weather_value.is_none() && self.entropy.freq_value.is_none()
     }
 }
 
@@ -127,6 +131,25 @@ mod tests {
             .unwrap()
             .remove("weather_value");
         let bundle = ProofBundle::from_json(&val.to_string()).unwrap();
+        assert!(bundle.is_drand_only());
+    }
+
+    #[test]
+    fn entropy_accepts_freq_value_and_a_freq_draw_is_not_drand_only() {
+        let value = "50018;50012;49983;49980;49953;49912;49883;49887";
+        let mut v: serde_json::Value = serde_json::from_str(&minimal_bundle_json()).unwrap();
+        v["entropy"]
+            .as_object_mut()
+            .unwrap()
+            .remove("weather_value");
+        v["entropy"]["freq_value"] = serde_json::json!(value);
+        let bundle = ProofBundle::from_json(&v.to_string()).unwrap();
+        assert_eq!(bundle.entropy.freq_value.as_deref(), Some(value));
+        assert_eq!(bundle.entropy.weather_value, None);
+        assert!(!bundle.is_drand_only());
+
+        v["entropy"]["freq_value"] = serde_json::Value::Null;
+        let bundle = ProofBundle::from_json(&v.to_string()).unwrap();
         assert!(bundle.is_drand_only());
     }
 

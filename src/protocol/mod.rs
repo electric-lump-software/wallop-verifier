@@ -1,6 +1,75 @@
 pub mod crypto;
+pub mod freq_v1;
+pub mod landobs_v1;
 pub mod merkle;
 pub mod receipts;
+
+/// The start of `refuse_duplicate_keys`'s error for a repeated key.
+pub const DUPLICATE_KEY: &str = "duplicate key";
+
+/// `Ok` when `json` is one JSON value with no object, at any depth, that
+/// repeats a key, compared after unescaping (so `"a"` and `"\u0061"` are
+/// the same key). A repeated key leaves the bytes meaning different things
+/// to a first-wins and a last-wins reader, so the record's bytes would not
+/// prove one value. `Err` names the first repeated key, or says the bytes
+/// are not JSON.
+pub fn refuse_duplicate_keys(json: &[u8]) -> Result<(), String> {
+    let text = std::str::from_utf8(json).map_err(|e| format!("not UTF-8: {e}"))?;
+    let mut found = None;
+    unique_keys(text, &mut found).map_err(|e| match found {
+        Some(key) => format!("{DUPLICATE_KEY} {key:?}"),
+        None => e.to_string(),
+    })
+}
+
+/// Walks one JSON value. Scalars are taken as raw text, so a number is
+/// never converted (and `1e999` is not refused here). `found` gets the
+/// first repeated key.
+fn unique_keys(text: &str, found: &mut Option<String>) -> Result<(), serde_json::Error> {
+    use serde::de::{DeserializeSeed, Deserializer, Error, MapAccess, SeqAccess, Visitor};
+    use serde_json::value::RawValue;
+
+    struct Walk<'f>(&'f mut Option<String>);
+    impl<'de> DeserializeSeed<'de> for Walk<'_> {
+        type Value = ();
+        fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+            d.deserialize_any(self)
+        }
+    }
+    impl<'de> Visitor<'de> for Walk<'_> {
+        type Value = ();
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a JSON object or list")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+            let mut seen = std::collections::HashSet::new();
+            while let Some(key) = map.next_key::<String>()? {
+                let value: &RawValue = map.next_value()?;
+                if !seen.insert(key.clone()) {
+                    *self.0 = Some(key);
+                    return Err(A::Error::custom("duplicate key"));
+                }
+                unique_keys(value.get(), self.0).map_err(A::Error::custom)?;
+            }
+            Ok(())
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+            while let Some(item) = seq.next_element::<&RawValue>()? {
+                unique_keys(item.get(), self.0).map_err(A::Error::custom)?;
+            }
+            Ok(())
+        }
+    }
+
+    match text.trim_start().as_bytes().first() {
+        Some(b'{' | b'[') => {
+            let mut de = serde_json::Deserializer::from_str(text);
+            Walk(found).deserialize(&mut de)?;
+            de.end()
+        }
+        _ => serde_json::from_str::<&RawValue>(text).map(|_| ()),
+    }
+}
 
 use std::collections::BTreeMap;
 
@@ -94,6 +163,30 @@ pub fn compute_seed_drand_only(entry_hash: &str, drand_randomness: &str) -> ([u8
         serde_json::Value::String(drand_randomness.into()),
     );
     map.insert("entry_hash", serde_json::Value::String(entry_hash.into()));
+    let jcs = serde_json::to_string(&map).unwrap();
+
+    let seed_bytes: [u8; 32] = Sha256::digest(jcs.as_bytes()).into();
+    (seed_bytes, jcs)
+}
+
+/// Compute the draw seed for a grid-frequency draw from entry hash, drand
+/// randomness and `freq_value`:
+/// `SHA-256(JCS({drand_randomness, entry_hash, freq_value}))`.
+///
+/// The `freq_value` key keeps it apart from `compute_seed` and
+/// `compute_seed_drand_only`, even for the same string.
+pub fn compute_seed_freq(
+    entry_hash: &str,
+    drand_randomness: &str,
+    freq_value: &str,
+) -> ([u8; 32], String) {
+    let mut map = BTreeMap::new();
+    map.insert(
+        "drand_randomness",
+        serde_json::Value::String(drand_randomness.into()),
+    );
+    map.insert("entry_hash", serde_json::Value::String(entry_hash.into()));
+    map.insert("freq_value", serde_json::Value::String(freq_value.into()));
     let jcs = serde_json::to_string(&map).unwrap();
 
     let seed_bytes: [u8; 32] = Sha256::digest(jcs.as_bytes()).into();

@@ -10,8 +10,33 @@
 
 use crate::key_resolver::{InsertedAt, KeyClass, KeyResolver, ResolutionError, ResolvedKey};
 use crate::protocol::receipts::lock_receipt_hash;
-use crate::{Entry, compute_seed, compute_seed_drand_only, draw, entry_hash};
+use crate::protocol::{freq_v1, landobs_v1};
+use crate::verify_steps::format_canonical;
+use crate::{Entry, compute_seed, compute_seed_drand_only, compute_seed_freq, draw, entry_hash};
 use ed25519_dalek::{Signer, SigningKey};
+
+/// Real quicknet beacons, from
+/// https://api.drand.sh/52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971/public/<round>.
+/// Fixtures use these because every build now verifies the BLS signature.
+#[doc(hidden)]
+pub const BEACON_ROUND: u64 = 1000;
+#[doc(hidden)]
+pub const BEACON_SIGNATURE: &str = "b44679b9a59af2ec876b1a6b1ad52ea9b1615fc3982b19576350f93447cb1125e342b73a8dd2bacbe47e4b6b63ed5e39";
+#[doc(hidden)]
+pub const BEACON_RANDOMNESS: &str =
+    "fe290beca10872ef2fb164d2aa4442de4566183ec51c56ff3cd603d930e54fdd";
+#[doc(hidden)]
+pub const BEACON_2_ROUND: u64 = 1001;
+#[doc(hidden)]
+pub const BEACON_2_SIGNATURE: &str = "b33bf3667cbd5a82de3a24b4e0e9fe5513cc1a0e840368c6e31f5fcfa79bea03f73896b25883abf2853d10337fb8fa41";
+#[doc(hidden)]
+pub const BEACON_2_RANDOMNESS: &str =
+    "b0a591ad1b9002cfc372ac6e30abd3da8d3088d4caae026961743474fb94235f";
+
+/// `inserted_at` for the test key as a resolver reports it: before every
+/// fixture's `locked_at` and `executed_at`, so temporal binding passes.
+#[doc(hidden)]
+pub const KEY_INSERTED_AT: &str = "2023-08-01T00:00:00.000000Z";
 
 /// Fixed test signing key used by all generated bundles. Deterministic so
 /// bundles are reproducible across runs.
@@ -32,7 +57,11 @@ pub fn test_signing_key() -> SigningKey {
 /// both receipt signatures all verify correctly.
 ///
 /// - `entries`: the draw's entry set
-/// - `weather`: `Some("1013")` for weather-variant, `None` for drand-only
+/// - `weather`: `Some("1013")` for weather-variant, `None` for drand-only.
+///   Drand-only takes the shape wallop_core emits when the weather fetch
+///   falls back: the execution receipt keeps the station, carries
+///   `weather_fallback_reason: "unreachable"`, and has null
+///   `weather_value` / `weather_observation_time`.
 /// - `winner_count`: how many winners the draw picks
 #[doc(hidden)]
 pub fn build_valid_bundle(entries: &[Entry], weather: Option<&str>, winner_count: u32) -> String {
@@ -45,7 +74,7 @@ pub fn build_valid_bundle(entries: &[Entry], weather: Option<&str>, winner_count
     // and execution receipts below so signatures verify.
     let draw_id = "22222222-2222-2222-2222-222222222222";
     let (ehash, _) = entry_hash(draw_id, entries);
-    let drand = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+    let drand = BEACON_RANDOMNESS;
 
     let (seed_bytes, _) = match weather {
         Some(w) => compute_seed(&ehash, drand, w),
@@ -61,13 +90,13 @@ pub fn build_valid_bundle(entries: &[Entry], weather: Option<&str>, winner_count
     let lock_jcs = serde_json::json!({
         "commitment_hash": "00".repeat(32),
         "drand_chain": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
-        "drand_round": 12345,
+        "drand_round": BEACON_ROUND,
         "draw_id": "22222222-2222-2222-2222-222222222222",
         "entropy_composition": "drand-quicknet+openmeteo-v1",
         "entry_hash": &ehash,
         "fair_pick_version": "0.1.0",
         "jcs_version": "sha256-jcs-v1",
-        "locked_at": "2026-04-09T12:00:00.000000Z",
+        "locked_at": "2023-08-23T15:50:00.000000Z",
         "operator_id": "11111111-1111-1111-1111-111111111111",
         "operator_slug": "acme-prizes",
         "schema_version": "4",
@@ -76,7 +105,7 @@ pub fn build_valid_bundle(entries: &[Entry], weather: Option<&str>, winner_count
         "signing_key_id": &kid,
         "wallop_core_version": "0.14.1",
         "weather_station": "middle-wallop",
-        "weather_time": "2026-04-09T12:10:00.000000Z",
+        "weather_time": "2023-08-23T16:00:00.000000Z",
         "winner_count": winner_count
     })
     .to_string();
@@ -87,13 +116,13 @@ pub fn build_valid_bundle(entries: &[Entry], weather: Option<&str>, winner_count
     let exec_jcs = serde_json::json!({
         "drand_chain": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
         "drand_randomness": drand,
-        "drand_round": 12345,
-        "drand_signature": "00".repeat(48),
+        "drand_round": BEACON_ROUND,
+        "drand_signature": BEACON_SIGNATURE,
         "drand_signature_algorithm": "bls12_381_g2",
         "draw_id": "22222222-2222-2222-2222-222222222222",
         "entropy_composition": "drand-quicknet+openmeteo-v1",
         "entry_hash": &ehash,
-        "executed_at": "2026-04-09T12:15:00.000000Z",
+        "executed_at": "2023-08-23T16:05:00.000000Z",
         "fair_pick_version": "0.1.0",
         "jcs_version": "sha256-jcs-v1",
         "lock_receipt_hash": &lrh,
@@ -106,18 +135,21 @@ pub fn build_valid_bundle(entries: &[Entry], weather: Option<&str>, winner_count
         "sequence": 1,
         "signature_algorithm": "ed25519",
         "wallop_core_version": "0.14.1",
-        "weather_fallback_reason": null,
-        "weather_observation_time": if weather.is_some() { serde_json::json!("2026-04-09T12:10:00.000000Z") } else { serde_json::Value::Null },
-        "weather_station": if weather.is_some() { serde_json::json!("middle-wallop") } else { serde_json::Value::Null },
+        "weather_fallback_reason": if weather.is_some() { serde_json::Value::Null } else { serde_json::json!("unreachable") },
+        "weather_observation_time": if weather.is_some() { serde_json::json!("2023-08-23T16:00:00.000000Z") } else { serde_json::Value::Null },
+        "weather_station": "middle-wallop",
         "weather_value": match weather { Some(w) => serde_json::json!(w), None => serde_json::Value::Null }
     }).to_string();
     let exec_sig_hex = hex::encode(sk.sign(exec_jcs.as_bytes()).to_bytes());
 
     // Bundle JSON
     let mut entropy = serde_json::Map::new();
-    entropy.insert("drand_round".into(), serde_json::json!(12345));
+    entropy.insert("drand_round".into(), serde_json::json!(BEACON_ROUND));
     entropy.insert("drand_randomness".into(), serde_json::json!(drand));
-    entropy.insert("drand_signature".into(), serde_json::json!("00".repeat(48)));
+    entropy.insert(
+        "drand_signature".into(),
+        serde_json::json!(BEACON_SIGNATURE),
+    );
     entropy.insert(
         "drand_chain_hash".into(),
         serde_json::json!("52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971"),
@@ -147,6 +179,36 @@ pub fn build_valid_bundle(entries: &[Entry], weather: Option<&str>, winner_count
     .to_string()
 }
 
+/// Build a fully-signed drand-only bundle in the shape wallop_core emits
+/// when the weather fetch falls back (see the vendored
+/// `proof-bundle-drand-only.json` vector): the lock receipt still commits
+/// to a weather time and station, the execution receipt repeats the
+/// station with `weather_fallback_reason: "unreachable"` and null
+/// `weather_value` / `weather_observation_time`, and the bundle's entropy
+/// has no `weather_value`. Uses the genuine `BEACON_*`, so every step
+/// either passes or is not applicable.
+///
+/// Returned tuple: `(bundle_json, public_key_hex)`.
+#[doc(hidden)]
+pub fn build_valid_drand_only_bundle() -> (String, String) {
+    let entries = vec![
+        Entry {
+            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            weight: 1,
+        },
+        Entry {
+            id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
+            weight: 1,
+        },
+        Entry {
+            id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc".into(),
+            weight: 1,
+        },
+    ];
+    let pk_hex = hex::encode(test_signing_key().verifying_key().to_bytes());
+    (build_valid_bundle(&entries, None, 2), pk_hex)
+}
+
 /// Build a fully-signed, verifiable proof bundle in resolver-driven shape:
 /// lock receipt schema_version "5", execution receipt schema_version "4",
 /// no inline `public_key_hex` on either bundle wrapper.
@@ -172,7 +234,7 @@ pub fn build_valid_v5_bundle(
 
     let draw_id = "22222222-2222-2222-2222-222222222222";
     let (ehash, _) = entry_hash(draw_id, entries);
-    let drand = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+    let drand = BEACON_RANDOMNESS;
 
     let (seed_bytes, _) = match weather {
         Some(w) => compute_seed(&ehash, drand, w),
@@ -188,13 +250,13 @@ pub fn build_valid_v5_bundle(
     let lock_jcs = serde_json::json!({
         "commitment_hash": "00".repeat(32),
         "drand_chain": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
-        "drand_round": 12345,
+        "drand_round": BEACON_ROUND,
         "draw_id": "22222222-2222-2222-2222-222222222222",
         "entropy_composition": "drand-quicknet+openmeteo-v1",
         "entry_hash": &ehash,
         "fair_pick_version": "0.1.0",
         "jcs_version": "sha256-jcs-v1",
-        "locked_at": "2026-04-09T12:00:00.000000Z",
+        "locked_at": "2023-08-23T15:50:00.000000Z",
         "operator_id": "11111111-1111-1111-1111-111111111111",
         "operator_slug": "acme-prizes",
         "schema_version": "5",
@@ -203,7 +265,7 @@ pub fn build_valid_v5_bundle(
         "signing_key_id": &signing_key_id,
         "wallop_core_version": "0.18.0",
         "weather_station": "middle-wallop",
-        "weather_time": "2026-04-09T12:10:00.000000Z",
+        "weather_time": "2023-08-23T16:00:00.000000Z",
         "winner_count": winner_count
     })
     .to_string();
@@ -215,13 +277,13 @@ pub fn build_valid_v5_bundle(
     let exec_jcs = serde_json::json!({
         "drand_chain": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
         "drand_randomness": drand,
-        "drand_round": 12345,
-        "drand_signature": "00".repeat(48),
+        "drand_round": BEACON_ROUND,
+        "drand_signature": BEACON_SIGNATURE,
         "drand_signature_algorithm": "bls12_381_g2",
         "draw_id": "22222222-2222-2222-2222-222222222222",
         "entropy_composition": "drand-quicknet+openmeteo-v1",
         "entry_hash": &ehash,
-        "executed_at": "2026-04-09T12:15:00.000000Z",
+        "executed_at": "2023-08-23T16:05:00.000000Z",
         "fair_pick_version": "0.1.0",
         "jcs_version": "sha256-jcs-v1",
         "lock_receipt_hash": &lrh,
@@ -235,17 +297,20 @@ pub fn build_valid_v5_bundle(
         "signature_algorithm": "ed25519",
         "signing_key_id": &signing_key_id,
         "wallop_core_version": "0.18.0",
-        "weather_fallback_reason": null,
-        "weather_observation_time": if weather.is_some() { serde_json::json!("2026-04-09T12:10:00.000000Z") } else { serde_json::Value::Null },
-        "weather_station": if weather.is_some() { serde_json::json!("middle-wallop") } else { serde_json::Value::Null },
+        "weather_fallback_reason": if weather.is_some() { serde_json::Value::Null } else { serde_json::json!("unreachable") },
+        "weather_observation_time": if weather.is_some() { serde_json::json!("2023-08-23T16:00:00.000000Z") } else { serde_json::Value::Null },
+        "weather_station": "middle-wallop",
         "weather_value": match weather { Some(w) => serde_json::json!(w), None => serde_json::Value::Null }
     }).to_string();
     let exec_sig_hex = hex::encode(sk.sign(exec_jcs.as_bytes()).to_bytes());
 
     let mut entropy = serde_json::Map::new();
-    entropy.insert("drand_round".into(), serde_json::json!(12345));
+    entropy.insert("drand_round".into(), serde_json::json!(BEACON_ROUND));
     entropy.insert("drand_randomness".into(), serde_json::json!(drand));
-    entropy.insert("drand_signature".into(), serde_json::json!("00".repeat(48)));
+    entropy.insert(
+        "drand_signature".into(),
+        serde_json::json!(BEACON_SIGNATURE),
+    );
     entropy.insert(
         "drand_chain_hash".into(),
         serde_json::json!("52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971"),
@@ -278,6 +343,613 @@ pub fn build_valid_v5_bundle(
     (bundle, pk_hex, signing_key_id)
 }
 
+/// A real quicknet beacon published 2026-10-01T20:00:00Z, from
+/// https://api.drand.sh/52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971/public/32693812.
+/// Lock v6 fixtures derive their weather time and lock time from it.
+#[doc(hidden)]
+pub const BEACON_V6_ROUND: u64 = 32_693_812;
+#[doc(hidden)]
+pub const BEACON_V6_SIGNATURE: &str = "995ffde0adb77c55a684f709ece0f4cb1effd6284584df0a60a4d16c1a186ce882ba602dfc28acf8139385dfbfe4e637";
+#[doc(hidden)]
+pub const BEACON_V6_RANDOMNESS: &str =
+    "63f5ac51561140f314891a16e6239142924611c313ff4cbf1aeb4dbb3c3ae135";
+
+/// A synthetic, grammar-valid weather value (t 18.4 C, 1021 hPa, 51 %,
+/// 41.14 km). Not a real observation.
+#[doc(hidden)]
+pub const V6_WEATHER_VALUE: &str = "184;1021;51;4114";
+
+/// A grammar-valid grid-frequency value (eight readings in mHz), the same
+/// as the grid-frequency fixture's. Used for the weather tag's state (b).
+#[doc(hidden)]
+pub const V6_FREQ_VALUE: &str = "50012;50018;50012;49983;49980;49953;49912;49883";
+
+/// Every field (signed receipts and the entropy block) a lock v6 /
+/// execution v5 fixture varies. Start from `weather()`, `freq_fallback()`
+/// or `fallback()` (the tag's three states) and change fields to build
+/// negative cases; `build_v6_bundle` signs whatever it is given.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct V6Params {
+    pub lock_schema: String,
+    pub exec_schema: String,
+    pub lock_entropy_composition: String,
+    pub exec_entropy_composition: String,
+    pub drand_round: u64,
+    pub drand_signature: String,
+    pub drand_randomness: String,
+    pub locked_at: String,
+    pub weather_time: String,
+    pub executed_at: String,
+    pub lock_station: String,
+    pub exec_station: Option<String>,
+    pub weather_value: Option<String>,
+    pub weather_observation_time: Option<String>,
+    pub weather_fallback_reason: Option<String>,
+    /// The lock's `freq_start`. Written only on a schema 6 lock.
+    pub freq_start: Option<String>,
+    /// Leave `freq_start` out of a schema 6 lock altogether.
+    pub omit_freq_start: bool,
+    /// The execution receipt's `freq_value`. Written only on a schema 5
+    /// execution receipt.
+    pub freq_value: Option<String>,
+    /// The execution receipt's `freq_fallback_reason`. Written only on a
+    /// schema 5 execution receipt.
+    pub freq_fallback_reason: Option<String>,
+}
+
+impl V6Params {
+    /// A valid draw that used Middle Wallop's observation. The lock
+    /// is one minute before the latest permitted lock time, and execution
+    /// is five seconds after the round published.
+    #[doc(hidden)]
+    pub fn weather() -> Self {
+        let wt = landobs_v1::weather_time_for_round(BEACON_V6_ROUND)
+            .expect("fixture round has a weather time");
+        let latest_lock =
+            landobs_v1::latest_lock_at(wt).expect("fixture weather time has a lock time");
+        let published = crate::drand::quicknet_round_time(BEACON_V6_ROUND)
+            .expect("fixture round has a publish time");
+        let weather_time = format_canonical(wt, 0);
+        Self {
+            lock_schema: "6".into(),
+            exec_schema: "5".into(),
+            lock_entropy_composition: landobs_v1::ENTROPY_COMPOSITION.into(),
+            exec_entropy_composition: landobs_v1::ENTROPY_COMPOSITION.into(),
+            drand_round: BEACON_V6_ROUND,
+            drand_signature: BEACON_V6_SIGNATURE.into(),
+            drand_randomness: BEACON_V6_RANDOMNESS.into(),
+            locked_at: format_canonical(latest_lock - 60, 0),
+            weather_time: weather_time.clone(),
+            executed_at: format_canonical(published + 5, 0),
+            lock_station: landobs_v1::PRIMARY_STATION.into(),
+            exec_station: Some(landobs_v1::PRIMARY_STATION.into()),
+            weather_value: Some(V6_WEATHER_VALUE.into()),
+            weather_observation_time: Some(weather_time),
+            weather_fallback_reason: None,
+            freq_start: Some(freq_v1::format_freq_start(
+                freq_v1::freq_start_for_round(BEACON_V6_ROUND)
+                    .expect("fixture round has a window start"),
+            )),
+            omit_freq_start: false,
+            freq_value: None,
+            freq_fallback_reason: None,
+        }
+    }
+
+    /// State (b): no observation by the deadline; the round's grid-frequency window.
+    #[doc(hidden)]
+    pub fn freq_fallback() -> Self {
+        Self {
+            weather_value: None,
+            weather_observation_time: None,
+            weather_fallback_reason: Some(landobs_v1::FALLBACK_NO_OBSERVATION.into()),
+            freq_value: Some(V6_FREQ_VALUE.into()),
+            freq_fallback_reason: None,
+            ..Self::weather()
+        }
+    }
+
+    /// State (c): no observation and no window: drand only.
+    #[doc(hidden)]
+    pub fn fallback() -> Self {
+        Self {
+            freq_value: None,
+            freq_fallback_reason: Some(crate::protocol::freq_v1::FALLBACK_NO_FREQUENCY.into()),
+            ..Self::freq_fallback()
+        }
+    }
+}
+
+/// The three entries every v6 fixture uses.
+#[doc(hidden)]
+pub fn v6_entries() -> Vec<Entry> {
+    [
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    ]
+    .iter()
+    .map(|id| Entry {
+        id: (*id).into(),
+        weight: 1,
+    })
+    .collect()
+}
+
+/// Build and sign a resolver-driven bundle (no inline keys) from `p`. The
+/// seed and winners are recomputed from `p`, so they always agree with
+/// the receipt. Under the Land Observations tag the seed follows the
+/// three-state table (`landobs_v1::exec_state`), so the fixtures for
+/// states (b) and (c) carry the seed an honest draw would. Outside the
+/// table, or under another tag, the first non-null value is used; the
+/// verifier refuses an out-of-table receipt whatever its seed. Returns
+/// `(bundle_json, public_key_hex, signing_key_id)`.
+#[doc(hidden)]
+pub fn build_v6_bundle(p: &V6Params) -> (String, String, String) {
+    let sk = test_signing_key();
+    let pk_bytes: [u8; 32] = sk.verifying_key().to_bytes();
+    let pk_hex = hex::encode(pk_bytes);
+    let kid = crate::protocol::crypto::key_id(&pk_bytes);
+    let entries = v6_entries();
+    let draw_id = "22222222-2222-2222-2222-222222222222";
+    let (ehash, _) = entry_hash(draw_id, &entries);
+    let five = serde_json::json!({
+        "weather_value": &p.weather_value,
+        "weather_observation_time": &p.weather_observation_time,
+        "weather_fallback_reason": &p.weather_fallback_reason,
+        "freq_value": &p.freq_value,
+        "freq_fallback_reason": &p.freq_fallback_reason,
+    });
+    let state = (p.exec_entropy_composition == landobs_v1::ENTROPY_COMPOSITION)
+        .then(|| landobs_v1::exec_state(&five).ok())
+        .flatten();
+    let (seed_bytes, _) = match state {
+        Some(landobs_v1::ExecState::Weather(w)) => compute_seed(&ehash, &p.drand_randomness, w),
+        Some(landobs_v1::ExecState::Freq(f)) => compute_seed_freq(&ehash, &p.drand_randomness, f),
+        Some(landobs_v1::ExecState::DrandOnly) => {
+            compute_seed_drand_only(&ehash, &p.drand_randomness)
+        }
+        None => match (p.weather_value.as_deref(), p.freq_value.as_deref()) {
+            (Some(w), _) => compute_seed(&ehash, &p.drand_randomness, w),
+            (None, Some(f)) => compute_seed_freq(&ehash, &p.drand_randomness, f),
+            (None, None) => compute_seed_drand_only(&ehash, &p.drand_randomness),
+        },
+    };
+    let winners = draw(&entries, &seed_bytes, 2).unwrap();
+    let results: Vec<String> = winners.iter().map(|w| w.entry_id.clone()).collect();
+    let chain = crate::drand::QUICKNET_CHAIN_HASH;
+
+    let mut lock = serde_json::json!({
+        "commitment_hash": &ehash,
+        "drand_chain": chain,
+        "drand_round": p.drand_round,
+        "draw_id": draw_id,
+        "entropy_composition": &p.lock_entropy_composition,
+        "entry_hash": &ehash,
+        "fair_pick_version": "0.2.0",
+        "jcs_version": "sha256-jcs-v1",
+        "locked_at": &p.locked_at,
+        "operator_id": "11111111-1111-1111-1111-111111111111",
+        "operator_slug": "acme-prizes",
+        "schema_version": &p.lock_schema,
+        "sequence": 1,
+        "signature_algorithm": "ed25519",
+        "signing_key_id": &kid,
+        "wallop_core_version": "0.29.0",
+        "weather_station": &p.lock_station,
+        "weather_time": &p.weather_time,
+        "winner_count": 2
+    });
+    // A schema 5 lock stays the legacy shape, as the old builders made it.
+    if p.lock_schema == "6" && !p.omit_freq_start {
+        lock.as_object_mut()
+            .expect("lock is an object")
+            .insert("freq_start".into(), serde_json::json!(p.freq_start));
+    }
+    // serde_json's map is sorted (no `preserve_order`), so this is JCS.
+    let lock_jcs = lock.to_string();
+    let lock_sig_hex = hex::encode(sk.sign(lock_jcs.as_bytes()).to_bytes());
+
+    let mut exec = serde_json::json!({
+        "drand_chain": chain,
+        "drand_randomness": &p.drand_randomness,
+        "drand_round": p.drand_round,
+        "drand_signature": &p.drand_signature,
+        "drand_signature_algorithm": "bls12_381_g2",
+        "draw_id": draw_id,
+        "entropy_composition": &p.exec_entropy_composition,
+        "entry_hash": &ehash,
+        "executed_at": &p.executed_at,
+        "fair_pick_version": "0.2.0",
+        "jcs_version": "sha256-jcs-v1",
+        "lock_receipt_hash": lock_receipt_hash(&lock_jcs),
+        "merkle_algorithm": "sha256-pairwise-v1",
+        "operator_id": "11111111-1111-1111-1111-111111111111",
+        "operator_slug": "acme-prizes",
+        "results": &results,
+        "schema_version": &p.exec_schema,
+        "seed": hex::encode(seed_bytes),
+        "sequence": 1,
+        "signature_algorithm": "ed25519",
+        "signing_key_id": &kid,
+        "wallop_core_version": "0.29.0",
+        "weather_fallback_reason": &p.weather_fallback_reason,
+        "weather_observation_time": &p.weather_observation_time,
+        "weather_station": &p.exec_station,
+        "weather_value": &p.weather_value
+    });
+    // A schema 4 execution receipt stays the legacy shape.
+    if p.exec_schema == "5" {
+        let map = exec.as_object_mut().expect("exec is an object");
+        map.insert(
+            "freq_fallback_reason".into(),
+            serde_json::json!(p.freq_fallback_reason),
+        );
+        map.insert("freq_value".into(), serde_json::json!(p.freq_value));
+    }
+    let exec_jcs = exec.to_string();
+    let exec_sig_hex = hex::encode(sk.sign(exec_jcs.as_bytes()).to_bytes());
+
+    let mut entropy = serde_json::Map::new();
+    entropy.insert("drand_round".into(), serde_json::json!(p.drand_round));
+    entropy.insert(
+        "drand_randomness".into(),
+        serde_json::json!(&p.drand_randomness),
+    );
+    entropy.insert(
+        "drand_signature".into(),
+        serde_json::json!(&p.drand_signature),
+    );
+    entropy.insert("drand_chain_hash".into(), serde_json::json!(chain));
+    if let Some(w) = &p.weather_value {
+        entropy.insert("weather_value".into(), serde_json::json!(w));
+    }
+    if let Some(f) = &p.freq_value {
+        entropy.insert("freq_value".into(), serde_json::json!(f));
+    }
+
+    let bundle = serde_json::json!({
+        "version": 1,
+        "draw_id": draw_id,
+        "entries": entries.iter().map(|e| serde_json::json!({"uuid": &e.id, "weight": e.weight})).collect::<Vec<_>>(),
+        "results": winners.iter().map(|w| serde_json::json!({"entry_id": &w.entry_id, "position": w.position})).collect::<Vec<_>>(),
+        "entropy": entropy,
+        "lock_receipt": { "payload_jcs": &lock_jcs, "signature_hex": &lock_sig_hex },
+        "execution_receipt": { "payload_jcs": &exec_jcs, "signature_hex": &exec_sig_hex }
+    })
+    .to_string();
+    (bundle, pk_hex, kid)
+}
+
+/// Every negative case the shared `proof-bundle-v6-negative.json` vector
+/// must carry, as `(name, expected_failing_steps)`. Steps are in their
+/// snake_case wire form. `v6_negative_bundle` builds each one. Each set
+/// is every step that fails: a `weather_time` that is not a whole calendar
+/// hour is also not the round's observation hour, and a reason other than
+/// `no_observation_by_deadline` is also outside the window's fallback rule.
+#[doc(hidden)]
+pub const V6_NEGATIVE_CASES: &[(&str, &[&str])] = &[
+    (
+        "weather_time_not_whole_hour",
+        &["bundle_shape", "weather_observation_window"],
+    ),
+    (
+        "weather_time_not_calendar",
+        &["bundle_shape", "weather_observation_window"],
+    ),
+    (
+        "weather_time_not_derived_from_round",
+        &["weather_observation_window"],
+    ),
+    (
+        "locked_at_after_latest_lock_at",
+        &["weather_observation_window"],
+    ),
+    (
+        "round_published_before_lock",
+        &["weather_observation_window", "drand_bls_signature"],
+    ),
+    (
+        "lock_station_not_middle_wallop",
+        &["bundle_shape", "receipt_field_consistency"],
+    ),
+    (
+        "exec_station_not_middle_wallop",
+        &["bundle_shape", "receipt_field_consistency"],
+    ),
+    (
+        "exec_station_wittering",
+        &["bundle_shape", "receipt_field_consistency"],
+    ),
+    (
+        "observation_time_not_weather_time",
+        &["weather_observation_window"],
+    ),
+    ("partial_fallback_value_null_reason_null", OUT_OF_TABLE),
+    ("partial_fallback_reason_set_value_set", OUT_OF_TABLE),
+    ("value_grammar_minus_zero", &["bundle_shape"]),
+    ("value_grammar_leading_zero", &["bundle_shape"]),
+    ("value_grammar_three_parts", &["bundle_shape"]),
+    ("value_out_of_bounds", &["bundle_shape"]),
+    (
+        "v5_reason_in_v6_exec",
+        &[
+            "bundle_shape",
+            "weather_observation_window",
+            "receipt_field_consistency",
+            "seed_recomputation",
+        ],
+    ),
+    (
+        "wrong_entropy_composition",
+        &[
+            "bundle_shape",
+            "weather_observation_window",
+            "receipt_field_consistency",
+        ],
+    ),
+    (
+        "wrong_entropy_composition_exec",
+        &[
+            "bundle_shape",
+            "weather_observation_window",
+            "receipt_field_consistency",
+        ],
+    ),
+    (
+        "lock_v6_with_exec_v4",
+        &[
+            "bundle_shape",
+            "weather_observation_window",
+            "receipt_field_consistency",
+        ],
+    ),
+    (
+        "lock_v5_with_exec_v5",
+        &[
+            "bundle_shape",
+            "weather_observation_window",
+            "receipt_field_consistency",
+        ],
+    ),
+    ("inline_key_on_lock_v6", &["bundle_shape"]),
+    ("inline_key_on_exec_v5", &["bundle_shape"]),
+    ("executed_before_round_published", &["drand_bls_signature"]),
+    ("weather_with_freq_value", OUT_OF_TABLE),
+    ("weather_with_freq_fallback_reason", OUT_OF_TABLE),
+    ("freq_fallback_value_null_reason_null", OUT_OF_TABLE),
+    ("freq_value_without_weather_fallback_reason", OUT_OF_TABLE),
+    ("freq_start_plus_15s", &["weather_observation_window"]),
+    (
+        "freq_start_plus_15s_on_freq_fallback",
+        &["weather_observation_window"],
+    ),
+    (
+        "freq_start_off_grid",
+        &["bundle_shape", "weather_observation_window"],
+    ),
+    (
+        "freq_start_null",
+        &[
+            "bundle_shape",
+            "lock_signature",
+            "weather_observation_window",
+        ],
+    ),
+    (
+        "freq_start_missing",
+        &[
+            "bundle_shape",
+            "lock_signature",
+            "weather_observation_window",
+        ],
+    ),
+    (
+        "freq_bundle_relabelled_landobs",
+        &[
+            "bundle_shape",
+            "lock_signature",
+            "weather_observation_window",
+            "receipt_field_consistency",
+            "seed_recomputation",
+        ],
+    ),
+];
+
+/// What an execution receipt outside the three-state table fails: the
+/// window and field-consistency steps, and the seed step, which enforces
+/// the table itself rather than choosing a seed.
+const OUT_OF_TABLE: &[&str] = &[
+    "weather_observation_window",
+    "receipt_field_consistency",
+    "seed_recomputation",
+];
+
+/// The signed bundle for one case in `V6_NEGATIVE_CASES`. Each case changes
+/// `V6Params::weather()` (or `freq_fallback()` / `fallback()`) and
+/// re-signs, so exactly the steps listed in `V6_NEGATIVE_CASES` fail;
+/// `freq_bundle_relabelled_landobs` relabels a grid-frequency bundle
+/// instead. Returns `(bundle_json, public_key_hex, signing_key_id)`.
+#[doc(hidden)]
+pub fn v6_negative_bundle(name: &str) -> (String, String, String) {
+    let wt = landobs_v1::weather_time_for_round(BEACON_V6_ROUND)
+        .expect("fixture round has a weather time");
+    let published = crate::drand::quicknet_round_time(BEACON_V6_ROUND)
+        .expect("fixture round has a publish time");
+    let latest_lock = |weather_time: i64| {
+        landobs_v1::latest_lock_at(weather_time).expect("fixture weather time has a lock time")
+    };
+    let at = |secs: i64| format_canonical(secs, 0);
+    let with_weather_time = |s: String| V6Params {
+        weather_time: s.clone(),
+        weather_observation_time: Some(s),
+        ..V6Params::weather()
+    };
+    let freq_start =
+        freq_v1::freq_start_for_round(BEACON_V6_ROUND).expect("fixture round has a window start");
+    let forecast_tag = crate::protocol::receipts::ENTROPY_COMPOSITION.to_string();
+    let base = V6Params::weather();
+    let p = match name {
+        "weather_time_not_whole_hour" => with_weather_time(at(wt + 1800)),
+        "weather_time_not_calendar" => {
+            with_weather_time(format!("{}:60:00.000000Z", &at(wt - 3600)[..13]))
+        }
+        "weather_time_not_derived_from_round" => V6Params {
+            locked_at: at(latest_lock(wt - 3600) - 60),
+            ..with_weather_time(at(wt - 3600))
+        },
+        "locked_at_after_latest_lock_at" => V6Params {
+            locked_at: format_canonical(latest_lock(wt), 1),
+            ..base
+        },
+        "round_published_before_lock" => V6Params {
+            locked_at: at(published + 1),
+            ..base
+        },
+        "lock_station_not_middle_wallop" => V6Params {
+            lock_station: "wmo-03462".into(),
+            ..base
+        },
+        "exec_station_not_middle_wallop" => V6Params {
+            exec_station: Some("wmo-03772".into()),
+            ..base
+        },
+        "exec_station_wittering" => V6Params {
+            exec_station: Some("wmo-03462".into()),
+            ..base
+        },
+        "observation_time_not_weather_time" => V6Params {
+            weather_observation_time: Some(at(wt + 3600)),
+            ..base
+        },
+        "partial_fallback_value_null_reason_null" => V6Params {
+            weather_fallback_reason: None,
+            ..V6Params::fallback()
+        },
+        "partial_fallback_reason_set_value_set" => V6Params {
+            weather_fallback_reason: Some(landobs_v1::FALLBACK_NO_OBSERVATION.into()),
+            ..base
+        },
+        "value_grammar_minus_zero" => V6Params {
+            weather_value: Some("-0;1021;51;4114".into()),
+            ..base
+        },
+        "value_grammar_leading_zero" => V6Params {
+            weather_value: Some("0184;1021;51;4114".into()),
+            ..base
+        },
+        "value_grammar_three_parts" => V6Params {
+            weather_value: Some("184;1021;51".into()),
+            ..base
+        },
+        "value_out_of_bounds" => V6Params {
+            weather_value: Some("601;1021;51;4114".into()),
+            ..base
+        },
+        "v5_reason_in_v6_exec" => V6Params {
+            weather_fallback_reason: Some("unreachable".into()),
+            ..V6Params::fallback()
+        },
+        "wrong_entropy_composition" => V6Params {
+            lock_entropy_composition: forecast_tag.clone(),
+            exec_entropy_composition: forecast_tag,
+            ..base
+        },
+        "wrong_entropy_composition_exec" => V6Params {
+            exec_entropy_composition: forecast_tag,
+            ..base
+        },
+        "lock_v6_with_exec_v4" => V6Params {
+            exec_schema: "4".into(),
+            exec_entropy_composition: forecast_tag,
+            ..base
+        },
+        "lock_v5_with_exec_v5" => V6Params {
+            lock_schema: "5".into(),
+            lock_entropy_composition: forecast_tag,
+            ..base
+        },
+        "executed_before_round_published" => V6Params {
+            executed_at: at(published - 1),
+            ..base
+        },
+        "weather_with_freq_value" => V6Params {
+            freq_value: Some(V6_FREQ_VALUE.into()),
+            ..base
+        },
+        "weather_with_freq_fallback_reason" => V6Params {
+            freq_fallback_reason: Some(freq_v1::FALLBACK_NO_FREQUENCY.into()),
+            ..base
+        },
+        "freq_fallback_value_null_reason_null" => V6Params {
+            freq_value: None,
+            ..V6Params::freq_fallback()
+        },
+        "freq_value_without_weather_fallback_reason" => V6Params {
+            weather_fallback_reason: None,
+            ..V6Params::freq_fallback()
+        },
+        "freq_start_plus_15s" => V6Params {
+            freq_start: Some(at(freq_start + 15)),
+            ..base
+        },
+        "freq_start_plus_15s_on_freq_fallback" => V6Params {
+            freq_start: Some(at(freq_start + 15)),
+            ..V6Params::freq_fallback()
+        },
+        "freq_start_off_grid" => V6Params {
+            freq_start: Some(at(freq_start + 1)),
+            ..base
+        },
+        "freq_start_null" => V6Params {
+            freq_start: None,
+            ..base
+        },
+        "freq_start_missing" => V6Params {
+            omit_freq_start: true,
+            ..base
+        },
+        "freq_bundle_relabelled_landobs" => {
+            return build_freq_bundle(&FreqParams {
+                lock_entropy_composition: landobs_v1::ENTROPY_COMPOSITION.into(),
+                exec_entropy_composition: landobs_v1::ENTROPY_COMPOSITION.into(),
+                ..FreqParams::value()
+            });
+        }
+        "inline_key_on_lock_v6" | "inline_key_on_exec_v5" => {
+            let (json, pk_hex, kid) = build_v6_bundle(&base);
+            let mut v: serde_json::Value =
+                serde_json::from_str(&json).expect("fixture bundle is JSON");
+            let (wrapper, field) = if name == "inline_key_on_lock_v6" {
+                ("lock_receipt", "operator_public_key_hex")
+            } else {
+                ("execution_receipt", "infrastructure_public_key_hex")
+            };
+            v[wrapper][field] = serde_json::json!(pk_hex.clone());
+            return (v.to_string(), pk_hex, kid);
+        }
+        other => panic!("unknown v6 negative case {other}"),
+    };
+    build_v6_bundle(&p)
+}
+
+/// Apply `edit` to the signed execution receipt payload of bundle `json`
+/// and re-sign it with the test signing key, so the execution signature
+/// still verifies. Returns the whole bundle as a JSON value.
+#[doc(hidden)]
+pub fn resign_exec(json: &str, edit: impl FnOnce(&mut serde_json::Value)) -> serde_json::Value {
+    let mut bundle: serde_json::Value = serde_json::from_str(json).unwrap();
+    let mut exec: serde_json::Value =
+        serde_json::from_str(bundle["execution_receipt"]["payload_jcs"].as_str().unwrap()).unwrap();
+    edit(&mut exec);
+    let exec_jcs = exec.to_string();
+    let sig_hex = hex::encode(test_signing_key().sign(exec_jcs.as_bytes()).to_bytes());
+    bundle["execution_receipt"]["payload_jcs"] = serde_json::json!(exec_jcs);
+    bundle["execution_receipt"]["signature_hex"] = serde_json::json!(sig_hex);
+    bundle
+}
+
 /// Test-only resolver that maps a fixed `signing_key_id` to a fixed public
 /// key, regardless of `KeyClass`. Used by tests asserting the
 /// resolver-driven verification path on v5/v4 bundles.
@@ -298,7 +970,7 @@ impl MockResolver {
         Self {
             key_id: key_id.into(),
             public_key,
-            inserted_at: InsertedAt::At("2026-01-01T00:00:00.000000Z".into()),
+            inserted_at: InsertedAt::At(KEY_INSERTED_AT.into()),
         }
     }
 }
@@ -315,4 +987,413 @@ impl KeyResolver for MockResolver {
             Err(ResolutionError::KeyNotFound)
         }
     }
+}
+
+/// Quicknet round 33_068_212 (published 2026-10-14T20:00:00Z), the round
+/// core's grid-frequency tests use.
+#[doc(hidden)]
+pub const BEACON_FREQ_ROUND: u64 = 33_068_212;
+#[doc(hidden)]
+pub const BEACON_FREQ_SIGNATURE: &str = "b6541e41bb68ff318e8bd74b9f6e168ae6424476c432241420c38427df58c6ef33fe009ce202a7101120ab481702fddf";
+#[doc(hidden)]
+pub const BEACON_FREQ_RANDOMNESS: &str =
+    "140117383b03a0c0c7a899a32b8cbd2ffff9e2569504037c358ee8c7c2efe2fd";
+
+/// Inputs for a grid-frequency bundle. Defaults use quicknet round
+/// 33_068_212 (2026-10-14T20:00:00Z) and its real beacon.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct FreqParams {
+    pub lock_entropy_composition: String,
+    pub exec_entropy_composition: String,
+    pub drand_round: u64,
+    pub drand_signature: String,
+    pub drand_randomness: String,
+    pub locked_at: String,
+    pub freq_start: String,
+    pub executed_at: String,
+    pub lock_weather_station: Option<String>,
+    pub exec_weather_value: Option<String>,
+    pub freq_value: Option<String>,
+    pub freq_fallback_reason: Option<String>,
+    /// When set, the seed is computed from this instead of the signed value,
+    /// so the seed step can be made to fail on its own.
+    pub seed_from: Option<Option<String>>,
+    /// The v6 hardening, varied by the tests: both receipts'
+    /// `fair_pick_version`, the exec `operator_slug`, and the lock
+    /// `commitment_hash` (None: the entry hash, as v6 requires).
+    pub lock_fair_pick_version: String,
+    pub exec_fair_pick_version: String,
+    pub exec_operator_slug: String,
+    pub commitment_hash: Option<String>,
+}
+
+impl FreqParams {
+    /// A draw with a grid-frequency value.
+    pub fn value() -> Self {
+        Self {
+            lock_entropy_composition: crate::protocol::freq_v1::ENTROPY_COMPOSITION.into(),
+            exec_entropy_composition: crate::protocol::freq_v1::ENTROPY_COMPOSITION.into(),
+            drand_round: BEACON_FREQ_ROUND,
+            drand_signature: BEACON_FREQ_SIGNATURE.into(),
+            drand_randomness: BEACON_FREQ_RANDOMNESS.into(),
+            locked_at: "2026-10-14T19:50:00.123456Z".into(),
+            freq_start: "2026-10-14T19:54:00.000000Z".into(),
+            executed_at: "2026-10-14T20:00:05.000000Z".into(),
+            lock_weather_station: None,
+            exec_weather_value: None,
+            freq_value: Some("50012;50018;50012;49983;49980;49953;49912;49883".into()),
+            freq_fallback_reason: None,
+            seed_from: None,
+            lock_fair_pick_version: "0.1.0".into(),
+            exec_fair_pick_version: "0.1.0".into(),
+            exec_operator_slug: "acme-prizes".into(),
+            commitment_hash: None,
+        }
+    }
+
+    /// A draw that fell back to drand alone.
+    pub fn fallback() -> Self {
+        Self {
+            freq_value: None,
+            freq_fallback_reason: Some(crate::protocol::freq_v1::FALLBACK_NO_FREQUENCY.into()),
+            ..Self::value()
+        }
+    }
+}
+
+/// Build and sign a resolver-driven grid-frequency bundle from `p`, with
+/// the same envelope as `build_v6_bundle`. Returns `(bundle_json,
+/// public_key_hex, signing_key_id)`.
+#[doc(hidden)]
+pub fn build_freq_bundle(p: &FreqParams) -> (String, String, String) {
+    let sk = test_signing_key();
+    let pk_bytes: [u8; 32] = sk.verifying_key().to_bytes();
+    let pk_hex = hex::encode(pk_bytes);
+    let kid = crate::protocol::crypto::key_id(&pk_bytes);
+    let entries = v6_entries();
+    let draw_id = "22222222-2222-2222-2222-222222222222";
+    let (ehash, _) = entry_hash(draw_id, &entries);
+    let seed_input = p.seed_from.clone().unwrap_or_else(|| p.freq_value.clone());
+    let (seed_bytes, _) = match seed_input.as_deref() {
+        Some(v) => crate::protocol::compute_seed_freq(&ehash, &p.drand_randomness, v),
+        None => compute_seed_drand_only(&ehash, &p.drand_randomness),
+    };
+    let winners = draw(&entries, &seed_bytes, 2).unwrap();
+    let results: Vec<String> = winners.iter().map(|w| w.entry_id.clone()).collect();
+    let chain = crate::drand::QUICKNET_CHAIN_HASH;
+
+    let lock_jcs = serde_json::json!({
+        "commitment_hash": p.commitment_hash.clone().unwrap_or_else(|| ehash.clone()),
+        "drand_chain": chain,
+        "drand_round": p.drand_round,
+        "draw_id": draw_id,
+        "entropy_composition": &p.lock_entropy_composition,
+        "entry_hash": &ehash,
+        "fair_pick_version": &p.lock_fair_pick_version,
+        "freq_start": &p.freq_start,
+        "jcs_version": "sha256-jcs-v1",
+        "locked_at": &p.locked_at,
+        "operator_id": "11111111-1111-1111-1111-111111111111",
+        "operator_slug": "acme-prizes",
+        "schema_version": "6",
+        "sequence": 1,
+        "signature_algorithm": "ed25519",
+        "signing_key_id": &kid,
+        "wallop_core_version": "0.29.0",
+        "weather_station": &p.lock_weather_station,
+        "weather_time": null,
+        "winner_count": 2
+    })
+    .to_string();
+    let lock_sig_hex = hex::encode(sk.sign(lock_jcs.as_bytes()).to_bytes());
+
+    let exec_jcs = serde_json::json!({
+        "drand_chain": chain,
+        "drand_randomness": &p.drand_randomness,
+        "drand_round": p.drand_round,
+        "drand_signature": &p.drand_signature,
+        "drand_signature_algorithm": "bls12_381_g2",
+        "draw_id": draw_id,
+        "entropy_composition": &p.exec_entropy_composition,
+        "entry_hash": &ehash,
+        "executed_at": &p.executed_at,
+        "fair_pick_version": &p.exec_fair_pick_version,
+        "freq_fallback_reason": &p.freq_fallback_reason,
+        "freq_value": &p.freq_value,
+        "jcs_version": "sha256-jcs-v1",
+        "lock_receipt_hash": lock_receipt_hash(&lock_jcs),
+        "merkle_algorithm": "sha256-pairwise-v1",
+        "operator_id": "11111111-1111-1111-1111-111111111111",
+        "operator_slug": &p.exec_operator_slug,
+        "results": &results,
+        "schema_version": "5",
+        "seed": hex::encode(seed_bytes),
+        "sequence": 1,
+        "signature_algorithm": "ed25519",
+        "signing_key_id": &kid,
+        "wallop_core_version": "0.29.0",
+        "weather_fallback_reason": null,
+        "weather_observation_time": null,
+        "weather_station": null,
+        "weather_value": &p.exec_weather_value
+    })
+    .to_string();
+    let exec_sig_hex = hex::encode(sk.sign(exec_jcs.as_bytes()).to_bytes());
+
+    let mut entropy = serde_json::Map::new();
+    entropy.insert("drand_round".into(), serde_json::json!(p.drand_round));
+    entropy.insert(
+        "drand_randomness".into(),
+        serde_json::json!(&p.drand_randomness),
+    );
+    entropy.insert(
+        "drand_signature".into(),
+        serde_json::json!(&p.drand_signature),
+    );
+    entropy.insert("drand_chain_hash".into(), serde_json::json!(chain));
+    if let Some(v) = &p.freq_value {
+        entropy.insert("freq_value".into(), serde_json::json!(v));
+    }
+    if let Some(w) = &p.exec_weather_value {
+        entropy.insert("weather_value".into(), serde_json::json!(w));
+    }
+
+    let bundle = serde_json::json!({
+        "version": 1,
+        "draw_id": draw_id,
+        "entries": entries.iter().map(|e| serde_json::json!({"uuid": &e.id, "weight": e.weight})).collect::<Vec<_>>(),
+        "results": winners.iter().map(|w| serde_json::json!({"entry_id": &w.entry_id, "position": w.position})).collect::<Vec<_>>(),
+        "entropy": entropy,
+        "lock_receipt": { "payload_jcs": &lock_jcs, "signature_hex": &lock_sig_hex },
+        "execution_receipt": { "payload_jcs": &exec_jcs, "signature_hex": &exec_sig_hex }
+    })
+    .to_string();
+    (bundle, pk_hex, kid)
+}
+
+#[cfg(test)]
+mod beacon_tests {
+    use super::*;
+    use crate::drand::{QUICKNET_CHAIN_HASH, verify_drand_round};
+
+    #[test]
+    fn frequency_fixture_beacon_is_genuine() {
+        assert!(
+            verify_drand_round(
+                QUICKNET_CHAIN_HASH,
+                BEACON_FREQ_ROUND,
+                BEACON_FREQ_SIGNATURE,
+                BEACON_FREQ_RANDOMNESS
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            crate::drand::quicknet_round_time(BEACON_FREQ_ROUND),
+            Some(1_792_008_000)
+        );
+    }
+
+    #[test]
+    fn fixture_beacons_are_genuine() {
+        assert!(
+            verify_drand_round(
+                QUICKNET_CHAIN_HASH,
+                BEACON_ROUND,
+                BEACON_SIGNATURE,
+                BEACON_RANDOMNESS
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_drand_round(
+                QUICKNET_CHAIN_HASH,
+                BEACON_2_ROUND,
+                BEACON_2_SIGNATURE,
+                BEACON_2_RANDOMNESS
+            )
+            .is_ok()
+        );
+    }
+}
+
+#[cfg(test)]
+mod fixture_tests {
+    use super::*;
+    use crate::bundle::ProofBundle;
+    use crate::protocol::landobs_v1;
+    use crate::verify_steps::{VerifierMode, verify_bundle, verify_bundle_with};
+
+    fn entries() -> Vec<Entry> {
+        ["a", "b", "c"]
+            .iter()
+            .map(|id| Entry {
+                id: (*id).into(),
+                weight: 1,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn drand_only_bundle_is_valid() {
+        let json = build_valid_bundle(&entries(), None, 2);
+        let report = verify_bundle(&ProofBundle::from_json(&json).unwrap());
+        assert!(report.passed(), "steps: {:?}", report.steps);
+    }
+
+    #[test]
+    fn drand_only_v5_bundle_is_valid() {
+        let (json, pk_hex, kid) = build_valid_v5_bundle(&entries(), None, 2);
+        let pk: [u8; 32] = hex::decode(pk_hex).unwrap().try_into().unwrap();
+        let resolver = MockResolver::new(kid, pk);
+        let report = verify_bundle_with(
+            &ProofBundle::from_json(&json).unwrap(),
+            &resolver,
+            VerifierMode::Attestable,
+        );
+        assert!(report.passed(), "steps: {:?}", report.steps);
+    }
+
+    #[test]
+    fn v6_fixture_beacon_is_genuine() {
+        assert!(
+            crate::drand::verify_drand_round(
+                crate::drand::QUICKNET_CHAIN_HASH,
+                BEACON_V6_ROUND,
+                BEACON_V6_SIGNATURE,
+                BEACON_V6_RANDOMNESS
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn v6_fixture_timestamps_follow_the_schedule() {
+        use crate::verify_steps::chrono_parse_canonical;
+        let p = V6Params::weather();
+        let published = crate::drand::quicknet_round_time(p.drand_round).unwrap();
+        let wt = landobs_v1::parse_weather_time(&p.weather_time).unwrap();
+        assert_eq!(Some(wt), landobs_v1::weather_time_for_round(p.drand_round));
+        let locked = chrono_parse_canonical(&p.locked_at).unwrap().timestamp();
+        assert!(locked <= landobs_v1::latest_lock_at(wt).unwrap());
+        assert!(locked < published, "the round must publish after the lock");
+        let executed = chrono_parse_canonical(&p.executed_at).unwrap().timestamp();
+        assert!(executed >= published);
+        assert_eq!(
+            p.weather_observation_time.as_deref(),
+            Some(p.weather_time.as_str())
+        );
+        assert_eq!(p.weather_time, "2026-10-01T19:00:00.000000Z");
+        assert_eq!(p.locked_at, "2026-10-01T18:13:00.000000Z");
+        assert_eq!(p.executed_at, "2026-10-01T20:00:05.000000Z");
+    }
+
+    #[test]
+    fn v6_fixture_receipts_are_signed_and_resolver_driven() {
+        let (json, pk_hex, kid) = build_v6_bundle(&V6Params::weather());
+        let bundle: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let pk: [u8; 32] = hex::decode(&pk_hex).unwrap().try_into().unwrap();
+        assert_eq!(crate::protocol::crypto::key_id(&pk), kid);
+        for wrapper in ["lock_receipt", "execution_receipt"] {
+            let w = &bundle[wrapper];
+            assert!(w.get("operator_public_key_hex").is_none());
+            assert!(w.get("infrastructure_public_key_hex").is_none());
+            let sig: [u8; 64] = hex::decode(w["signature_hex"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap();
+            assert!(crate::protocol::crypto::verify_receipt(
+                w["payload_jcs"].as_str().unwrap().as_bytes(),
+                &sig,
+                &pk
+            ));
+        }
+        let lock: serde_json::Value =
+            serde_json::from_str(bundle["lock_receipt"]["payload_jcs"].as_str().unwrap()).unwrap();
+        assert_eq!(lock["schema_version"], "6");
+        assert_eq!(lock["entropy_composition"], landobs_v1::ENTROPY_COMPOSITION);
+        assert_eq!(lock["weather_station"], "wmo-03749");
+    }
+
+    #[test]
+    fn v6_fallback_fixture_has_no_weather() {
+        let (json, _, _) = build_v6_bundle(&V6Params::fallback());
+        let bundle: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let exec: serde_json::Value =
+            serde_json::from_str(bundle["execution_receipt"]["payload_jcs"].as_str().unwrap())
+                .unwrap();
+        assert!(exec["weather_value"].is_null());
+        assert!(exec["weather_observation_time"].is_null());
+        assert_eq!(
+            exec["weather_fallback_reason"],
+            "no_observation_by_deadline"
+        );
+        assert_eq!(exec["weather_station"], "wmo-03749");
+        assert!(bundle["entropy"].get("weather_value").is_none());
+    }
+}
+
+/// A lock receipt v6 payload under the grid-frequency tag (20 fields),
+/// matching core's frequency protocol test: round 33_068_212 publishes at
+/// 2026-10-14T20:00:00Z, so its window starts at 19:54:00Z.
+#[doc(hidden)]
+pub fn freq_lock_json() -> serde_json::Value {
+    serde_json::json!({
+        "commitment_hash": "ab".repeat(32),
+        "drand_chain": crate::drand::QUICKNET_CHAIN_HASH,
+        "drand_round": 33_068_212u64,
+        "draw_id": "22222222-2222-2222-2222-222222222222",
+        "entropy_composition": crate::protocol::freq_v1::ENTROPY_COMPOSITION,
+        "entry_hash": "ab".repeat(32),
+        "fair_pick_version": "0.1.0",
+        "freq_start": "2026-10-14T19:54:00.000000Z",
+        "jcs_version": "sha256-jcs-v1",
+        "locked_at": "2026-10-14T19:50:00.123456Z",
+        "operator_id": "11111111-1111-1111-1111-111111111111",
+        "operator_slug": "acme-prizes",
+        "schema_version": "6",
+        "sequence": 1,
+        "signature_algorithm": "ed25519",
+        "signing_key_id": "deadbeef",
+        "wallop_core_version": "0.29.0",
+        "weather_station": null,
+        "weather_time": null,
+        "winner_count": 2
+    })
+}
+
+/// An execution receipt v5 payload under the grid-frequency tag (28
+/// fields), pairing with `freq_lock_json`.
+#[doc(hidden)]
+pub fn freq_exec_json() -> serde_json::Value {
+    serde_json::json!({
+        "drand_chain": crate::drand::QUICKNET_CHAIN_HASH,
+        "drand_randomness": "140117383b03a0c0c7a899a32b8cbd2ffff9e2569504037c358ee8c7c2efe2fd",
+        "drand_round": 33_068_212u64,
+        "drand_signature": "b6541e41bb68ff318e8bd74b9f6e168ae6424476c432241420c38427df58c6ef33fe009ce202a7101120ab481702fddf",
+        "drand_signature_algorithm": "bls12_381_g2",
+        "draw_id": "22222222-2222-2222-2222-222222222222",
+        "entropy_composition": crate::protocol::freq_v1::ENTROPY_COMPOSITION,
+        "entry_hash": "ab".repeat(32),
+        "executed_at": "2026-10-14T20:00:05.000000Z",
+        "fair_pick_version": "0.1.0",
+        "freq_fallback_reason": null,
+        "freq_value": "50018;50012;49983;49980;49953;49912;49883;49887",
+        "jcs_version": "sha256-jcs-v1",
+        "lock_receipt_hash": "cd".repeat(32),
+        "merkle_algorithm": "sha256-pairwise-v1",
+        "operator_id": "11111111-1111-1111-1111-111111111111",
+        "operator_slug": "acme-prizes",
+        "results": ["33333333-3333-3333-3333-333333333333"],
+        "schema_version": "5",
+        "seed": "ef".repeat(32),
+        "sequence": 1,
+        "signature_algorithm": "ed25519",
+        "signing_key_id": "cafebabe",
+        "wallop_core_version": "0.29.0",
+        "weather_fallback_reason": null,
+        "weather_observation_time": null,
+        "weather_station": null,
+        "weather_value": null
+    })
 }

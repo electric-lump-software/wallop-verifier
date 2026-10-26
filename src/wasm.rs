@@ -69,6 +69,50 @@ pub fn compute_seed_drand_only_wasm(
     serde_wasm_bindgen::to_value(&result).map_err(|e| JsError::new(&e.to_string()))
 }
 
+/// WASM entry point for the grid-frequency seed.
+#[wasm_bindgen]
+pub fn compute_seed_freq_wasm(
+    entry_hash: &str,
+    drand_randomness: &str,
+    freq_value: &str,
+) -> Result<JsValue, JsError> {
+    let (seed_bytes, jcs) = protocol::compute_seed_freq(entry_hash, drand_randomness, freq_value);
+
+    let result = serde_json::json!({
+        "seed": hex::encode(seed_bytes),
+        "jcs": jcs,
+    });
+    serde_wasm_bindgen::to_value(&result).map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// WASM entry point for verifying a grid-frequency draw's winners. Choose
+/// it from the receipts' `entropy_composition`, never from which value is
+/// present.
+#[wasm_bindgen]
+pub fn verify_freq_wasm(
+    draw_id: &str,
+    entries_js: JsValue,
+    drand_randomness: &str,
+    freq_value: Option<String>,
+    count: u32,
+    expected_results_js: JsValue,
+) -> Result<bool, JsError> {
+    let entries: Vec<Entry> =
+        serde_wasm_bindgen::from_value(entries_js).map_err(|e| JsError::new(&e.to_string()))?;
+
+    let expected: Vec<Winner> = serde_wasm_bindgen::from_value(expected_results_js)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+
+    Ok(crate::verify_freq(
+        draw_id,
+        &entries,
+        drand_randomness,
+        freq_value.as_deref(),
+        count,
+        &expected,
+    ))
+}
+
 /// WASM entry point for full verification pipeline.
 #[wasm_bindgen]
 pub fn verify_wasm(
@@ -161,6 +205,32 @@ pub fn receipt_schema_version_wasm(payload_jcs: &str) -> Option<String> {
     protocol::receipts::receipt_schema_version(payload_jcs)
 }
 
+/// The state of an execution receipt under the observation-weather tag,
+/// read from its signed payload (`payload_jcs`) by the same three-state
+/// table the verifier enforces: `"weather"`, `"frequency"` or
+/// `"drand_only"`. Any other combination of the five fields, or a payload
+/// that is not a JSON object, is an error. A page picks its seed formula
+/// from this, never from which field happens to be present.
+///
+/// This selects a seed formula; it is not a check. It does not verify
+/// signatures, the tag, the station or `freq_start`. Only
+/// `verify_bundle_*` decides whether a bundle is valid, and a page must
+/// show no seed match unless that gate passes.
+#[wasm_bindgen]
+pub fn landobs_exec_state_wasm(exec_payload_jcs: &str) -> Result<String, JsError> {
+    use protocol::landobs_v1::{ExecState, exec_state};
+    let exec: serde_json::Value = serde_json::from_str(exec_payload_jcs)
+        .map_err(|e| JsError::new(&format!("exec receipt is not JSON: {e}")))?;
+    if !exec.is_object() {
+        return Err(JsError::new("exec receipt is not a JSON object"));
+    }
+    match exec_state(&exec).map_err(|e| JsError::new(&e))? {
+        ExecState::Weather(_) => Ok("weather".into()),
+        ExecState::Freq(_) => Ok("frequency".into()),
+        ExecState::DrandOnly => Ok("drand_only".into()),
+    }
+}
+
 /// WASM entry point for merkle_root.
 #[wasm_bindgen]
 pub fn merkle_root_wasm(leaves_js: JsValue) -> Result<String, JsError> {
@@ -193,11 +263,44 @@ pub fn anchor_root_wasm(op_root_hex: &str, exec_root_hex: &str) -> Result<String
     )))
 }
 
-/// WASM entry point for verify_full.
+/// WASM entry point for the drand check on its own, so the proof page can
+/// show it as a separate line. True iff the chain is the pinned quicknet
+/// chain, the BLS signature is valid for `round`, and
+/// sha256(signature) == randomness.
+///
+/// Pass every value from the signed execution receipt (`drand_chain`,
+/// `drand_round`, `drand_signature`, `drand_randomness`), never from
+/// unsigned page data such as the bundle's `entropy` block: a genuine
+/// beacon for some other round proves nothing about this draw.
+///
+/// Hex inputs must be lower case, as the receipt carries them. The chain
+/// hash and randomness are compared exactly, so upper case is rejected
+/// (fails closed).
+///
+/// Never a gate: it does not check that the beacon belongs to this draw,
+/// fed its seed, or published after the lock. The gate is
+/// `verify_bundle_with_resolved_keys_wasm`.
+#[wasm_bindgen]
+pub fn verify_drand_wasm(
+    chain_hash: &str,
+    round: u64,
+    signature_hex: &str,
+    randomness_hex: &str,
+) -> bool {
+    crate::drand::verify_drand_round(chain_hash, round, signature_hex, randomness_hex).is_ok()
+}
+
+/// WASM entry point for `verify_full`.
+///
+/// **Deprecated: it checks less than the step pipeline.** It is not a
+/// gate; the proof page gates on `verify_bundle_with_resolved_keys_wasm`.
+/// See `verify_full` for exactly what it does and does not check.
 ///
 /// `winner_count` is extracted from the signed lock receipt, not passed externally.
+#[deprecated(note = "checks less than verify_bundle_with; use verify_bundle_with")]
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
+#[allow(deprecated)] // wraps verify_full
 pub fn verify_full_wasm(
     lock_receipt_jcs: &str,
     lock_signature_hex: &str,
@@ -311,20 +414,34 @@ fn parse_verifier_mode(s: &str) -> Result<VerifierMode, JsError> {
     }
 }
 
-/// Verify a v5/v4 (resolver-driven) bundle in the browser. The JS side
-/// resolves keys out of band — from `/operator/:slug/keys` (attestable
-/// mode) or from a pinned `.well-known` document (attributable mode) —
-/// and passes them in as `resolved_keys_js`. The WASM verifier then runs
-/// `verify_bundle_with` against a synthetic resolver wrapping that array.
+/// Verify a whole v5/v4 (resolver-driven) proof bundle in the browser.
 ///
-/// The `mode` argument is recorded on the returned report and MUST match
-/// the trust root the JS side actually consulted. The verifier crate does
-/// not police this association — see `verify_bundle_with` doc.
+/// **This is the browser gate.** The proof page's green result must come
+/// from this function returning `true` in attestable mode, and from
+/// nothing else: not from `verify_drand_wasm`, not from the deprecated
+/// `verify_full_wasm`, not from the per-line checks the page shows
+/// alongside it.
 ///
-/// Returns `true` iff the bundle passes every reachable verification step
-/// under the supplied resolver and mode. Per-step diagnostics are not
-/// surfaced from this entry point yet — the WASM caller already runs its
-/// own UI; full report serialisation is a follow-up.
+/// It runs the full step pipeline (`verify_bundle_with`): the same checks
+/// as the CLI, including the drand BLS signature, the entropy binding and
+/// temporal binding.
+///
+/// Keys: the JS side fetches them out of band and passes them in as
+/// `resolved_keys_js`, an array of
+/// `{key_id, public_key_hex, key_class, inserted_at}`. For the attestable
+/// gate (`mode = "attestable"`) they must come from wallop's
+/// `/operator/:slug/keys` endpoint, never from the bundle or other page
+/// data: keys taken from the bundle being verified prove only that the
+/// bundle agrees with itself. `"attributable"` is for keys checked against
+/// a pinned `.well-known` document.
+///
+/// The `mode` argument is recorded on the report and MUST match the trust
+/// root the JS side actually consulted. The verifier crate does not police
+/// this association — see `verify_bundle_with`.
+///
+/// Returns `true` iff the report passes (`VerificationReport::passed`).
+/// A bundle that fails to parse, an unknown mode or a malformed key is an
+/// `Err`. Per-step diagnostics are not surfaced from this entry point yet.
 #[wasm_bindgen]
 pub fn verify_bundle_with_resolved_keys_wasm(
     bundle_json: &str,
@@ -355,4 +472,315 @@ pub fn verify_bundle_with_resolved_keys_wasm(
     let resolver = PreResolvedResolver { keys };
     let report = verify_bundle_with(&bundle, &resolver, parsed_mode);
     Ok(report.passed())
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_drand_export_tests {
+    use super::verify_drand_wasm;
+    use crate::_test_support::{BEACON_RANDOMNESS, BEACON_ROUND, BEACON_SIGNATURE};
+    use crate::drand::QUICKNET_CHAIN_HASH;
+    use wasm_bindgen_test::*;
+
+    #[wasm_bindgen_test]
+    fn accepts_real_beacon() {
+        assert!(verify_drand_wasm(
+            QUICKNET_CHAIN_HASH,
+            BEACON_ROUND,
+            BEACON_SIGNATURE,
+            BEACON_RANDOMNESS
+        ));
+    }
+
+    #[wasm_bindgen_test]
+    fn rejects_zero_signature() {
+        assert!(!verify_drand_wasm(
+            QUICKNET_CHAIN_HASH,
+            BEACON_ROUND,
+            &"00".repeat(48),
+            BEACON_RANDOMNESS
+        ));
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_resolved_keys_gate_tests {
+    use super::verify_bundle_with_resolved_keys_wasm;
+    use crate::_test_support::{BEACON_SIGNATURE, build_valid_v5_bundle, resign_exec};
+    use crate::Entry;
+    use serde::Serialize;
+    use wasm_bindgen::JsValue;
+    use wasm_bindgen_test::*;
+
+    fn entries() -> Vec<Entry> {
+        [
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        ]
+        .iter()
+        .map(|id| Entry {
+            id: (*id).into(),
+            weight: 1,
+        })
+        .collect()
+    }
+
+    /// The test key as the keys endpoint would list it, once per class.
+    fn resolved_keys(pk_hex: &str, key_id: &str) -> JsValue {
+        let keys = serde_json::json!([
+            {"key_id": key_id, "public_key_hex": pk_hex, "key_class": "operator",
+             "inserted_at": crate::_test_support::KEY_INSERTED_AT},
+            {"key_id": key_id, "public_key_hex": pk_hex, "key_class": "infrastructure",
+             "inserted_at": crate::_test_support::KEY_INSERTED_AT},
+        ]);
+        keys.serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+            .unwrap()
+    }
+
+    #[wasm_bindgen_test]
+    fn valid_v5_bundle_with_correct_keys_passes() {
+        let (json, pk_hex, kid) = build_valid_v5_bundle(&entries(), Some("1013"), 2);
+        assert!(
+            verify_bundle_with_resolved_keys_wasm(
+                &json,
+                resolved_keys(&pk_hex, &kid),
+                "attestable"
+            )
+            .unwrap()
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn zero_drand_signature_fails() {
+        // Zero signature in both the re-signed execution receipt and the
+        // entropy block, so only the BLS check itself can reject it.
+        let zero = "00".repeat(48);
+        let (json, pk_hex, kid) = build_valid_v5_bundle(&entries(), Some("1013"), 2);
+        let mut val = resign_exec(&json, |exec| {
+            assert_eq!(exec["drand_signature"], BEACON_SIGNATURE);
+            exec["drand_signature"] = serde_json::json!(zero.clone());
+        });
+        val["entropy"]["drand_signature"] = serde_json::json!(zero);
+        assert!(
+            !verify_bundle_with_resolved_keys_wasm(
+                &val.to_string(),
+                resolved_keys(&pk_hex, &kid),
+                "attestable"
+            )
+            .unwrap()
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn v6_bundle_passes_the_browser_gate() {
+        use crate::_test_support::{V6Params, build_v6_bundle};
+        for p in [
+            V6Params::weather(),
+            V6Params::freq_fallback(),
+            V6Params::fallback(),
+        ] {
+            let (json, pk_hex, kid) = build_v6_bundle(&p);
+            assert!(
+                verify_bundle_with_resolved_keys_wasm(
+                    &json,
+                    resolved_keys(&pk_hex, &kid),
+                    "attestable"
+                )
+                .unwrap()
+            );
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn v6_late_lock_fails_the_browser_gate() {
+        use crate::_test_support::{V6Params, build_v6_bundle};
+        let p = V6Params {
+            locked_at: V6Params::weather().weather_time,
+            ..V6Params::weather()
+        };
+        let (json, pk_hex, kid) = build_v6_bundle(&p);
+        assert!(
+            !verify_bundle_with_resolved_keys_wasm(
+                &json,
+                resolved_keys(&pk_hex, &kid),
+                "attestable"
+            )
+            .unwrap()
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn v6_execution_before_round_published_fails_the_browser_gate() {
+        use crate::_test_support::v6_negative_bundle;
+        let (json, pk_hex, kid) = v6_negative_bundle("executed_before_round_published");
+        assert!(
+            !verify_bundle_with_resolved_keys_wasm(
+                &json,
+                resolved_keys(&pk_hex, &kid),
+                "attestable"
+            )
+            .unwrap()
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn v6_state_outside_the_table_fails_the_browser_gate() {
+        use crate::_test_support::v6_negative_bundle;
+        for name in [
+            "weather_with_freq_value",
+            "freq_bundle_relabelled_landobs",
+            "exec_station_wittering",
+        ] {
+            let (json, pk_hex, kid) = v6_negative_bundle(name);
+            assert!(
+                !verify_bundle_with_resolved_keys_wasm(
+                    &json,
+                    resolved_keys(&pk_hex, &kid),
+                    "attestable"
+                )
+                .unwrap(),
+                "{name}"
+            );
+        }
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_freq_export_tests {
+    use super::{compute_seed_freq_wasm, verify_freq_wasm, verify_wasm};
+    use crate::_test_support::BEACON_FREQ_RANDOMNESS;
+    use crate::{
+        Entry, compute_seed, compute_seed_drand_only, compute_seed_freq, draw, entry_hash,
+    };
+    use wasm_bindgen_test::*;
+
+    const VALUE: &str = "50018;50012;49983;49980;49953;49912;49883;49887";
+    const DRAW_ID: &str = "22222222-2222-2222-2222-222222222222";
+
+    /// `compute_seed_freq_wasm` against core's frequency seed vector, through
+    /// the JavaScript-facing value it returns.
+    #[wasm_bindgen_test]
+    fn compute_seed_freq_wasm_matches_the_core_vector() {
+        let js = compute_seed_freq_wasm(&"ab".repeat(32), BEACON_FREQ_RANDOMNESS, VALUE).unwrap();
+        let out: serde_json::Value = serde_wasm_bindgen::from_value(js).unwrap();
+        assert_eq!(
+            out["seed"],
+            "ab4a8f4bba2b29e391e185625a5b963d026c9f8d3f84bd116aeeae31e864b295"
+        );
+        assert_eq!(
+            out["jcs"],
+            format!(
+                r#"{{"drand_randomness":"{BEACON_FREQ_RANDOMNESS}","entry_hash":"{}","freq_value":"{VALUE}"}}"#,
+                "ab".repeat(32)
+            )
+        );
+    }
+
+    /// `verify_freq_wasm` accepts winners drawn from the frequency seed (or,
+    /// with no value, the drand-only seed) and nothing else; `verify_wasm`
+    /// never accepts a frequency seed.
+    #[wasm_bindgen_test]
+    fn verify_freq_wasm_checks_the_frequency_seed() {
+        // Enough entries that the three seeds pick different winners.
+        let entries: Vec<Entry> = (0..20)
+            .map(|i| Entry {
+                id: format!("{i:08x}-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                weight: 1,
+            })
+            .collect();
+        let (ehash, _) = entry_hash(DRAW_ID, &entries);
+        let (seed, _) = compute_seed_freq(&ehash, BEACON_FREQ_RANDOMNESS, VALUE);
+        let winners = draw(&entries, &seed, 3).unwrap();
+        let (drand_seed, _) = compute_seed_drand_only(&ehash, BEACON_FREQ_RANDOMNESS);
+        let drand_winners = draw(&entries, &drand_seed, 3).unwrap();
+        let (weather_seed, _) = compute_seed(&ehash, BEACON_FREQ_RANDOMNESS, VALUE);
+        let weather_winners = draw(&entries, &weather_seed, 3).unwrap();
+        assert_ne!(winners, drand_winners);
+        assert_ne!(winners, weather_winners);
+        let js = |v: &dyn erased::Ser| v.to_js();
+        let call = |value: Option<&str>, expected: &[fair_pick_rs::Winner]| {
+            verify_freq_wasm(
+                DRAW_ID,
+                js(&entries),
+                BEACON_FREQ_RANDOMNESS,
+                value.map(str::to_string),
+                3,
+                js(&expected.to_vec()),
+            )
+            .unwrap()
+        };
+        assert!(call(Some(VALUE), &winners));
+        assert!(call(None, &drand_winners));
+        assert!(!call(None, &winners));
+        assert!(!call(Some(VALUE), &drand_winners));
+        assert!(
+            !verify_wasm(
+                DRAW_ID,
+                js(&entries),
+                BEACON_FREQ_RANDOMNESS,
+                Some(VALUE.into()),
+                3,
+                js(&winners),
+            )
+            .unwrap()
+        );
+        assert!(
+            verify_wasm(
+                DRAW_ID,
+                js(&entries),
+                BEACON_FREQ_RANDOMNESS,
+                Some(VALUE.into()),
+                3,
+                js(&weather_winners),
+            )
+            .unwrap()
+        );
+        assert!(!call(Some(VALUE), &weather_winners));
+    }
+
+    mod erased {
+        pub trait Ser {
+            fn to_js(&self) -> wasm_bindgen::JsValue;
+        }
+        impl<T: serde::Serialize> Ser for T {
+            fn to_js(&self) -> wasm_bindgen::JsValue {
+                serde_wasm_bindgen::to_value(self).unwrap()
+            }
+        }
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_landobs_exec_state_tests {
+    use super::landobs_exec_state_wasm;
+    use crate::_test_support::{V6Params, build_v6_bundle, v6_negative_bundle};
+    use crate::bundle::ProofBundle;
+    use wasm_bindgen_test::*;
+
+    fn exec_payload(json: &str) -> String {
+        ProofBundle::from_json(json)
+            .unwrap()
+            .execution_receipt
+            .payload_jcs
+    }
+
+    #[wasm_bindgen_test]
+    fn names_each_of_the_three_states() {
+        for (p, want) in [
+            (V6Params::weather(), "weather"),
+            (V6Params::freq_fallback(), "frequency"),
+            (V6Params::fallback(), "drand_only"),
+        ] {
+            let (json, _, _) = build_v6_bundle(&p);
+            assert_eq!(landobs_exec_state_wasm(&exec_payload(&json)).unwrap(), want);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn refuses_a_receipt_outside_the_table() {
+        let (json, _, _) = v6_negative_bundle("weather_with_freq_value");
+        assert!(landobs_exec_state_wasm(&exec_payload(&json)).is_err());
+        assert!(landobs_exec_state_wasm("not json").is_err());
+        assert!(landobs_exec_state_wasm("[]").is_err());
+    }
 }

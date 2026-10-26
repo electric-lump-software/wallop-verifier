@@ -13,6 +13,19 @@ const EXECUTION_RECEIPT_V3_VECTOR: &str =
     include_str!("../../vendor/wallop/spec/vectors/execution-receipt-v3.json");
 const DRAND_ONLY_V3_VECTOR: &str =
     include_str!("../../vendor/wallop/spec/vectors/execution-receipt-drand-only-v3.json");
+const LOCK_V6_VECTOR: &str = include_str!("../../vendor/wallop/spec/vectors/lock-receipt-v6.json");
+const EXEC_V5_VECTOR: &str =
+    include_str!("../../vendor/wallop/spec/vectors/execution-receipt-v5.json");
+const EXEC_V5_FREQ_WINDOW_VECTOR: &str =
+    include_str!("../../vendor/wallop/spec/vectors/execution-receipt-freq-window-v5.json");
+const EXEC_V5_FALLBACK_VECTOR: &str =
+    include_str!("../../vendor/wallop/spec/vectors/execution-receipt-fallback-v5.json");
+const LOCK_V6_FREQ_VECTOR: &str =
+    include_str!("../../vendor/wallop/spec/vectors/lock-receipt-v6-freq.json");
+const EXEC_V5_FREQ_VECTOR: &str =
+    include_str!("../../vendor/wallop/spec/vectors/execution-receipt-v5-freq.json");
+const EXEC_V5_FREQ_FALLBACK_VECTOR: &str =
+    include_str!("../../vendor/wallop/spec/vectors/execution-receipt-fallback-v5-freq.json");
 
 fn sha256_hex(data: &str) -> String {
     hex::encode(Sha256::digest(data.as_bytes()))
@@ -190,19 +203,64 @@ fn v11_lock_receipt_hash_pinned() {
 
 #[test]
 fn v11_execution_receipt_uses_lock_receipt_hash() {
-    let vector: serde_json::Value = serde_json::from_str(CROSS_RECEIPT_VECTOR).unwrap();
-    let lock_input = lock_receipt_from_json(&vector["lock_receipt_input"]);
+    // Each lock 6 vector's payload hash is the lock_receipt_hash its
+    // execution 5 vectors sign.
+    let pairs: [(&str, &[(&str, &str)]); 2] = [
+        (
+            LOCK_V6_VECTOR,
+            &[
+                ("execution-receipt-v5.json", EXEC_V5_VECTOR),
+                (
+                    "execution-receipt-freq-window-v5.json",
+                    EXEC_V5_FREQ_WINDOW_VECTOR,
+                ),
+                (
+                    "execution-receipt-fallback-v5.json",
+                    EXEC_V5_FALLBACK_VECTOR,
+                ),
+            ],
+        ),
+        (
+            LOCK_V6_FREQ_VECTOR,
+            &[
+                ("execution-receipt-v5-freq.json", EXEC_V5_FREQ_VECTOR),
+                (
+                    "execution-receipt-fallback-v5-freq.json",
+                    EXEC_V5_FREQ_FALLBACK_VECTOR,
+                ),
+            ],
+        ),
+    ];
+    for (lock_text, execs) in pairs {
+        let lock: serde_json::Value = serde_json::from_str(lock_text).unwrap();
+        let lock_hash = lock_receipt_hash(lock["payload_jcs"].as_str().unwrap());
+        assert_eq!(lock_hash, lock["expected_payload_sha256"].as_str().unwrap());
+        for (name, exec_text) in execs {
+            let exec: serde_json::Value = serde_json::from_str(exec_text).unwrap();
+            assert_eq!(
+                exec["input"]["lock_receipt_hash"].as_str().unwrap(),
+                lock_hash,
+                "{name}"
+            );
+            // The signed payload carries it too, not only the input.
+            let signed: serde_json::Value =
+                serde_json::from_str(exec["payload_jcs"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                signed["lock_receipt_hash"].as_str().unwrap(),
+                lock_hash,
+                "{name} payload_jcs"
+            );
+        }
+    }
 
-    let lock_payload = build_receipt_payload(&lock_input);
-    let lock_hash = lock_receipt_hash(&lock_payload);
-
-    // The drand-only vector's execution receipt uses this lock_receipt_hash
+    // The drand-only execution receipt is a fossil on round 12345. Its
+    // lock_receipt_hash is the linkage lock as it stood on that round (kept
+    // in wallop_core's test/fixtures/v5_builder_regression/
+    // cross-receipt-linkage.json), not the current cross-receipt-linkage.json.
     let drand_vector: serde_json::Value = serde_json::from_str(DRAND_ONLY_VECTOR).unwrap();
-    let drand_input = &drand_vector["input"];
-
     assert_eq!(
-        drand_input["lock_receipt_hash"].as_str().unwrap(),
-        lock_hash
+        drand_vector["input"]["lock_receipt_hash"].as_str().unwrap(),
+        "3fbacc9e2aa7e80593edcec4b64c89c791b776a9e3371af5e34bc8cdd4138fa3"
     );
 }
 
@@ -614,7 +672,7 @@ fn parse_lock_receipt_accepts_v4() {
     let parsed = parse_lock_receipt(&payload).expect("v4 payload must parse");
     match parsed {
         ParsedLockReceipt::V4(_) => (),
-        ParsedLockReceipt::V5(_) => panic!("expected V4, got V5"),
+        other => panic!("expected V4, got {other:?}"),
     }
 }
 
@@ -729,7 +787,7 @@ fn parse_lock_receipt_accepts_v5() {
     let parsed = parse_lock_receipt(&payload).expect("v5 payload must parse");
     match parsed {
         ParsedLockReceipt::V5(_) => (),
-        ParsedLockReceipt::V4(_) => panic!("expected V5, got V4"),
+        other => panic!("expected V5, got {other:?}"),
     }
 }
 
@@ -970,4 +1028,593 @@ fn validate_execution_receipt_tags_rejects_bad_weather_station() {
     input.weather_station = Some("HEATHROW".into());
 
     assert!(validate_execution_receipt_tags(&input).is_err());
+}
+
+// ── lock v6 / exec v5 (Land Observations tag) ──────────────────────────
+
+use crate::protocol::landobs_v1;
+
+fn lock_v6_value() -> serde_json::Value {
+    serde_json::json!({
+        "commitment_hash": "abc",
+        "drand_chain": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
+        "drand_round": 32693812u64,
+        "draw_id": "22222222-2222-2222-2222-222222222222",
+        "entropy_composition": landobs_v1::ENTROPY_COMPOSITION,
+        "entry_hash": "abc",
+        "fair_pick_version": "0.2.1",
+        "freq_start": "2026-10-01T19:54:00.000000Z",
+        "jcs_version": JCS_VERSION,
+        "locked_at": "2026-10-01T18:13:00.000000Z",
+        "operator_id": "11111111-1111-1111-1111-111111111111",
+        "operator_slug": "acme-prizes",
+        "schema_version": "6",
+        "sequence": 42,
+        "signature_algorithm": SIGNATURE_ALGORITHM,
+        "signing_key_id": "deadbeef",
+        "wallop_core_version": "0.29.0",
+        "weather_station": "wmo-03749",
+        "weather_time": "2026-10-01T19:00:00.000000Z",
+        "winner_count": 3
+    })
+}
+
+fn lock_v6_json(edit: impl FnOnce(&mut serde_json::Value)) -> String {
+    let mut v = lock_v6_value();
+    edit(&mut v);
+    v.to_string()
+}
+
+fn lock_v6(edit: impl FnOnce(&mut serde_json::Value)) -> LockReceiptV6 {
+    match parse_lock_receipt(&lock_v6_json(edit)).unwrap() {
+        ParsedLockReceipt::V6(p) => p,
+        other => panic!("expected V6, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_lock_receipt_accepts_v6_and_validates() {
+    assert!(validate_lock_receipt_tags_v6(&lock_v6(|_| {})).is_ok());
+}
+
+#[test]
+fn parse_lock_receipt_v6_rejects_unknown_field() {
+    let mut v = lock_v6_value();
+    v["draw_at"] = serde_json::json!("2026-10-01T20:00:00.000000Z");
+    assert!(matches!(
+        parse_lock_receipt(&v.to_string()),
+        Err(ParseLockReceiptError::PayloadShapeMismatch(_))
+    ));
+}
+
+#[test]
+fn lock_v6_rejects_the_forecast_tag() {
+    let p = lock_v6(|v| v["entropy_composition"] = serde_json::json!(ENTROPY_COMPOSITION));
+    assert!(
+        validate_lock_receipt_tags_v6(&p)
+            .unwrap_err()
+            .contains("entropy_composition")
+    );
+}
+
+#[test]
+fn lock_v6_requires_the_primary_station() {
+    for station in ["middle-wallop", "wmo-03462", "wmo-03772"] {
+        let p = lock_v6(|v| v["weather_station"] = serde_json::json!(station));
+        assert!(
+            validate_lock_receipt_tags_v6(&p)
+                .unwrap_err()
+                .contains("weather_station"),
+            "accepted {station}"
+        );
+    }
+}
+
+#[test]
+fn lock_v6_rejects_empty_signing_key_id() {
+    let p = lock_v6(|v| v["signing_key_id"] = serde_json::json!(""));
+    assert!(
+        validate_lock_receipt_tags_v6(&p)
+            .unwrap_err()
+            .contains("signing_key_id")
+    );
+}
+
+#[test]
+fn lock_v5_still_rejects_the_landobs_tag() {
+    let mut v = lock_v6_value();
+    v["schema_version"] = serde_json::json!("5");
+    v.as_object_mut().unwrap().remove("freq_start");
+    let p = match parse_lock_receipt(&v.to_string()).unwrap() {
+        ParsedLockReceipt::V5(p) => p,
+        other => panic!("expected V5, got {other:?}"),
+    };
+    assert!(
+        validate_lock_receipt_tags_v5(&p)
+            .unwrap_err()
+            .contains("entropy_composition")
+    );
+}
+
+#[test]
+fn unknown_lock_schema_message_lists_6() {
+    let lock = parse_lock_receipt(r#"{"schema_version":"99"}"#)
+        .unwrap_err()
+        .to_string();
+    assert!(lock.contains("\"6\""), "{lock}");
+}
+
+fn exec_v5_value() -> serde_json::Value {
+    serde_json::json!({
+        "drand_chain": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
+        "drand_randomness": "abc",
+        "drand_round": 32693812u64,
+        "drand_signature": "abc",
+        "drand_signature_algorithm": DRAND_SIGNATURE_ALGORITHM,
+        "draw_id": "22222222-2222-2222-2222-222222222222",
+        "entropy_composition": landobs_v1::ENTROPY_COMPOSITION,
+        "entry_hash": "abc",
+        "executed_at": "2026-10-01T20:00:05.000000Z",
+        "fair_pick_version": "0.2.1",
+        "freq_fallback_reason": null,
+        "freq_value": null,
+        "jcs_version": JCS_VERSION,
+        "lock_receipt_hash": "abc",
+        "merkle_algorithm": MERKLE_ALGORITHM,
+        "operator_id": "11111111-1111-1111-1111-111111111111",
+        "operator_slug": "acme-prizes",
+        "results": ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        "schema_version": "5",
+        "seed": "abc",
+        "sequence": 42,
+        "signature_algorithm": SIGNATURE_ALGORITHM,
+        "signing_key_id": "deadbeef",
+        "wallop_core_version": "0.29.0",
+        "weather_fallback_reason": null,
+        "weather_observation_time": "2026-10-01T19:00:00.000000Z",
+        "weather_station": "wmo-03749",
+        "weather_value": "184;1021;51;4114"
+    })
+}
+
+fn exec_v5_json(edit: impl FnOnce(&mut serde_json::Value)) -> String {
+    let mut v = exec_v5_value();
+    edit(&mut v);
+    v.to_string()
+}
+
+fn exec_v5(edit: impl FnOnce(&mut serde_json::Value)) -> ExecutionReceiptV5 {
+    match parse_execution_receipt(&exec_v5_json(edit)).unwrap() {
+        ParsedExecutionReceipt::V5(p) => p,
+        other => panic!("expected V5, got {other:?}"),
+    }
+}
+
+#[test]
+fn exec_v5_accepts_middle_wallop_only() {
+    assert!(validate_execution_receipt_tags_v5(&exec_v5(|_| {})).is_ok());
+    for station in ["wmo-03462", "wmo-03772"] {
+        let other = exec_v5(|v| v["weather_station"] = serde_json::json!(station));
+        let err = validate_execution_receipt_tags_v5(&other).unwrap_err();
+        assert!(err.contains("must be wmo-03749"), "{station}: {err}");
+    }
+}
+
+#[test]
+fn exec_v5_accepts_a_fallback_naming_middle_wallop() {
+    let fallback = exec_v5(|v| {
+        v["weather_value"] = serde_json::Value::Null;
+        v["weather_observation_time"] = serde_json::Value::Null;
+        v["weather_fallback_reason"] = serde_json::json!("no_observation_by_deadline");
+    });
+    assert!(validate_execution_receipt_tags_v5(&fallback).is_ok());
+}
+
+#[test]
+fn exec_v5_rejects_v5_era_fallback_reasons() {
+    for reason in ["station_down", "stale", "unreachable"] {
+        let p = exec_v5(|v| v["weather_fallback_reason"] = serde_json::json!(reason));
+        assert!(
+            validate_execution_receipt_tags_v5(&p)
+                .unwrap_err()
+                .contains("weather_fallback_reason"),
+            "accepted {reason}"
+        );
+    }
+}
+
+#[test]
+fn exec_v5_rejects_a_station_not_middle_wallop() {
+    let p = exec_v5(|v| v["weather_station"] = serde_json::json!("wmo-03772"));
+    assert!(
+        validate_execution_receipt_tags_v5(&p)
+            .unwrap_err()
+            .contains("weather_station")
+    );
+}
+
+#[test]
+fn exec_v5_rejects_null_station() {
+    let p = exec_v5(|v| v["weather_station"] = serde_json::Value::Null);
+    assert!(
+        validate_execution_receipt_tags_v5(&p)
+            .unwrap_err()
+            .contains("weather_station")
+    );
+}
+
+#[test]
+fn exec_v5_rejects_a_value_outside_the_grammar() {
+    for bad in [
+        "1013",
+        "-0;1021;51;4114",
+        "0184;1021;51;4114",
+        "184;1021;51",
+    ] {
+        let p = exec_v5(|v| v["weather_value"] = serde_json::json!(bad));
+        assert!(
+            validate_execution_receipt_tags_v5(&p)
+                .unwrap_err()
+                .contains("weather_value"),
+            "accepted {bad}"
+        );
+    }
+}
+
+#[test]
+fn exec_v5_rejects_the_forecast_tag() {
+    let p = exec_v5(|v| v["entropy_composition"] = serde_json::json!(ENTROPY_COMPOSITION));
+    assert!(
+        validate_execution_receipt_tags_v5(&p)
+            .unwrap_err()
+            .contains("entropy_composition")
+    );
+}
+
+#[test]
+fn lock_v6_landobs_needs_freq_start_on_the_15s_grid_and_exactly_the_shared_keys() {
+    let ok = lock_v6_json(|_| {});
+    assert!(matches!(
+        parse_lock_receipt(&ok),
+        Ok(ParsedLockReceipt::V6(_))
+    ));
+    type Edit = Box<dyn Fn(&mut serde_json::Value)>;
+    let edits: [(&str, Edit); 3] = [
+        (
+            "missing",
+            Box::new(|v: &mut serde_json::Value| {
+                v.as_object_mut().unwrap().remove("freq_start");
+            }),
+        ),
+        (
+            "null",
+            Box::new(|v: &mut serde_json::Value| v["freq_start"] = serde_json::Value::Null),
+        ),
+        (
+            "extra key",
+            Box::new(|v: &mut serde_json::Value| v["freq_value"] = serde_json::json!(null)),
+        ),
+    ];
+    for (name, edit) in edits {
+        let j = lock_v6_json(|v| edit(v));
+        assert!(parse_lock_receipt(&j).is_err(), "{name}");
+    }
+    let off = lock_v6_json(|v| v["freq_start"] = serde_json::json!("2026-10-14T19:54:01.000000Z"));
+    let ParsedLockReceipt::V6(p) = parse_lock_receipt(&off).unwrap() else {
+        panic!()
+    };
+    assert!(validate_lock_receipt_tags_v6(&p).is_err());
+}
+
+#[test]
+fn exec_v5_landobs_carries_the_freq_fields_and_checks_them_one_by_one() {
+    let ok = exec_v5(|_| {});
+    assert!(validate_execution_receipt_tags_v5(&ok).is_ok());
+    let bad_reason = exec_v5(|v| v["freq_fallback_reason"] = serde_json::json!("unreachable"));
+    assert!(validate_execution_receipt_tags_v5(&bad_reason).is_err());
+    let bad_value = exec_v5(|v| v["freq_value"] = serde_json::json!("50012"));
+    assert!(validate_execution_receipt_tags_v5(&bad_value).is_err());
+    let missing = exec_v5_json(|v| {
+        v.as_object_mut().unwrap().remove("freq_value");
+    });
+    assert!(parse_execution_receipt(&missing).is_err());
+}
+
+#[test]
+fn unknown_exec_schema_message_lists_5() {
+    let exec = parse_execution_receipt(r#"{"schema_version":"99"}"#)
+        .unwrap_err()
+        .to_string();
+    assert!(exec.contains("\"5\""), "{exec}");
+}
+
+// ---- Grid-frequency tag: lock v6 / execution v5 ----
+
+use crate::_test_support::{freq_exec_json, freq_lock_json};
+
+fn parse_freq_lock(v: &serde_json::Value) -> Result<LockReceiptV6Freq, String> {
+    match parse_lock_receipt(&v.to_string()).map_err(|e| e.to_string())? {
+        ParsedLockReceipt::V6Freq(p) => Ok(p),
+        other => Err(format!("parsed as {other:?}")),
+    }
+}
+
+fn parse_freq_exec(v: &serde_json::Value) -> Result<ExecutionReceiptV5Freq, String> {
+    match parse_execution_receipt(&v.to_string()).map_err(|e| e.to_string())? {
+        ParsedExecutionReceipt::V5Freq(p) => Ok(p),
+        other => Err(format!("parsed as {other:?}")),
+    }
+}
+
+#[test]
+fn freq_lock_has_20_fields_and_validates() {
+    assert_eq!(freq_lock_json().as_object().unwrap().len(), 20);
+    let p = parse_freq_lock(&freq_lock_json()).unwrap();
+    assert_eq!(p.freq_start, "2026-10-14T19:54:00.000000Z");
+    assert_eq!(validate_lock_receipt_tags_v6_freq(&p), Ok(()));
+}
+
+#[test]
+fn freq_lock_rejects_weather_fields_an_unaligned_freq_start_and_bad_tags() {
+    for (field, value) in [
+        ("weather_station", serde_json::json!("wmo-03749")),
+        (
+            "weather_time",
+            serde_json::json!("2026-10-14T19:00:00.000000Z"),
+        ),
+        (
+            "freq_start",
+            serde_json::json!("2026-10-14T19:54:16.000000Z"),
+        ),
+        (
+            "freq_start",
+            serde_json::json!("2026-10-14T19:53:60.000000Z"),
+        ),
+        ("freq_start", serde_json::json!("2026-10-14T19:54:00Z")),
+        ("jcs_version", serde_json::json!("sha256-jcs-v2")),
+        ("signature_algorithm", serde_json::json!("ed448")),
+        ("signing_key_id", serde_json::json!("")),
+    ] {
+        let mut v = freq_lock_json();
+        v[field] = value.clone();
+        let p = parse_freq_lock(&v).unwrap();
+        assert!(
+            validate_lock_receipt_tags_v6_freq(&p).is_err(),
+            "{field} = {value}"
+        );
+    }
+    // Fed a hand-built struct, the validator still pins the tag and schema.
+    let mut p = parse_freq_lock(&freq_lock_json()).unwrap();
+    p.entropy_composition = landobs_v1::ENTROPY_COMPOSITION.into();
+    assert!(validate_lock_receipt_tags_v6_freq(&p).is_err());
+    let mut p = parse_freq_lock(&freq_lock_json()).unwrap();
+    p.schema_version = "5".into();
+    assert!(validate_lock_receipt_tags_v6_freq(&p).is_err());
+}
+
+#[test]
+fn a_missing_null_field_or_an_extra_field_is_a_shape_mismatch() {
+    for field in ["weather_station", "weather_time", "freq_start"] {
+        let mut v = freq_lock_json();
+        v.as_object_mut().unwrap().remove(field);
+        assert!(
+            matches!(
+                parse_lock_receipt(&v.to_string()),
+                Err(ParseLockReceiptError::PayloadShapeMismatch(_))
+            ),
+            "{field}"
+        );
+    }
+    for field in [
+        "freq_fallback_reason",
+        "freq_value",
+        "weather_value",
+        "weather_station",
+        "weather_observation_time",
+        "weather_fallback_reason",
+    ] {
+        let mut v = freq_exec_json();
+        v.as_object_mut().unwrap().remove(field);
+        assert!(
+            matches!(
+                parse_execution_receipt(&v.to_string()),
+                Err(ParseExecutionReceiptError::PayloadShapeMismatch(_))
+            ),
+            "{field}"
+        );
+    }
+    let mut v = freq_lock_json();
+    v["weather_value"] = serde_json::Value::Null;
+    assert!(matches!(
+        parse_lock_receipt(&v.to_string()),
+        Err(ParseLockReceiptError::PayloadShapeMismatch(_))
+    ));
+    let mut v = freq_exec_json();
+    v["freq_start"] = serde_json::Value::Null;
+    assert!(matches!(
+        parse_execution_receipt(&v.to_string()),
+        Err(ParseExecutionReceiptError::PayloadShapeMismatch(_))
+    ));
+}
+
+#[test]
+fn a_freq_receipt_with_a_wrong_typed_field_is_a_shape_mismatch() {
+    let mut v = freq_lock_json();
+    v["freq_start"] = serde_json::Value::Null;
+    assert!(matches!(
+        parse_lock_receipt(&v.to_string()),
+        Err(ParseLockReceiptError::PayloadShapeMismatch(_))
+    ));
+    let mut v = freq_exec_json();
+    v["freq_value"] = serde_json::json!(50018);
+    assert!(matches!(
+        parse_execution_receipt(&v.to_string()),
+        Err(ParseExecutionReceiptError::PayloadShapeMismatch(_))
+    ));
+}
+
+#[test]
+fn a_duplicate_key_is_a_shape_mismatch() {
+    let json =
+        freq_lock_json()
+            .to_string()
+            .replacen("\"sequence\":1", "\"sequence\":1,\"sequence\":2", 1);
+    assert_ne!(json, freq_lock_json().to_string());
+    assert!(matches!(
+        parse_lock_receipt(&json),
+        Err(ParseLockReceiptError::PayloadShapeMismatch(_))
+    ));
+    let json =
+        freq_exec_json()
+            .to_string()
+            .replacen("\"sequence\":1", "\"sequence\":1,\"sequence\":2", 1);
+    assert_ne!(json, freq_exec_json().to_string());
+    assert!(matches!(
+        parse_execution_receipt(&json),
+        Err(ParseExecutionReceiptError::PayloadShapeMismatch(_))
+    ));
+}
+
+/// The tags share a key set, so only the weather fields' types tell them
+/// apart at parse time: a Land Observations lock must name its station and
+/// hour.
+#[test]
+fn a_landobs_lock_with_null_weather_fields_is_a_shape_mismatch() {
+    let mut v = freq_lock_json();
+    v["entropy_composition"] = serde_json::json!(landobs_v1::ENTROPY_COMPOSITION);
+    assert!(matches!(
+        parse_lock_receipt(&v.to_string()),
+        Err(ParseLockReceiptError::PayloadShapeMismatch(_))
+    ));
+}
+
+#[test]
+fn an_unknown_tag_on_schema_6_or_5_never_parses_as_frequency() {
+    // A near-miss tag goes down the Land Observations shape. The lock's
+    // null station fails to parse there; the execution receipt parses (its
+    // weather fields are nullable) but its validator names the tag.
+    for tag in [
+        "drand-quicknet+elexon-freq-v2",
+        "DRAND-QUICKNET+ELEXON-FREQ-V1",
+        "",
+    ] {
+        let mut v = freq_lock_json();
+        v["entropy_composition"] = serde_json::json!(tag);
+        assert!(parse_lock_receipt(&v.to_string()).is_err(), "{tag}");
+        let mut v = freq_exec_json();
+        v["entropy_composition"] = serde_json::json!(tag);
+        match parse_execution_receipt(&v.to_string()) {
+            Ok(ParsedExecutionReceipt::V5(p)) => assert!(
+                validate_execution_receipt_tags_v5(&p)
+                    .unwrap_err()
+                    .contains("entropy_composition"),
+                "{tag}"
+            ),
+            other => panic!("{tag}: expected the Land Observations shape, got {other:?}"),
+        }
+    }
+    // A non-string tag likewise.
+    let mut v = freq_lock_json();
+    v["entropy_composition"] = serde_json::json!(1);
+    assert!(parse_lock_receipt(&v.to_string()).is_err());
+}
+
+#[test]
+fn the_frequency_tag_on_other_schemas_never_parses_as_frequency() {
+    let mut v = freq_lock_json();
+    v["schema_version"] = serde_json::json!("5");
+    assert!(parse_lock_receipt(&v.to_string()).is_err());
+    let mut v = freq_exec_json();
+    v["schema_version"] = serde_json::json!("4");
+    assert!(parse_execution_receipt(&v.to_string()).is_err());
+}
+
+#[test]
+fn freq_exec_has_28_fields_and_validates_value_and_fallback() {
+    assert_eq!(freq_exec_json().as_object().unwrap().len(), 28);
+    assert_eq!(
+        validate_execution_receipt_tags_v5_freq(&parse_freq_exec(&freq_exec_json()).unwrap()),
+        Ok(())
+    );
+
+    let mut fallback = freq_exec_json();
+    fallback["freq_value"] = serde_json::Value::Null;
+    fallback["freq_fallback_reason"] = serde_json::json!("no_frequency_by_deadline");
+    assert_eq!(
+        validate_execution_receipt_tags_v5_freq(&parse_freq_exec(&fallback).unwrap()),
+        Ok(())
+    );
+}
+
+#[test]
+fn freq_exec_rejects_weather_fields_other_reasons_and_bad_values() {
+    for (field, value) in [
+        ("weather_station", serde_json::json!("wmo-03749")),
+        ("weather_value", serde_json::json!("141;1025;85;2432")),
+        (
+            "weather_observation_time",
+            serde_json::json!("2026-10-14T19:00:00.000000Z"),
+        ),
+        (
+            "weather_fallback_reason",
+            serde_json::json!("no_observation_by_deadline"),
+        ),
+        (
+            "freq_fallback_reason",
+            serde_json::json!("no_observation_by_deadline"),
+        ),
+        ("freq_fallback_reason", serde_json::json!("")),
+        (
+            "freq_value",
+            serde_json::json!("50000;50000;50000;50000;50000;50000;50012;50013"),
+        ),
+        (
+            "freq_value",
+            serde_json::json!("53000;50012;49983;49980;49953;49912;49883;49887"),
+        ),
+        (
+            "freq_value",
+            serde_json::json!("50018;50012;49983;49980;49953;49912;49883"),
+        ),
+        ("jcs_version", serde_json::json!("sha256-jcs-v2")),
+        ("signature_algorithm", serde_json::json!("ed448")),
+        (
+            "drand_signature_algorithm",
+            serde_json::json!("bls12_381_g1"),
+        ),
+        ("merkle_algorithm", serde_json::json!("sha256-pairwise-v2")),
+        ("signing_key_id", serde_json::json!("")),
+    ] {
+        let mut v = freq_exec_json();
+        v[field] = value.clone();
+        let p = parse_freq_exec(&v).unwrap();
+        assert!(
+            validate_execution_receipt_tags_v5_freq(&p).is_err(),
+            "{field} = {value}"
+        );
+    }
+    let mut p = parse_freq_exec(&freq_exec_json()).unwrap();
+    p.entropy_composition = landobs_v1::ENTROPY_COMPOSITION.into();
+    assert!(validate_execution_receipt_tags_v5_freq(&p).is_err());
+    let mut p = parse_freq_exec(&freq_exec_json()).unwrap();
+    p.schema_version = "4".into();
+    assert!(validate_execution_receipt_tags_v5_freq(&p).is_err());
+}
+
+/// A Land Observations execution receipt carries the frequency fields too
+/// (its fallback), so a frequency receipt relabelled as one parses, and
+/// its validator refuses it for having no station.
+#[test]
+fn a_frequency_exec_relabelled_as_landobs_fails_its_validator() {
+    let mut v = freq_exec_json();
+    v["entropy_composition"] = serde_json::json!(landobs_v1::ENTROPY_COMPOSITION);
+    let p = match parse_execution_receipt(&v.to_string()).unwrap() {
+        ParsedExecutionReceipt::V5(p) => p,
+        other => panic!("expected V5, got {other:?}"),
+    };
+    assert!(
+        validate_execution_receipt_tags_v5(&p)
+            .unwrap_err()
+            .contains("weather_station")
+    );
 }

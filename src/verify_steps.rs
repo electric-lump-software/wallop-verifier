@@ -2,9 +2,15 @@ use crate::bundle::ProofBundle;
 use crate::key_resolver::{BundleEmbeddedResolver, InsertedAt, KeyClass, KeyResolver, ResolvedKey};
 use crate::protocol::crypto;
 use crate::protocol::receipts::{
-    ParsedExecutionReceipt, ParsedLockReceipt, lock_receipt_hash, parse_execution_receipt,
-    parse_lock_receipt, validate_execution_receipt_tags, validate_execution_receipt_tags_v3,
-    validate_execution_receipt_tags_v4, validate_lock_receipt_tags, validate_lock_receipt_tags_v5,
+    ENTROPY_COMPOSITION, EXECUTION_SCHEMA_VERSION, EXECUTION_SCHEMA_VERSION_V3,
+    EXECUTION_SCHEMA_VERSION_V4, EXECUTION_SCHEMA_VERSION_V5, FAIR_PICK_VERSIONS,
+    LOCK_SCHEMA_VERSION, LOCK_SCHEMA_VERSION_V5, LOCK_SCHEMA_VERSION_V6, ParsedExecutionReceipt,
+    ParsedLockReceipt, lock_receipt_hash, parse_execution_receipt, parse_lock_receipt,
+    validate_execution_receipt_tags, validate_execution_receipt_tags_v3,
+    validate_execution_receipt_tags_v4, validate_execution_receipt_tags_v5,
+    validate_execution_receipt_tags_v5_freq, validate_lock_receipt_tags,
+    validate_lock_receipt_tags_v5, validate_lock_receipt_tags_v6,
+    validate_lock_receipt_tags_v6_freq,
 };
 use crate::{Entry, compute_seed, compute_seed_drand_only, draw, entry_hash};
 use serde::{Deserialize, Serialize};
@@ -23,36 +29,89 @@ use std::fmt;
 #[serde(rename_all = "snake_case")]
 pub enum StepName {
     EntryHash,
+    /// The lock receipt's Ed25519 signature under its operator key. A
+    /// receipt that fails its typed parse has no key id, so this step
+    /// fails too (`ResolutionFailureKind::ReceiptUnparsed`).
     LockSignature,
+    /// The execution receipt's Ed25519 signature under its
+    /// infrastructure key. As for `LockSignature`, a receipt that fails
+    /// its typed parse fails this step too. Whether the typed parse
+    /// succeeds depends on `schema_version` alone: the parser may pick a
+    /// struct by tag, but each receipt kind has one key set for both
+    /// tags, and `entropy_composition` is checked after the parse
+    /// (`BundleShape`). So a receipt with the right shape and a wrong or
+    /// unknown tag keeps its key id, and its signature step passes when
+    /// the signature is valid.
     ExecSignature,
     ReceiptLinkage,
+    /// The lock receipt's `entry_hash` equals the entry hash recomputed
+    /// from the bundle. Under lock v6 (either tag), its `commitment_hash`
+    /// must equal that entry hash too.
     LockReceiptEntryHash,
     ExecReceiptEntryHash,
+    /// The execution receipt's `seed` is recomputed from the entry hash,
+    /// the drand randomness and the signed entropy value. The rule comes
+    /// from the receipts' `(schema_version, entropy_composition)` pair; the
+    /// seed input is chosen by the three-state table under the Land
+    /// Observations tag, and a receipt in none of the states fails here.
     SeedRecomputation,
     WinnerSelection,
+    /// The drand beacon in the signed execution receipt: BLS signature
+    /// valid on the pinned quicknet chain, `sha256(signature) ==
+    /// randomness`, the bundle's `entropy` block equal to the receipt, and
+    /// the round published strictly after the lock receipt's `locked_at`.
+    /// Under lock v6 or execution v5 (either), also that the execution
+    /// receipt's `executed_at` is not before the round published.
     DrandBlsSignature,
-    /// Cross-receipt field consistency — every field appearing in both the
-    /// lock and execution receipts MUST be byte-identical. Bundle-envelope
-    /// `draw_id` MUST also match. Closes splice-attack class per spec
-    /// §4.2.5. Appended rather than inserted mid-list so external
-    /// consumers pinning step ordinals are not broken.
+    /// Cross-receipt field consistency — the cross-checked fields listed in
+    /// spec §4.2.5 MUST be byte-identical. Bundle-envelope `draw_id` MUST
+    /// also match. Closes splice-attack class per spec §4.2.5. Appended
+    /// rather than inserted mid-list so external consumers pinning step
+    /// ordinals are not broken. Under lock v6 / execution v5,
+    /// `weather_station` is compared for equality, and under the Land
+    /// Observations tag the lock must name Middle Wallop. Under lock v6 /
+    /// execution v5, `operator_slug` and
+    /// `fair_pick_version` are also byte-identical across the receipts, and
+    /// `fair_pick_version` must be one this verifier implements. The rules
+    /// are chosen by each receipt's `(schema_version, entropy_composition)`
+    /// pair; a pair the verifier does not know fails this step. Under the
+    /// Land Observations tag, the execution receipt is in one of the three
+    /// states (see `WeatherObservationWindow`).
     ReceiptFieldConsistency,
-    /// Weather observation window — execution receipt's
-    /// `weather_observation_time` MUST fall in
-    /// `[lock.weather_time, lock.weather_time + 3600s]`.
-    /// Closes the weather-time splice vector per spec §4.2.5.
+    /// Weather observation window. Lock v4/v5: the execution receipt's
+    /// `weather_observation_time` falls in
+    /// `[lock.weather_time - 3600s, lock.weather_time]`, and a fallback
+    /// reason is present exactly when weather is missing; `NotApplicable`
+    /// on a drand-only draw. Lock v6 / execution v5: `weather_time` is the
+    /// observation hour the drand round implies, `freq_start` is the window
+    /// start the round implies, `locked_at` is at least
+    /// 46 minutes before it, and the execution receipt is in one of the
+    /// tag's three states: Middle Wallop's reading of exactly that hour; no
+    /// reading, with the round's grid-frequency window; or neither. Always
+    /// `Pass` or `Fail` under v6, fallback included, because the schedule is
+    /// checked either way. On a fallback, `Pass` means the schedule holds.
+    /// Whether the archive really had no observation is checked by
+    /// `wallop-verify weather-attest`, not here. The rules are chosen by
+    /// each receipt's `(schema_version, entropy_composition)` pair, never
+    /// the schema alone; a pair the verifier does not know fails this step.
     WeatherObservationWindow,
     /// Bundle shape — both receipts MUST parse against the typed structs
     /// (`deny_unknown_fields`), MUST resolve via the schema_version
     /// dispatcher (terminal `UnknownSchemaVersion` on anything else), MUST
     /// pass the algorithm-identity-tag and `weather_station` charset
     /// validators, and every signed timestamp MUST be in canonical
-    /// RFC 3339 form (`chrono_parse_canonical`). The typed parsers and
-    /// validators ship in `protocol/receipts.rs`; this step is the entry
-    /// point that wires them into the verifier pipeline. Appended to the end of
-    /// `StepName::all()` so external consumers pinning step ordinals are
-    /// not broken; in pipeline execution order, this step runs FIRST and
-    /// gates everything else.
+    /// RFC 3339 form (`chrono_parse_canonical`). It covers lock receipt
+    /// schema 4, 5 or 6 and execution receipt schema 2 to 5; under lock
+    /// schema 6 / execution schema 5 it also checks the Land Observations
+    /// tag pins (the station, fallback reason, `weather_value` grammar). Lock
+    /// schema 6 must pair with execution schema 5 in both directions, and
+    /// under lock schema 6 `weather_time`, `locked_at`, `executed_at` and
+    /// `weather_observation_time` must be canonical and round-trip. The
+    /// typed parsers and validators ship in `protocol/receipts.rs`; this
+    /// step is the entry point that wires them into the verifier pipeline.
+    /// Appended to the end of `StepName::all()` so external consumers
+    /// pinning step ordinals are not broken; in pipeline execution order,
+    /// this step runs FIRST and gates everything else.
     BundleShape,
     /// Temporal binding — every signed artefact is bound to the moment
     /// the signing key first appeared in the keyring (spec §4.2.4).
@@ -121,11 +180,34 @@ impl fmt::Display for StepName {
     }
 }
 
+/// Outcome of one verification step.
+///
+/// Non-exhaustive: a `match` outside this crate needs a wildcard arm, so a
+/// new status can be added without a breaking change. Treat any status you
+/// do not recognise as a failure, and use `VerificationReport::passed()`
+/// for the overall verdict.
+///
+/// ```compile_fail
+/// use wallop_verifier::verify_steps::StepStatus;
+/// fn code(s: &StepStatus) -> u8 {
+///     match s {
+///         StepStatus::Pass => 0,
+///         StepStatus::Fail(_) => 1,
+///         StepStatus::Skip(_) => 2,
+///         StepStatus::NotApplicable(_) => 3,
+///     }
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum StepStatus {
     Pass,
     Fail(String),
+    /// The step could not run. Never counts as a pass.
     Skip(String),
+    /// The check genuinely does not apply to this bundle (e.g. no weather
+    /// on a drand-only draw). Does not block a pass on its own.
+    NotApplicable(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -138,7 +220,7 @@ pub enum StepDetail {
     /// (typically `LockSignature` / `ExecSignature`). Distinguishes
     /// `Unreachable` / `KeyNotFound` / `PinMismatch` /
     /// `MalformedResponse` / `InconsistentRow` / `SentinelRejected` /
-    /// `LegacySentinelRejected` from the generic "Ed25519 signature
+    /// `LegacySentinelRejected` / `ReceiptUnparsed` from the generic "Ed25519 signature
     /// invalid" message — without this, every resolver failure
     /// collapsed to the same opaque outcome.
     ResolutionFailure {
@@ -183,6 +265,16 @@ pub enum ResolutionFailureKind {
     /// belt-and-braces — that string would silently pass any `<=`
     /// temporal-binding comparison.
     LegacySentinelRejected,
+    /// The receipt failed its typed parse, so there is no
+    /// `signing_key_id` to resolve and nothing was asked of the trust
+    /// root. `BundleShape` fails in the same run and names the cause.
+    /// The signature step fails closed: a receipt that fails its typed
+    /// parse has no key id, so its signature step fails too. The shared
+    /// tamper vectors depend on this, and other verifiers must match it.
+    /// Whether the typed parse succeeds depends on `schema_version` alone;
+    /// the tag is checked after it, so a wrong or unknown tag on a
+    /// receipt of the right shape never produces this.
+    ReceiptUnparsed,
 }
 
 #[derive(Debug, Clone)]
@@ -255,14 +347,25 @@ impl VerificationReport {
     /// signatures genuinely verify over the bytes presented) while still
     /// failing the `BundleShape` step that catches the protocol violation.
     /// `passed()` correctly returns `false` in that case.
+    ///
+    /// Every step must be `Pass`, and at least one must be. `NotApplicable`
+    /// is accepted only on the steps that can genuinely not apply:
+    /// `WeatherObservationWindow` (a drand-only draw has no observation)
+    /// and `TemporalBinding` (vacuous against bundle-embedded keys). On any
+    /// other step it counts as a failure. A `Skip` (a check that could not
+    /// run) never counts as a pass.
     pub fn passed(&self) -> bool {
-        self.steps
+        self.steps.iter().all(|s| match s.status {
+            StepStatus::Pass => true,
+            StepStatus::NotApplicable(_) => matches!(
+                s.name,
+                StepName::WeatherObservationWindow | StepName::TemporalBinding
+            ),
+            _ => false,
+        }) && self
+            .steps
             .iter()
-            .all(|s| matches!(s.status, StepStatus::Pass | StepStatus::Skip(_)))
-            && self
-                .steps
-                .iter()
-                .any(|s| matches!(s.status, StepStatus::Pass))
+            .any(|s| matches!(s.status, StepStatus::Pass))
     }
 
     pub fn error_count(&self) -> usize {
@@ -313,6 +416,8 @@ pub fn verify_bundle_with<R: KeyResolver>(
         match parse_lock_receipt(&bundle.lock_receipt.payload_jcs).ok() {
             Some(ParsedLockReceipt::V4(r)) => (Some(r.signing_key_id), Some(r.locked_at)),
             Some(ParsedLockReceipt::V5(r)) => (Some(r.signing_key_id), Some(r.locked_at)),
+            Some(ParsedLockReceipt::V6(r)) => (Some(r.signing_key_id), Some(r.locked_at)),
+            Some(ParsedLockReceipt::V6Freq(r)) => (Some(r.signing_key_id), Some(r.locked_at)),
             None => (None, None),
         };
     let (exec_signing_key_id, exec_executed_at) =
@@ -326,6 +431,10 @@ pub fn verify_bundle_with<R: KeyResolver>(
             Some(ParsedExecutionReceipt::V2(r)) => (None, Some(r.executed_at)),
             Some(ParsedExecutionReceipt::V3(r)) => (Some(r.signing_key_id), Some(r.executed_at)),
             Some(ParsedExecutionReceipt::V4(r)) => (Some(r.signing_key_id), Some(r.executed_at)),
+            Some(ParsedExecutionReceipt::V5(r)) => (Some(r.signing_key_id), Some(r.executed_at)),
+            Some(ParsedExecutionReceipt::V5Freq(r)) => {
+                (Some(r.signing_key_id), Some(r.executed_at))
+            }
             None => (None, None),
         };
 
@@ -491,23 +600,24 @@ pub fn verify_bundle_with<R: KeyResolver>(
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let step5a_pass = computed_entry_hash == lock_eh;
-        let step5a_detail = if step5a_pass {
-            None
+        if !step5a_pass {
+            steps.push(StepResult {
+                name: StepName::LockReceiptEntryHash,
+                status: StepStatus::Fail(format!(
+                    "expected {}, got {}",
+                    computed_entry_hash, lock_eh
+                )),
+                detail: Some(StepDetail::HexMismatch {
+                    expected: computed_entry_hash.clone(),
+                    computed: lock_eh.to_string(),
+                }),
+            });
         } else {
-            Some(StepDetail::HexMismatch {
-                expected: computed_entry_hash.clone(),
-                computed: lock_eh.to_string(),
-            })
-        };
-        steps.push(StepResult {
-            name: StepName::LockReceiptEntryHash,
-            status: if step5a_pass {
-                StepStatus::Pass
-            } else {
-                StepStatus::Fail(format!("expected {}, got {}", computed_entry_hash, lock_eh))
-            },
-            detail: step5a_detail,
-        });
+            steps.push(check_lock_commitment_hash(
+                &lock_parsed,
+                &computed_entry_hash,
+            ));
+        }
     }
 
     // === Step 5b: Exec receipt entry_hash ===
@@ -545,10 +655,14 @@ pub fn verify_bundle_with<R: KeyResolver>(
     }
 
     // === Step 6: Seed recomputation ===
-    // IMPORTANT: detect drand-only from exec receipt weather_value (not bundle entropy)
+    // The seed input is read from the signed execution receipt (never from
+    // the bundle's unsigned `entropy` block), and its derivation is chosen
+    // by the receipts' (schema, tag) pair, never by which field is present.
     let exec_parsed: serde_json::Value =
         serde_json::from_str(&bundle.execution_receipt.payload_jcs).unwrap_or_default();
-    let exec_weather = exec_parsed.get("weather_value").and_then(|v| v.as_str());
+    let lock_for_rules: serde_json::Value =
+        serde_json::from_str(&bundle.lock_receipt.payload_jcs).unwrap_or_default();
+    let seed_input = SeedInput::from_receipts(&lock_for_rules, &exec_parsed);
     let exec_seed = exec_parsed
         .get("seed")
         .and_then(|v| v.as_str())
@@ -566,41 +680,62 @@ pub fn verify_bundle_with<R: KeyResolver>(
             detail: None,
         });
         step6_pass = false;
-    } else {
-        let (computed_seed, _) = match exec_weather {
-            Some(w) => compute_seed(&computed_entry_hash, exec_drand, w),
-            None => compute_seed_drand_only(&computed_entry_hash, exec_drand),
-        };
-        let computed_seed_hex = hex::encode(computed_seed);
-        step6_pass = computed_seed_hex == exec_seed;
-        let mode = if exec_weather.is_some() {
-            "drand + weather"
-        } else {
-            "drand only"
-        };
-        let step6_detail = if step6_pass {
-            None
-        } else {
-            Some(StepDetail::HexMismatch {
-                expected: exec_seed.to_string(),
-                computed: computed_seed_hex.clone(),
-            })
-        };
+    } else if let Err(SeedError::NoRule(reason)) = &seed_input {
+        // No seed derivation is defined for this pair. The steps that pick
+        // their rules from the pair fail it, and a Skip never passes.
         steps.push(StepResult {
             name: StepName::SeedRecomputation,
-            status: if step6_pass {
-                StepStatus::Pass
-            } else {
-                StepStatus::Fail(format!(
-                    "({mode}) expected {exec_seed}, got {computed_seed_hex}"
-                ))
-            },
-            detail: step6_detail,
+            status: StepStatus::Skip(reason.clone()),
+            detail: None,
         });
+        step6_pass = false;
+    } else {
+        match &seed_input {
+            Err(SeedError::NoRule(_)) => unreachable!("handled above"),
+            Err(SeedError::Invalid(reason)) => {
+                steps.push(StepResult {
+                    name: StepName::SeedRecomputation,
+                    status: StepStatus::Fail(reason.clone()),
+                    detail: None,
+                });
+                step6_pass = false;
+            }
+            Ok(input) => {
+                let computed_seed = input.seed(&computed_entry_hash, exec_drand);
+                let computed_seed_hex = hex::encode(computed_seed);
+                step6_pass = computed_seed_hex == exec_seed;
+                let mode = input.mode();
+                let step6_detail = if step6_pass {
+                    None
+                } else {
+                    Some(StepDetail::HexMismatch {
+                        expected: exec_seed.to_string(),
+                        computed: computed_seed_hex.clone(),
+                    })
+                };
+                steps.push(StepResult {
+                    name: StepName::SeedRecomputation,
+                    status: if step6_pass {
+                        StepStatus::Pass
+                    } else {
+                        StepStatus::Fail(format!(
+                            "({mode}) expected {exec_seed}, got {computed_seed_hex}"
+                        ))
+                    },
+                    detail: step6_detail,
+                });
+            }
+        }
     }
 
     // === Step 7: Winner selection ===
-    if !step6_pass || !step3_pass {
+    if let (true, Err(SeedError::NoRule(reason))) = (step3_pass, &seed_input) {
+        steps.push(StepResult {
+            name: StepName::WinnerSelection,
+            status: StepStatus::Skip(reason.clone()),
+            detail: None,
+        });
+    } else if !step6_pass || !step3_pass {
         steps.push(StepResult {
             name: StepName::WinnerSelection,
             status: StepStatus::Skip("seed or exec signature failed".into()),
@@ -615,9 +750,10 @@ pub fn verify_bundle_with<R: KeyResolver>(
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32;
 
-        let (computed_seed, _) = match exec_weather {
-            Some(w) => compute_seed(&computed_entry_hash, exec_drand, w),
-            None => compute_seed_drand_only(&computed_entry_hash, exec_drand),
+        // step6_pass implies the seed input was read.
+        let computed_seed = match &seed_input {
+            Ok(input) => input.seed(&computed_entry_hash, exec_drand),
+            Err(_) => unreachable!("winner selection runs only after the seed step passed"),
         };
 
         match draw(&entries, &computed_seed, winner_count) {
@@ -633,9 +769,14 @@ pub fn verify_bundle_with<R: KeyResolver>(
                     .collect();
 
                 if computed_ids == receipt_ids {
+                    // The bundle's unsigned `results` (what a proof page
+                    // displays) must say exactly what the receipt signed.
                     steps.push(StepResult {
                         name: StepName::WinnerSelection,
-                        status: StepStatus::Pass,
+                        status: match check_bundle_results(bundle, &receipt_ids) {
+                            Ok(()) => StepStatus::Pass,
+                            Err(reason) => StepStatus::Fail(reason),
+                        },
                         detail: None,
                     });
                 } else {
@@ -659,58 +800,64 @@ pub fn verify_bundle_with<R: KeyResolver>(
         }
     }
 
-    // === Step 8: BLS drand verification ===
-    #[cfg(feature = "cli")]
-    {
-        match crate::drand::verify_drand_round(
-            &bundle.entropy.drand_chain_hash,
-            bundle.entropy.drand_round,
-            &bundle.entropy.drand_signature,
-            &bundle.entropy.drand_randomness,
-        ) {
-            Ok(()) => steps.push(StepResult {
-                name: StepName::DrandBlsSignature,
-                status: StepStatus::Pass,
-                detail: None,
-            }),
-            Err(e) => steps.push(StepResult {
-                name: StepName::DrandBlsSignature,
-                status: StepStatus::Fail(e.to_string()),
-                detail: None,
-            }),
-        }
-    }
-    #[cfg(not(feature = "cli"))]
-    {
+    // === Step 8: BLS drand verification (every build, including WASM) ===
+    //
+    // The beacon is read from the SIGNED execution receipt — the same
+    // payload whose drand_randomness feeds the seed — and the bundle's
+    // unsigned `entropy` block (weather_value included) must match it
+    // field for field. Verifying `entropy` alone would let a genuine
+    // beacon for any round vouch for whatever randomness the receipt
+    // claims.
+    if !step3_pass {
         steps.push(StepResult {
             name: StepName::DrandBlsSignature,
-            status: StepStatus::Skip("BLS verification requires cli feature".into()),
+            status: StepStatus::Skip("exec signature failed".into()),
+            detail: None,
+        });
+    } else {
+        steps.push(StepResult {
+            name: StepName::DrandBlsSignature,
+            status: match check_drand_beacon(bundle, &exec_parsed) {
+                Ok(()) => StepStatus::Pass,
+                Err(reason) => StepStatus::Fail(reason),
+            },
             detail: None,
         });
     }
 
     // === Step 10: Cross-receipt field consistency ===
     //
-    // Every field duplicated across the lock and execution receipts MUST be
-    // byte-identical. Without this, an infrastructure-level attacker signing
-    // a fraudulent exec receipt can pair it with a legitimate lock from a
-    // different draw — `lock_receipt_hash` binds lock bytes INTO the exec
-    // but does not bind the exec's own duplicated fields back to the lock.
+    // The cross-checked fields below MUST be byte-identical. Without this,
+    // an infrastructure-level attacker signing a fraudulent exec receipt
+    // can pair it with a legitimate lock from a different draw —
+    // `lock_receipt_hash` binds lock bytes INTO the exec but does not bind
+    // the exec's own duplicated fields back to the lock.
     //
     // Fields checked (spec §4.2.5): draw_id, operator_id, sequence,
-    // drand_chain, drand_round, weather_station. Bundle envelope draw_id
-    // also cross-checked. signing_key_id deliberately NOT checked (lock =
-    // operator key, exec = infra key; different by design). operator_slug
-    // NOT checked (derivative of operator_id). Algorithm identity tags NOT
-    // cross-checked (validated per-receipt against pinned values already).
+    // drand_chain, drand_round, weather_station, entropy_composition.
+    // Bundle envelope draw_id also cross-checked. Lock v6 / exec v5:
+    // `weather_station` is compared for equality too, and under the Land
+    // Observations tag the lock must name Middle Wallop
+    // (`check_landobs_station`). See `StepName::ReceiptFieldConsistency`.
+    // signing_key_id deliberately NOT checked (lock = operator key, exec =
+    // infra key; different by design).
+    // Before lock v6 / exec v5, operator_slug and fair_pick_version are NOT
+    // checked (operator_slug is derivative of operator_id). Lock v6 / exec
+    // v5 compares both, and fair_pick_version must also be in
+    // FAIR_PICK_VERSIONS. Algorithm identity tags NOT cross-checked
+    // (validated per-receipt against pinned values already), except
+    // entropy_composition, which also selects the rules both receipts are
+    // checked under.
     steps.push(check_receipt_field_consistency(bundle));
 
     // === Step 11: Weather observation window ===
     //
-    // exec.weather_observation_time MUST fall in
-    // [lock.weather_time, lock.weather_time + 3600s]. Prevents an
-    // infrastructure-level attacker from fetching weather from any point
-    // in time and attributing it to the draw's declared window.
+    // Lock v4/v5: exec.weather_observation_time MUST fall in
+    // [lock.weather_time - 3600s, lock.weather_time].
+    // Lock v6 / exec v5: lock.weather_time is the hour the drand round
+    // implies, the lock is at least 46 minutes before it, and the
+    // observation (if any) is of exactly that hour.
+    // See `StepName::WeatherObservationWindow` for the full rules.
     steps.push(check_weather_observation_window(bundle));
 
     // === Step 12: Bundle shape ===
@@ -738,7 +885,7 @@ pub fn verify_bundle_with<R: KeyResolver>(
     // live when the receipt was signed.
     //
     // Skipped when there is no resolved key (signature step already
-    // failed for an unrelated reason), and also skipped when the
+    // failed for an unrelated reason), and NotApplicable when the
     // resolver is `BundleEmbeddedResolver` running in
     // `VerifierMode::SelfConsistencyOnly` — the comparison is vacuous
     // there because the bundle is self-attesting (the trust root has
@@ -835,10 +982,10 @@ fn is_sentinel_year_timestamp(ts: &str) -> bool {
 /// Returns `Ok(ResolvedKey)` for a usable resolution, `Err(kind)`
 /// otherwise. `Err` cases:
 ///
-/// - No `key_id` to look up (`requested_key_id` is `None`) → treated
-///   as `KeyNotFound`. This happens when the receipt parse failed,
-///   which `BundleShape` will already have caught — the verifier
-///   reports both in the same run.
+/// - No `key_id` to look up (`requested_key_id` is `None`) →
+///   `ReceiptUnparsed`. This happens when the receipt's typed parse
+///   failed, which `BundleShape` reports in the same run. The signature
+///   step therefore fails too; it never passes without a key id.
 /// - `resolver.resolve` returned an error → the variant maps directly.
 /// - Returned `public_key`'s key_id does not match the requested one
 ///   → `InconsistentRow` (the verifier-side mirror of the producer's
@@ -851,7 +998,7 @@ fn resolve_with_filter<R: KeyResolver>(
     class: KeyClass,
     mode: VerifierMode,
 ) -> Result<ResolvedKey, ResolutionFailureKind> {
-    let kid = requested_key_id.ok_or(ResolutionFailureKind::KeyNotFound)?;
+    let kid = requested_key_id.ok_or(ResolutionFailureKind::ReceiptUnparsed)?;
     let resolved = resolver
         .resolve(kid, class)
         .map_err(map_resolution_error_kind)?;
@@ -921,11 +1068,124 @@ impl ResolutionFailureKind {
                 "resolver returned Sentinel inserted_at under a non-self-consistency mode \
                  (protocol violation per spec §4.2.4)"
             }
+            ResolutionFailureKind::ReceiptUnparsed => {
+                "receipt did not parse, so it has no signing_key_id to resolve (see bundle_shape)"
+            }
             ResolutionFailureKind::LegacySentinelRejected => {
                 "resolver returned the legacy 0001-01-01 sentinel literal in inserted_at"
             }
         }
     }
+}
+
+/// What the seed is derived from, read from the signed execution receipt
+/// and chosen by the receipts' (schema, tag) pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SeedInput<'a> {
+    /// No entropy value: drand alone (a fallback, or a drand-only draw).
+    DrandOnly,
+    /// `compute_seed` with the signed `weather_value`.
+    Weather(&'a str),
+    /// `compute_seed_freq` with the signed `freq_value`, under the
+    /// grid-frequency pair or the Land Observations pair's state (b).
+    Freq(&'a str),
+}
+
+/// Why `SeedInput::from_receipts` gives no seed input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SeedError {
+    /// The receipts' (schema, tag) pair has no seed derivation (a
+    /// mismatched or unrecognised pair). The seed and winner steps are
+    /// skipped; a Skip never passes, and the steps that choose their rules
+    /// from the pair fail it.
+    NoRule(String),
+    /// The pair has a rule, but the signed receipt breaks it.
+    Invalid(String),
+}
+
+impl<'a> SeedInput<'a> {
+    /// Under the grid-frequency pair the seed comes from `freq_value`, and a
+    /// non-null `weather_value` is refused. Under the forecast pairs it comes
+    /// from `weather_value` as before; absent or null means drand only, and
+    /// any other non-string value fails. Under the Land Observations pair it
+    /// follows the three-state table (`landobs_v1::exec_state`): (a)
+    /// `weather_value`, (b) `freq_value`, (c) drand only, and a receipt in
+    /// none of the three is `SeedError::Invalid`. A mismatched or
+    /// unrecognised pair has no seed rule (`SeedError::NoRule`).
+    fn from_receipts(
+        lock: &serde_json::Value,
+        exec: &'a serde_json::Value,
+    ) -> Result<SeedInput<'a>, SeedError> {
+        fn signed_text<'a>(
+            exec: &'a serde_json::Value,
+            key: &str,
+        ) -> Result<Option<&'a str>, SeedError> {
+            match exec.get(key).filter(|v| !v.is_null()) {
+                None => Ok(None),
+                Some(v) => v.as_str().map(Some).ok_or_else(|| {
+                    SeedError::Invalid(format!("exec receipt {key} is neither a string nor null"))
+                }),
+            }
+        }
+        match weather_rules(lock, exec) {
+            WeatherRules::Freq => {
+                if exec.get("weather_value").is_some_and(|v| !v.is_null()) {
+                    return Err(SeedError::Invalid(format!(
+                        "exec receipt weather_value must be null under {}",
+                        crate::protocol::freq_v1::ENTROPY_COMPOSITION
+                    )));
+                }
+                Ok(signed_text(exec, "freq_value")?.map_or(SeedInput::DrandOnly, SeedInput::Freq))
+            }
+            WeatherRules::Legacy => Ok(signed_text(exec, "weather_value")?
+                .map_or(SeedInput::DrandOnly, SeedInput::Weather)),
+            // The seed step enforces the table itself: an earlier step's
+            // failure does not gate this one, and a receipt in no state
+            // must never choose its own seed.
+            WeatherRules::LandObs => match crate::protocol::landobs_v1::exec_state(exec) {
+                Ok(crate::protocol::landobs_v1::ExecState::Weather(v)) => Ok(SeedInput::Weather(v)),
+                Ok(crate::protocol::landobs_v1::ExecState::Freq(v)) => Ok(SeedInput::Freq(v)),
+                Ok(crate::protocol::landobs_v1::ExecState::DrandOnly) => Ok(SeedInput::DrandOnly),
+                Err(reason) => Err(SeedError::Invalid(reason)),
+            },
+            WeatherRules::Mismatched => Err(SeedError::NoRule(format!(
+                "no seed rule for this tag pair: {}",
+                mismatch_reason(lock, exec)
+            ))),
+            WeatherRules::Unrecognised(reason) => Err(SeedError::NoRule(format!(
+                "no seed rule for this tag pair: {reason}"
+            ))),
+        }
+    }
+
+    fn seed(&self, entry_hash: &str, drand_randomness: &str) -> [u8; 32] {
+        match self {
+            SeedInput::DrandOnly => compute_seed_drand_only(entry_hash, drand_randomness).0,
+            SeedInput::Weather(w) => compute_seed(entry_hash, drand_randomness, w).0,
+            SeedInput::Freq(v) => {
+                crate::protocol::compute_seed_freq(entry_hash, drand_randomness, v).0
+            }
+        }
+    }
+
+    fn mode(&self) -> &'static str {
+        match self {
+            SeedInput::DrandOnly => "drand only",
+            SeedInput::Weather(_) => "drand + weather",
+            SeedInput::Freq(_) => "drand + grid frequency",
+        }
+    }
+}
+
+/// Lock v6 / execution v5 carry one of two tags; both receipts must carry
+/// the same one.
+const TAG_PAIRING_ERROR: &str = "lock and execution receipts carry different entropy tags";
+
+/// The tag a lock v6 / execution v5 receipt carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum V6Tag {
+    LandObs,
+    Freq,
 }
 
 fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
@@ -941,7 +1201,7 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
     // Mismatches reject as downgrade-relabel / upgrade-spoof attempts —
     // the same shape as the v2/v3 deny_unknown_fields defence (F2).
     let inline_lock_pk_present = bundle.lock_receipt.public_key_hex.is_some();
-    let (lock_locked_at, lock_weather_time) =
+    let (lock_locked_at, lock_weather_time, lock_freq_start, lock_v6) =
         match parse_lock_receipt(&bundle.lock_receipt.payload_jcs) {
             Ok(ParsedLockReceipt::V4(p)) => {
                 if let Err(e) = validate_lock_receipt_tags(&p) {
@@ -962,7 +1222,7 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
                         detail: None,
                     };
                 }
-                (p.locked_at, p.weather_time)
+                (p.locked_at, Some(p.weather_time), None, None)
             }
             Ok(ParsedLockReceipt::V5(p)) => {
                 if let Err(e) = validate_lock_receipt_tags_v5(&p) {
@@ -983,7 +1243,54 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
                         detail: None,
                     };
                 }
-                (p.locked_at, p.weather_time)
+                (p.locked_at, Some(p.weather_time), None, None)
+            }
+            Ok(ParsedLockReceipt::V6(p)) => {
+                if let Err(e) = validate_lock_receipt_tags_v6(&p) {
+                    return StepResult {
+                        name: StepName::BundleShape,
+                        status: StepStatus::Fail(format!("lock receipt validation: {}", e)),
+                        detail: None,
+                    };
+                }
+                if inline_lock_pk_present {
+                    return StepResult {
+                        name: StepName::BundleShape,
+                        status: StepStatus::Fail(
+                            "lock receipt schema_version=\"6\" must not carry inline \
+                             public_key_hex on the bundle wrapper (downgrade-relabel check)"
+                                .into(),
+                        ),
+                        detail: None,
+                    };
+                }
+                (
+                    p.locked_at,
+                    Some(p.weather_time),
+                    None,
+                    Some(V6Tag::LandObs),
+                )
+            }
+            Ok(ParsedLockReceipt::V6Freq(p)) => {
+                if let Err(e) = validate_lock_receipt_tags_v6_freq(&p) {
+                    return StepResult {
+                        name: StepName::BundleShape,
+                        status: StepStatus::Fail(format!("lock receipt validation: {}", e)),
+                        detail: None,
+                    };
+                }
+                if inline_lock_pk_present {
+                    return StepResult {
+                        name: StepName::BundleShape,
+                        status: StepStatus::Fail(
+                            "lock receipt schema_version=\"6\" must not carry inline \
+                             public_key_hex on the bundle wrapper (downgrade-relabel check)"
+                                .into(),
+                        ),
+                        detail: None,
+                    };
+                }
+                (p.locked_at, None, Some(p.freq_start), Some(V6Tag::Freq))
             }
             Err(e) => {
                 return StepResult {
@@ -1002,7 +1309,9 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
             detail: None,
         };
     }
-    if let Err(e) = chrono_parse_canonical(&lock_weather_time) {
+    if let Some(wt) = &lock_weather_time
+        && let Err(e) = chrono_parse_canonical(wt)
+    {
         return StepResult {
             name: StepName::BundleShape,
             status: StepStatus::Fail(format!("lock.weather_time: {}", e)),
@@ -1028,7 +1337,7 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
     // schema_version constant (v4 is byte-identical to v3 on the signed
     // payload; the bump signals resolver-driven verification).
     let inline_exec_pk_present = bundle.execution_receipt.public_key_hex.is_some();
-    let (executed_at, weather_observation_time) = match &parsed_exec {
+    let (executed_at, weather_observation_time, exec_v5) = match &parsed_exec {
         ParsedExecutionReceipt::V2(p) => {
             if let Err(e) = validate_execution_receipt_tags(p) {
                 return StepResult {
@@ -1048,7 +1357,11 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
                     detail: None,
                 };
             }
-            (p.executed_at.clone(), p.weather_observation_time.clone())
+            (
+                p.executed_at.clone(),
+                p.weather_observation_time.clone(),
+                None,
+            )
         }
         ParsedExecutionReceipt::V3(p) => {
             if let Err(e) = validate_execution_receipt_tags_v3(p) {
@@ -1069,7 +1382,11 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
                     detail: None,
                 };
             }
-            (p.executed_at.clone(), p.weather_observation_time.clone())
+            (
+                p.executed_at.clone(),
+                p.weather_observation_time.clone(),
+                None,
+            )
         }
         ParsedExecutionReceipt::V4(p) => {
             if let Err(e) = validate_execution_receipt_tags_v4(p) {
@@ -1090,7 +1407,57 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
                     detail: None,
                 };
             }
-            (p.executed_at.clone(), p.weather_observation_time.clone())
+            (
+                p.executed_at.clone(),
+                p.weather_observation_time.clone(),
+                None,
+            )
+        }
+        ParsedExecutionReceipt::V5(p) => {
+            if let Err(e) = validate_execution_receipt_tags_v5(p) {
+                return StepResult {
+                    name: StepName::BundleShape,
+                    status: StepStatus::Fail(format!("exec receipt validation: {}", e)),
+                    detail: None,
+                };
+            }
+            if inline_exec_pk_present {
+                return StepResult {
+                    name: StepName::BundleShape,
+                    status: StepStatus::Fail(
+                        "execution receipt schema_version=\"5\" must not carry inline \
+                         public_key_hex on the bundle wrapper (downgrade-relabel check)"
+                            .into(),
+                    ),
+                    detail: None,
+                };
+            }
+            (
+                p.executed_at.clone(),
+                p.weather_observation_time.clone(),
+                Some(V6Tag::LandObs),
+            )
+        }
+        ParsedExecutionReceipt::V5Freq(p) => {
+            if let Err(e) = validate_execution_receipt_tags_v5_freq(p) {
+                return StepResult {
+                    name: StepName::BundleShape,
+                    status: StepStatus::Fail(format!("exec receipt validation: {}", e)),
+                    detail: None,
+                };
+            }
+            if inline_exec_pk_present {
+                return StepResult {
+                    name: StepName::BundleShape,
+                    status: StepStatus::Fail(
+                        "execution receipt schema_version=\"5\" must not carry inline \
+                         public_key_hex on the bundle wrapper (downgrade-relabel check)"
+                            .into(),
+                    ),
+                    detail: None,
+                };
+            }
+            (p.executed_at.clone(), None, Some(V6Tag::Freq))
         }
     };
 
@@ -1111,6 +1478,58 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
         };
     }
 
+    if lock_v6.is_some() != exec_v5.is_some() {
+        return StepResult {
+            name: StepName::BundleShape,
+            status: StepStatus::Fail(SCHEMA_PAIRING_ERROR.into()),
+            detail: None,
+        };
+    }
+    if lock_v6 != exec_v5 {
+        return StepResult {
+            name: StepName::BundleShape,
+            status: StepStatus::Fail(TAG_PAIRING_ERROR.into()),
+            detail: None,
+        };
+    }
+    if let Some(tag) = lock_v6 {
+        // Under lock 6 every signed timestamp must round-trip: a string
+        // such as `17:99` that only normalises to a real time is rejected.
+        let mut strict = vec![
+            ("lock.locked_at", lock_locked_at.as_str()),
+            ("exec.executed_at", executed_at.as_str()),
+        ];
+        if let Some(obs) = &weather_observation_time {
+            strict.push(("exec.weather_observation_time", obs.as_str()));
+        }
+        for (field, value) in strict {
+            if let Err(e) = chrono_parse_canonical_strict(value) {
+                return StepResult {
+                    name: StepName::BundleShape,
+                    status: StepStatus::Fail(format!("{field}: {e}")),
+                    detail: None,
+                };
+            }
+        }
+        let parsed = match tag {
+            V6Tag::LandObs => crate::protocol::landobs_v1::parse_weather_time(
+                lock_weather_time.as_deref().unwrap_or_default(),
+            )
+            .map_err(|e| format!("lock.weather_time: {e}")),
+            V6Tag::Freq => crate::protocol::freq_v1::parse_freq_start(
+                lock_freq_start.as_deref().unwrap_or_default(),
+            )
+            .map_err(|e| format!("lock.freq_start: {e}")),
+        };
+        if let Err(reason) = parsed {
+            return StepResult {
+                name: StepName::BundleShape,
+                status: StepStatus::Fail(reason),
+                detail: None,
+            };
+        }
+    }
+
     StepResult {
         name: StepName::BundleShape,
         status: StepStatus::Pass,
@@ -1118,8 +1537,257 @@ fn check_bundle_shape(bundle: &ProofBundle) -> StepResult {
     }
 }
 
+/// Part of step 7 (`WinnerSelection`): the bundle's unsigned `results`
+/// must equal the signed execution receipt's `results`, element by
+/// element: `results[i].entry_id == receipt.results[i]` and
+/// `results[i].position == i + 1`, with equal lengths.
+fn check_bundle_results(bundle: &ProofBundle, receipt_ids: &[&str]) -> Result<(), String> {
+    if bundle.results.len() != receipt_ids.len() {
+        return Err(format!(
+            "bundle results has {} entries, the signed execution receipt has {}",
+            bundle.results.len(),
+            receipt_ids.len()
+        ));
+    }
+    for (i, (result, receipt_id)) in bundle.results.iter().zip(receipt_ids).enumerate() {
+        if result.entry_id != *receipt_id {
+            return Err(format!(
+                "bundle results[{i}].entry_id ({}) does not match the signed execution receipt ({receipt_id})",
+                result.entry_id
+            ));
+        }
+        let expected_position = i as u64 + 1;
+        if u64::from(result.position) != expected_position {
+            return Err(format!(
+                "bundle results[{i}].position is {}, expected {expected_position}",
+                result.position
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Step 8 body (`DrandBlsSignature`). This step also owns the entropy
+/// binding: take the drand beacon from the signed execution receipt,
+/// require every field of the bundle's unsigned `entropy` block
+/// (`drand_chain_hash`, `drand_round`, `drand_signature`,
+/// `drand_randomness`, `weather_value`) to match the receipt exactly,
+/// verify the BLS signature (and `sha256(signature) == randomness`), and
+/// require the round to publish strictly after the lock receipt's
+/// `locked_at` (`drand_round_after_lock`). Under lock v6 / execution v5
+/// (either schema), also require `executed_at` not to precede the round's
+/// publication (`drand_round_before_execution`).
+fn check_drand_beacon(bundle: &ProofBundle, exec: &serde_json::Value) -> Result<(), String> {
+    let exec_str = |field: &str| -> Result<&str, String> {
+        exec.get(field)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("execution receipt {field} is missing or not a string"))
+    };
+    let chain = exec_str("drand_chain")?;
+    let round = exec
+        .get("drand_round")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| "execution receipt drand_round is missing or not an integer".to_string())?;
+    let signature = exec_str("drand_signature")?;
+    let randomness = exec_str("drand_randomness")?;
+
+    let entropy = &bundle.entropy;
+    let mismatch = |field: &str,
+                    bundle_val: &dyn std::fmt::Display,
+                    exec_val: &dyn std::fmt::Display| {
+        format!(
+            "entropy.{field} ({bundle_val}) does not match the signed execution receipt ({exec_val})"
+        )
+    };
+    if entropy.drand_chain_hash != chain {
+        return Err(mismatch(
+            "drand_chain_hash",
+            &entropy.drand_chain_hash,
+            &chain,
+        ));
+    }
+    if entropy.drand_round != round {
+        return Err(mismatch("drand_round", &entropy.drand_round, &round));
+    }
+    if entropy.drand_signature != signature {
+        return Err(mismatch(
+            "drand_signature",
+            &entropy.drand_signature,
+            &signature,
+        ));
+    }
+    if entropy.drand_randomness != randomness {
+        return Err(mismatch(
+            "drand_randomness",
+            &entropy.drand_randomness,
+            &randomness,
+        ));
+    }
+
+    // weather_value also feeds the seed. Bind the unsigned entropy copy to
+    // the signed one (absent or null on both sides counts as equal), so
+    // nothing shown from `entropy` can differ from what was verified.
+    let exec_weather = match exec.get("weather_value").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => Some(
+            v.as_str()
+                .ok_or_else(|| "execution receipt weather_value is not a string".to_string())?,
+        ),
+    };
+    if entropy.weather_value.as_deref() != exec_weather {
+        return Err(format!(
+            "entropy.weather_value ({:?}) does not match the signed execution receipt ({:?})",
+            entropy.weather_value, exec_weather
+        ));
+    }
+
+    // The same binding for the grid-frequency value. A receipt without
+    // `freq_value` (a tag that carries none, or a weather tag whose reading
+    // arrived) allows no `entropy.freq_value`.
+    let exec_freq = match exec.get("freq_value").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => Some(
+            v.as_str()
+                .ok_or_else(|| "execution receipt freq_value is not a string".to_string())?,
+        ),
+    };
+    if entropy.freq_value.as_deref() != exec_freq {
+        return Err(format!(
+            "entropy.freq_value ({:?}) does not match the signed execution receipt ({:?})",
+            entropy.freq_value, exec_freq
+        ));
+    }
+
+    crate::drand::verify_drand_round(chain, round, signature, randomness)
+        .map_err(|e| e.to_string())?;
+
+    // The beacon must not have existed when the draw locked, or whoever
+    // locked could have known the randomness first.
+    let lock: serde_json::Value =
+        serde_json::from_str(&bundle.lock_receipt.payload_jcs).unwrap_or_default();
+    let locked_at = lock
+        .get("locked_at")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "lock receipt locked_at is missing or not a string".to_string())?;
+    drand_round_after_lock(round, locked_at)?;
+
+    // Under lock v6 / execution v5 the beacon must also have been public
+    // when the execution receipt was signed. Either schema triggers it.
+    // An unrecognised pair gets the stricter rule too; the steps that pick
+    // their rules from the pair fail it outright.
+    if weather_rules(&lock, exec) != WeatherRules::Legacy {
+        drand_round_before_execution(round, exec_str("executed_at")?)?;
+    }
+    Ok(())
+}
+
+/// `executed_at` (canonical RFC 3339, parsed with
+/// `chrono_parse_canonical_strict`, so a time that would normalise is
+/// rejected) must not be earlier than the quicknet publish time of `round`.
+/// Whole seconds suffice: for a whole number P, `executed_at >= P` iff
+/// `floor(executed_at) >= P`.
+pub(crate) fn drand_round_before_execution(round: u64, executed_at: &str) -> Result<(), String> {
+    let executed = chrono_parse_canonical_strict(executed_at)
+        .map_err(|e| format!("execution receipt executed_at ({executed_at}): {e}"))?;
+    let published = crate::drand::quicknet_round_time(round)
+        .ok_or_else(|| format!("drand round {round} has no quicknet publish time"))?;
+    if executed.timestamp() >= published {
+        Ok(())
+    } else {
+        Err(format!(
+            "execution receipt executed_at {executed_at} is before drand round {round} was published (unix time {published})"
+        ))
+    }
+}
+
+/// The quicknet `round` must publish strictly after `locked_at` (canonical
+/// RFC 3339, parsed with `chrono_parse_canonical`). Publish time is
+/// `QUICKNET_GENESIS_TIME + (round - 1) * QUICKNET_PERIOD_SECS`.
+///
+/// `locked_at` is asserted by the operator's lock signature, so this is a
+/// consistency check that trusts the lock signer's clock: it catches a
+/// receipt that claims to have locked after its own beacon was public,
+/// not an operator who lies about the time.
+pub(crate) fn drand_round_after_lock(round: u64, locked_at: &str) -> Result<(), String> {
+    let locked = chrono_parse_canonical(locked_at)
+        .map_err(|e| format!("lock receipt locked_at ({locked_at}): {e}"))?;
+    let published = crate::drand::quicknet_round_time(round)
+        .ok_or_else(|| format!("drand round {round} has no quicknet publish time"))?;
+    // Comparing whole seconds is exact: drand publishes on whole seconds,
+    // and for a whole number P, P > locked_at iff P > floor(locked_at).
+    if published > locked.timestamp() {
+        Ok(())
+    } else {
+        Err(format!(
+            "drand round {round} was published at unix time {published}, \
+             not after lock receipt locked_at {locked_at}"
+        ))
+    }
+}
+
+/// Step 5a once the lock's `entry_hash` matches: under lock v6, either tag
+/// (its `(schema_version, entropy_composition)` pair selects the Land
+/// Observations or grid-frequency rules), `commitment_hash` must equal
+/// that entry hash. Older lock schemas are not checked.
+fn check_lock_commitment_hash(lock: &serde_json::Value, entry_hash: &str) -> StepResult {
+    let pass = || StepResult {
+        name: StepName::LockReceiptEntryHash,
+        status: StepStatus::Pass,
+        detail: None,
+    };
+    if !matches!(
+        rule_set_for("lock", lock, LOCK_RULE_SETS),
+        Ok(RuleSet::LandObs | RuleSet::Freq)
+    ) {
+        return pass();
+    }
+    match lock.get("commitment_hash").and_then(|v| v.as_str()) {
+        Some(c) if c == entry_hash => pass(),
+        other => StepResult {
+            name: StepName::LockReceiptEntryHash,
+            status: StepStatus::Fail(format!(
+                "lock receipt commitment_hash ({}) is not its entry_hash ({entry_hash})",
+                other.map_or_else(|| "missing or not a string".to_string(), str::to_string)
+            )),
+            detail: Some(StepDetail::HexMismatch {
+                expected: entry_hash.to_string(),
+                computed: other.unwrap_or("").to_string(),
+            }),
+        },
+    }
+}
+
+/// Under lock v6 / execution v5 the cross-check has already made both
+/// receipts' `fair_pick_version` identical; it must also name a `fair_pick`
+/// release this verifier implements.
+fn check_fair_pick_version(lock: &serde_json::Value) -> Result<(), String> {
+    match lock.get("fair_pick_version").and_then(|v| v.as_str()) {
+        Some(v) if FAIR_PICK_VERSIONS.contains(&v) => Ok(()),
+        other => Err(format!(
+            "fair_pick_version {} is not one this verifier implements ({})",
+            other.map_or_else(
+                || "missing or not a string".to_string(),
+                |v| format!("{v:?}")
+            ),
+            FAIR_PICK_VERSIONS
+                .iter()
+                .map(|v| format!("{v:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// Lock receipt schema 6 and execution receipt schema 5 (either tag) may be
+/// paired only with each other.
+const SCHEMA_PAIRING_ERROR: &str = "lock schema_version 6 must pair with execution schema_version 5, and execution schema_version 5 with lock schema_version 6";
+
 // Fields that MUST be byte-identical between lock and exec receipts per
 // spec §4.2.5. draw_id is also cross-checked against the bundle envelope.
+// entropy_composition is compared as well: it picks the rule set, so both
+// receipts must name the same one. Today a differing tag already makes one
+// receipt's (schema_version, entropy_composition) pair unknown, which fails
+// first; the comparison guards a schema that later carries two tags.
 const CROSS_CHECKED_FIELDS: &[&str] = &[
     "draw_id",
     "operator_id",
@@ -1127,7 +1795,41 @@ const CROSS_CHECKED_FIELDS: &[&str] = &[
     "drand_chain",
     "drand_round",
     "weather_station",
+    "entropy_composition",
 ];
+
+// Under lock v6 / execution v5, either tag: the legacy list plus
+// operator_slug and fair_pick_version, with fair_pick_version a release
+// this verifier implements (see `check_fair_pick_version`). weather_station
+// is compared for equality: under the Land Observations tag both receipts
+// name Middle Wallop; under grid frequency both carry null.
+const CROSS_CHECKED_FIELDS_V6: &[&str] = &[
+    "draw_id",
+    "operator_id",
+    "sequence",
+    "drand_chain",
+    "drand_round",
+    "entropy_composition",
+    "operator_slug",
+    "fair_pick_version",
+    "weather_station",
+];
+
+/// Under the Land Observations tag the lock names Middle Wallop. The
+/// execution receipt's station is then held to the lock's by
+/// `CROSS_CHECKED_FIELDS_V6`.
+fn check_landobs_station(lock: &serde_json::Value) -> Result<(), String> {
+    use crate::protocol::landobs_v1::PRIMARY_STATION;
+    match lock.get("weather_station").and_then(|v| v.as_str()) {
+        Some(PRIMARY_STATION) => Ok(()),
+        Some(other) => Err(format!(
+            "lock weather_station {other:?} is not the station {PRIMARY_STATION}"
+        )),
+        None => Err(format!(
+            "lock weather_station is missing or not a string; it must be {PRIMARY_STATION}"
+        )),
+    }
+}
 
 fn check_receipt_field_consistency(bundle: &ProofBundle) -> StepResult {
     let lock: serde_json::Value = match serde_json::from_str(&bundle.lock_receipt.payload_jcs) {
@@ -1170,8 +1872,28 @@ fn check_receipt_field_consistency(bundle: &ProofBundle) -> StepResult {
         };
     }
 
+    let rules = weather_rules(&lock, &exec);
+    let fields = match &rules {
+        WeatherRules::Legacy => CROSS_CHECKED_FIELDS,
+        WeatherRules::LandObs | WeatherRules::Freq => CROSS_CHECKED_FIELDS_V6,
+        WeatherRules::Mismatched => {
+            return StepResult {
+                name: StepName::ReceiptFieldConsistency,
+                status: StepStatus::Fail(mismatch_reason(&lock, &exec).into()),
+                detail: None,
+            };
+        }
+        WeatherRules::Unrecognised(reason) => {
+            return StepResult {
+                name: StepName::ReceiptFieldConsistency,
+                status: StepStatus::Fail(reason.clone()),
+                detail: None,
+            };
+        }
+    };
+
     // Every cross-checked field must match byte-identically.
-    for field in CROSS_CHECKED_FIELDS {
+    for field in fields {
         let lock_val = lock.get(field);
         let exec_val = exec.get(field);
         if lock_val != exec_val {
@@ -1186,10 +1908,319 @@ fn check_receipt_field_consistency(bundle: &ProofBundle) -> StepResult {
         }
     }
 
+    if rules == WeatherRules::LandObs
+        && let Err(reason) = check_landobs_station(&lock)
+            .and_then(|()| check_fair_pick_version(&lock))
+            .and_then(|()| crate::protocol::landobs_v1::exec_state(&exec).map(|_| ()))
+    {
+        return StepResult {
+            name: StepName::ReceiptFieldConsistency,
+            status: StepStatus::Fail(reason),
+            detail: None,
+        };
+    }
+    if rules == WeatherRules::Freq
+        && let Err(reason) = check_fair_pick_version(&lock)
+    {
+        return StepResult {
+            name: StepName::ReceiptFieldConsistency,
+            status: StepStatus::Fail(reason),
+            detail: None,
+        };
+    }
+
     StepResult {
         name: StepName::ReceiptFieldConsistency,
         status: StepStatus::Pass,
         detail: None,
+    }
+}
+
+/// Execution receipt schema versions that carry `weather_fallback_reason`
+/// (all of them, as of v4). The fallback-reason rule applies only to these.
+const EXEC_SCHEMAS_WITH_FALLBACK_REASON: &[&str] = &["2", "3", "4"];
+
+/// The rule set one known `(schema_version, entropy_composition)` pair
+/// selects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuleSet {
+    /// The forecast tag on lock v4/v5 or execution v2/v3/v4.
+    Legacy,
+    /// The Land Observations tag on lock v6 or execution v5.
+    LandObs,
+    /// The grid-frequency tag on lock v6 or execution v5.
+    Freq,
+}
+
+/// Every lock receipt `(schema_version, entropy_composition)` pair the
+/// verifier knows. A schema may in future carry more than one tag, so the
+/// rule set is chosen by the pair, never by the schema alone.
+///
+/// Schema 6 carries two tags, so the seed derivation is chosen by the
+/// pair too, never by the schema or by which field is present: see
+/// `SeedInput`, used by the seed recomputation and winner selection steps.
+const LOCK_RULE_SETS: &[(&str, &str, RuleSet)] = &[
+    (LOCK_SCHEMA_VERSION, ENTROPY_COMPOSITION, RuleSet::Legacy),
+    (LOCK_SCHEMA_VERSION_V5, ENTROPY_COMPOSITION, RuleSet::Legacy),
+    (
+        LOCK_SCHEMA_VERSION_V6,
+        crate::protocol::landobs_v1::ENTROPY_COMPOSITION,
+        RuleSet::LandObs,
+    ),
+    (
+        LOCK_SCHEMA_VERSION_V6,
+        crate::protocol::freq_v1::ENTROPY_COMPOSITION,
+        RuleSet::Freq,
+    ),
+];
+
+/// Every execution receipt `(schema_version, entropy_composition)` pair
+/// the verifier knows.
+const EXEC_RULE_SETS: &[(&str, &str, RuleSet)] = &[
+    (
+        EXECUTION_SCHEMA_VERSION,
+        ENTROPY_COMPOSITION,
+        RuleSet::Legacy,
+    ),
+    (
+        EXECUTION_SCHEMA_VERSION_V3,
+        ENTROPY_COMPOSITION,
+        RuleSet::Legacy,
+    ),
+    (
+        EXECUTION_SCHEMA_VERSION_V4,
+        ENTROPY_COMPOSITION,
+        RuleSet::Legacy,
+    ),
+    (
+        EXECUTION_SCHEMA_VERSION_V5,
+        crate::protocol::landobs_v1::ENTROPY_COMPOSITION,
+        RuleSet::LandObs,
+    ),
+    (
+        EXECUTION_SCHEMA_VERSION_V5,
+        crate::protocol::freq_v1::ENTROPY_COMPOSITION,
+        RuleSet::Freq,
+    ),
+];
+
+/// Which weather rules govern a receipt pair.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum WeatherRules {
+    /// Lock v4/v5 with execution v2/v3/v4, both on the forecast tag: the
+    /// rules before the Land Observations tag, unchanged.
+    Legacy,
+    /// Lock v6 with execution v5, both on the Land Observations tag.
+    LandObs,
+    /// Lock v6 with execution v5, both on the grid-frequency tag.
+    Freq,
+    /// Both receipts are known pairs, but they select different rule sets:
+    /// one is v6/v5 and the other is not, or they carry different v6/v5
+    /// tags. See `mismatch_reason`.
+    Mismatched,
+    /// A receipt's `(schema_version, entropy_composition)` pair is not one
+    /// the verifier knows. Fails closed: every step that picks its rules
+    /// from the pair fails with this reason.
+    Unrecognised(String),
+}
+
+/// The rule set `receipt`'s `(schema_version, entropy_composition)` pair
+/// selects from `known`, or why it selects none.
+fn rule_set_for(
+    which: &str,
+    receipt: &serde_json::Value,
+    known: &[(&str, &str, RuleSet)],
+) -> Result<RuleSet, String> {
+    let text = |field: &str| receipt.get(field).and_then(|v| v.as_str());
+    let schema = text("schema_version")
+        .ok_or_else(|| format!("{which} receipt schema_version is missing or not a string"))?;
+    if !known.iter().any(|(s, _, _)| *s == schema) {
+        return Err(format!(
+            "{which} receipt schema_version {schema:?} is not one this verifier knows"
+        ));
+    }
+    let tag = text("entropy_composition");
+    known
+        .iter()
+        .find(|(s, t, _)| *s == schema && Some(*t) == tag)
+        .map(|(_, _, rules)| *rules)
+        .ok_or_else(|| {
+            let shown = tag.map_or_else(
+                || "missing or not a string".to_string(),
+                |t| format!("{t:?}"),
+            );
+            format!(
+                "{which} receipt schema_version {schema:?} with entropy_composition {shown} \
+                 is not a combination this verifier knows"
+            )
+        })
+}
+
+fn weather_rules(lock: &serde_json::Value, exec: &serde_json::Value) -> WeatherRules {
+    match (
+        rule_set_for("lock", lock, LOCK_RULE_SETS),
+        rule_set_for("execution", exec, EXEC_RULE_SETS),
+    ) {
+        (Err(reason), _) | (_, Err(reason)) => WeatherRules::Unrecognised(reason),
+        (Ok(RuleSet::Legacy), Ok(RuleSet::Legacy)) => WeatherRules::Legacy,
+        (Ok(RuleSet::LandObs), Ok(RuleSet::LandObs)) => WeatherRules::LandObs,
+        (Ok(RuleSet::Freq), Ok(RuleSet::Freq)) => WeatherRules::Freq,
+        (Ok(_), Ok(_)) => WeatherRules::Mismatched,
+    }
+}
+
+/// Why a `WeatherRules::Mismatched` pair fails: two different v6/v5 tags,
+/// or a v6/v5 receipt paired with an older schema.
+fn mismatch_reason(lock: &serde_json::Value, exec: &serde_json::Value) -> &'static str {
+    let v6_family = |r: Result<RuleSet, String>| matches!(r, Ok(RuleSet::LandObs | RuleSet::Freq));
+    if v6_family(rule_set_for("lock", lock, LOCK_RULE_SETS))
+        && v6_family(rule_set_for("execution", exec, EXEC_RULE_SETS))
+    {
+        TAG_PAIRING_ERROR
+    } else {
+        SCHEMA_PAIRING_ERROR
+    }
+}
+
+/// The weather window under the Land Observations tag. The lock receipt's
+/// `weather_time` must be the observation hour its drand round implies,
+/// its `freq_start` must be the grid-frequency window start the round
+/// implies, the lock must be at least `LOCK_OFFSET_SECS` before
+/// `weather_time` (compared to the microsecond), and the execution receipt
+/// must be in one of the tag's three states (`landobs_v1::exec_state`): an
+/// observation of exactly that hour; no observation, with the round's
+/// grid-frequency window; or neither.
+fn check_landobs_weather(lock: &serde_json::Value, exec: &serde_json::Value) -> Result<(), String> {
+    use crate::protocol::landobs_v1;
+    let lock_str = |field: &str| {
+        lock.get(field)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("lock receipt {field} is missing or not a string"))
+    };
+    let weather_time = lock_str("weather_time")?;
+    let weather_time_unix = landobs_v1::parse_weather_time(weather_time)
+        .map_err(|e| format!("lock.weather_time: {e}"))?;
+    let round = lock
+        .get("drand_round")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| "lock receipt drand_round is missing or not an integer".to_string())?;
+    let expected = landobs_v1::weather_time_for_round(round)
+        .ok_or_else(|| format!("drand round {round} has no quicknet publish time"))?;
+    if weather_time_unix != expected {
+        return Err(format!(
+            "lock weather_time {weather_time} is not the observation hour for drand round {round}: expected {}",
+            format_canonical(expected, 0)
+        ));
+    }
+
+    let freq_start = lock_str("freq_start")?;
+    let start = crate::protocol::freq_v1::parse_freq_start(freq_start)
+        .map_err(|e| format!("lock.freq_start: {e}"))?;
+    let expected_start = crate::protocol::freq_v1::freq_start_for_round(round)
+        .ok_or_else(|| format!("drand round {round} has no quicknet publish time"))?;
+    if start != expected_start {
+        return Err(format!(
+            "lock freq_start {freq_start} is not the window start for drand round {round}: expected {}",
+            crate::protocol::freq_v1::format_freq_start(expected_start)
+        ));
+    }
+
+    let locked_at_str = lock_str("locked_at")?;
+    let locked_at = chrono_parse_canonical_strict(locked_at_str)
+        .map_err(|e| format!("lock.locked_at ({locked_at_str}): {e}"))?;
+    let latest = landobs_v1::latest_lock_at(expected)
+        .ok_or_else(|| format!("weather_time {weather_time} has no latest lock time"))?;
+    let latest_micros = latest
+        .checked_mul(1_000_000)
+        .ok_or_else(|| format!("latest lock time {latest} is out of range"))?;
+    if locked_at.timestamp_micros() > latest_micros {
+        return Err(format!(
+            "lock locked_at {locked_at_str} is later than weather_time minus {} minutes ({})",
+            landobs_v1::LOCK_OFFSET_SECS / 60,
+            format_canonical(latest, 0)
+        ));
+    }
+
+    match landobs_v1::exec_state(exec)? {
+        landobs_v1::ExecState::Weather(_) => {
+            let observation = exec
+                .get("weather_observation_time")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    "exec receipt weather_observation_time is not a string".to_string()
+                })?;
+            if observation == weather_time {
+                Ok(())
+            } else {
+                Err(format!(
+                    "exec weather_observation_time {observation} must equal lock weather_time {weather_time}"
+                ))
+            }
+        }
+        landobs_v1::ExecState::Freq(_) | landobs_v1::ExecState::DrandOnly => Ok(()),
+    }
+}
+
+/// The window under the grid-frequency tag: the lock's `freq_start` must be
+/// the window start its drand round implies, the lock must be at least
+/// `LOCK_GAP_SECS` before it (compared to the microsecond), and the
+/// execution receipt must carry either a `freq_value` with no reason, or no
+/// value with reason `no_frequency_by_deadline`.
+fn check_freq_window(lock: &serde_json::Value, exec: &serde_json::Value) -> Result<(), String> {
+    use crate::protocol::freq_v1;
+    let lock_str = |field: &str| {
+        lock.get(field)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("lock receipt {field} is missing or not a string"))
+    };
+    let freq_start = lock_str("freq_start")?;
+    let start =
+        freq_v1::parse_freq_start(freq_start).map_err(|e| format!("lock.freq_start: {e}"))?;
+    let round = lock
+        .get("drand_round")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| "lock receipt drand_round is missing or not an integer".to_string())?;
+    let expected = freq_v1::freq_start_for_round(round)
+        .ok_or_else(|| format!("drand round {round} has no quicknet publish time"))?;
+    if start != expected {
+        return Err(format!(
+            "lock freq_start {freq_start} is not the window start for drand round {round}: expected {}",
+            freq_v1::format_freq_start(expected)
+        ));
+    }
+
+    let locked_at_str = lock_str("locked_at")?;
+    let locked_at = chrono_parse_canonical_strict(locked_at_str)
+        .map_err(|e| format!("lock.locked_at ({locked_at_str}): {e}"))?;
+    let latest = freq_v1::latest_lock_at(expected)
+        .ok_or_else(|| format!("freq_start {freq_start} has no latest lock time"))?;
+    let latest_micros = latest
+        .checked_mul(1_000_000)
+        .ok_or_else(|| format!("latest lock time {latest} is out of range"))?;
+    if locked_at.timestamp_micros() > latest_micros {
+        return Err(format!(
+            "lock locked_at {locked_at_str} is later than freq_start minus {} seconds ({})",
+            freq_v1::LOCK_GAP_SECS,
+            freq_v1::format_freq_start(latest)
+        ));
+    }
+
+    let field = |name: &str| exec.get(name).filter(|v| !v.is_null());
+    let shown = |v: Option<&serde_json::Value>| if v.is_some() { "set" } else { "null" };
+    match (field("freq_value"), field("freq_fallback_reason")) {
+        (Some(_), None) => Ok(()),
+        (None, Some(reason)) if reason.as_str() == Some(freq_v1::FALLBACK_NO_FREQUENCY) => Ok(()),
+        (None, Some(reason)) => Err(format!(
+            "exec freq_fallback_reason {reason} is not \"{}\"",
+            freq_v1::FALLBACK_NO_FREQUENCY
+        )),
+        (value, reason) => Err(format!(
+            "exec receipt must carry freq_value with no freq_fallback_reason, or a \
+             freq_fallback_reason with no freq_value; it has freq_value {}, \
+             freq_fallback_reason {}",
+            shown(value),
+            shown(reason)
+        )),
     }
 }
 
@@ -1217,29 +2248,133 @@ fn check_weather_observation_window(bundle: &ProofBundle) -> StepResult {
         }
     };
 
-    // Both fields may be absent on drand-only bundles. In that case the
-    // window check is vacuous (there is no observation to window-bound);
-    // pass.
+    match weather_rules(&lock, &exec) {
+        WeatherRules::Legacy => {}
+        WeatherRules::Mismatched => {
+            return StepResult {
+                name: StepName::WeatherObservationWindow,
+                status: StepStatus::Fail(mismatch_reason(&lock, &exec).into()),
+                detail: None,
+            };
+        }
+        WeatherRules::Freq => {
+            return StepResult {
+                name: StepName::WeatherObservationWindow,
+                status: match check_freq_window(&lock, &exec) {
+                    Ok(()) => StepStatus::Pass,
+                    Err(reason) => StepStatus::Fail(reason),
+                },
+                detail: None,
+            };
+        }
+        WeatherRules::Unrecognised(reason) => {
+            return StepResult {
+                name: StepName::WeatherObservationWindow,
+                status: StepStatus::Fail(reason),
+                detail: None,
+            };
+        }
+        WeatherRules::LandObs => {
+            return StepResult {
+                name: StepName::WeatherObservationWindow,
+                status: match check_landobs_weather(&lock, &exec) {
+                    Ok(()) => StepStatus::Pass,
+                    Err(reason) => StepStatus::Fail(reason),
+                },
+                detail: None,
+            };
+        }
+    }
+
+    // The exec receipt's weather_value and weather_observation_time travel
+    // together. Neither present: weather fell back (drand-only), there is
+    // no observation to window-bound, and the check is NotApplicable.
+    // Exactly one present, or weather present without a locked
+    // weather_time: the receipt is inconsistent, and since weather_value
+    // feeds the seed the window cannot be waived, so it fails.
+    //
+    // Every execution receipt schema (v2, v3, v4) carries
+    // `weather_fallback_reason`. It says why weather is missing, so it is
+    // required exactly when there is no weather: a receipt with no weather
+    // must carry a reason, and one with weather must not.
+    let exec_field = |field: &str| exec.get(field).filter(|v| !v.is_null());
+    let exec_weather_value = exec_field("weather_value");
+    let exec_observation = exec_field("weather_observation_time");
+    let has_fallback_field = matches!(
+        exec.get("schema_version").and_then(|v| v.as_str()),
+        Some(v) if EXEC_SCHEMAS_WITH_FALLBACK_REASON.contains(&v)
+    );
+    let fallback_reason = exec_field("weather_fallback_reason");
+
+    if has_fallback_field && exec_weather_value.is_some() && fallback_reason.is_some() {
+        return StepResult {
+            name: StepName::WeatherObservationWindow,
+            status: StepStatus::Fail(
+                "exec receipt has weather_value and also a weather_fallback_reason".into(),
+            ),
+            detail: None,
+        };
+    }
+
+    let exec_observation_time = match (exec_weather_value, exec_observation) {
+        (None, None) => {
+            if has_fallback_field && fallback_reason.is_none() {
+                return StepResult {
+                    name: StepName::WeatherObservationWindow,
+                    status: StepStatus::Fail(
+                        "exec receipt has no weather but no weather_fallback_reason".into(),
+                    ),
+                    detail: None,
+                };
+            }
+            return StepResult {
+                name: StepName::WeatherObservationWindow,
+                status: StepStatus::NotApplicable(
+                    "exec receipt has no weather_value or weather_observation_time".into(),
+                ),
+                detail: None,
+            };
+        }
+        (Some(_), None) => {
+            return StepResult {
+                name: StepName::WeatherObservationWindow,
+                status: StepStatus::Fail(
+                    "exec receipt has weather_value but no weather_observation_time".into(),
+                ),
+                detail: None,
+            };
+        }
+        (None, Some(_)) => {
+            return StepResult {
+                name: StepName::WeatherObservationWindow,
+                status: StepStatus::Fail(
+                    "exec receipt has weather_observation_time but no weather_value".into(),
+                ),
+                detail: None,
+            };
+        }
+        (Some(_), Some(obs)) => match obs.as_str() {
+            Some(s) => s,
+            None => {
+                return StepResult {
+                    name: StepName::WeatherObservationWindow,
+                    status: StepStatus::Fail(
+                        "exec receipt weather_observation_time is not a string".into(),
+                    ),
+                    detail: None,
+                };
+            }
+        },
+    };
+
     let lock_weather_time = match lock.get("weather_time").and_then(|v| v.as_str()) {
         Some(s) => s,
         None => {
             return StepResult {
                 name: StepName::WeatherObservationWindow,
-                status: StepStatus::Skip("lock receipt has no weather_time".into()),
-                detail: None,
-            };
-        }
-    };
-
-    let exec_observation_time = match exec
-        .get("weather_observation_time")
-        .and_then(|v| v.as_str())
-    {
-        Some(s) => s,
-        None => {
-            return StepResult {
-                name: StepName::WeatherObservationWindow,
-                status: StepStatus::Skip("exec receipt has no weather_observation_time".into()),
+                status: StepStatus::Fail(
+                    "exec receipt has weather_value but lock receipt has no weather_time".into(),
+                ),
                 detail: None,
             };
         }
@@ -1311,7 +2446,7 @@ fn check_weather_observation_window(bundle: &ProofBundle) -> StepResult {
 /// already dropped `Sentinel`-from-non-self-consistency; by the time
 /// we get here, an `op_resolved`/`infra_resolved` of `Some` paired
 /// with `InsertedAt::Sentinel` can only mean self-consistency mode
-/// (where the comparison is vacuous and we skip), and an `At(_)` is
+/// (where the comparison is vacuous and the step is NotApplicable), and an `At(_)` is
 /// guaranteed not to be the legacy sentinel literal. The
 /// destructuring below relies on those invariants.
 ///
@@ -1380,11 +2515,11 @@ fn check_temporal_binding(
     } else {
         // Every resolved key was Sentinel — i.e. self-consistency
         // mode end-to-end. The comparison is vacuous; surface it
-        // honestly as a Skip rather than a Pass that overstates the
-        // guarantee.
+        // honestly as NotApplicable rather than a Pass that overstates
+        // the guarantee.
         StepResult {
             name: StepName::TemporalBinding,
-            status: StepStatus::Skip(
+            status: StepStatus::NotApplicable(
                 "self-consistency mode; binding check is vacuous against bundle-embedded keys"
                     .into(),
             ),
@@ -1460,11 +2595,12 @@ fn check_one_class(
 
 // Parses the canonical RFC 3339 timestamp form pinned in spec §4.2.1
 // (`YYYY-MM-DDTHH:MM:SS.ffffffZ`, exactly 6 fractional digits, Z suffix).
-// Produces a unix-second timestamp. This is a narrow parser, not a
-// general-purpose RFC 3339 parser — the spec §4.2.1 note explicitly
-// warns against general-purpose parsers that accept variable fractional
-// digit counts or +00:00 offsets.
-fn chrono_parse_canonical(s: &str) -> Result<ChronoStub, String> {
+// Keeps whole unix seconds and the microseconds separately; use
+// `timestamp_micros()` for any comparison that must not lose the
+// fraction. This is a narrow parser, not a general-purpose RFC 3339
+// parser — the spec §4.2.1 note explicitly warns against general-purpose
+// parsers that accept variable fractional digit counts or +00:00 offsets.
+pub(crate) fn chrono_parse_canonical(s: &str) -> Result<ChronoStub, String> {
     // Manual check matching spec §4.2.1 regex
     // `\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z\z`. No regex dep
     // needed — the positions are fixed.
@@ -1518,10 +2654,10 @@ fn chrono_parse_canonical(s: &str) -> Result<ChronoStub, String> {
     let h = parse_slice(11, 13)?;
     let mi = parse_slice(14, 16)?;
     let se = parse_slice(17, 19)?;
+    let us = parse_slice(20, 26)?;
 
-    // Days-from-epoch via Rata Die (civil-from-days). The weather window
-    // is 3600 seconds — we only need second-precision unix time for the
-    // subtraction; we discard fractional microseconds.
+    // Days-from-epoch via Rata Die (days-from-civil). The fractional
+    // microseconds are kept in `micros`, not folded into `secs`.
     //
     // https://howardhinnant.github.io/date_algorithms.html#days_from_civil
     let y_adj = if mo <= 2 { y - 1 } else { y };
@@ -1534,17 +2670,69 @@ fn chrono_parse_canonical(s: &str) -> Result<ChronoStub, String> {
 
     Ok(ChronoStub {
         secs: days_from_epoch * 86_400 + h * 3600 + mi * 60 + se,
+        micros: us,
     })
 }
 
-struct ChronoStub {
+/// `chrono_parse_canonical`, and the string must also be the canonical
+/// rendering of the instant it parses to, so `17:99` or `09-31` is
+/// rejected rather than normalised.
+pub(crate) fn chrono_parse_canonical_strict(s: &str) -> Result<ChronoStub, String> {
+    let t = chrono_parse_canonical(s)?;
+    let micros = u32::try_from(t.micros).map_err(|e| e.to_string())?;
+    if format_canonical(t.secs, micros) != s {
+        return Err(format!("{s} is not a valid calendar time"));
+    }
+    Ok(t)
+}
+
+pub(crate) struct ChronoStub {
     secs: i64,
+    micros: i64,
 }
 
 impl ChronoStub {
-    fn timestamp(&self) -> i64 {
+    pub(crate) fn timestamp(&self) -> i64 {
         self.secs
     }
+
+    /// The microseconds field, 0..=999_999.
+    pub(crate) fn subsec_micros(&self) -> i64 {
+        self.micros
+    }
+
+    /// Microseconds since the unix epoch. Use this for comparisons that
+    /// must not lose the fractional second.
+    pub(crate) fn timestamp_micros(&self) -> i64 {
+        self.secs * 1_000_000 + self.micros
+    }
+}
+
+/// Render unix time in the canonical form `chrono_parse_canonical` accepts
+/// (`YYYY-MM-DDTHH:MM:SS.ffffffZ`). Inverse of the parser for every valid
+/// calendar instant from year 0 to 9999. `micros` must be below
+/// 1_000_000; debug builds assert it.
+pub(crate) fn format_canonical(unix_secs: i64, micros: u32) -> String {
+    debug_assert!(micros < 1_000_000);
+    // civil_from_days:
+    // https://howardhinnant.github.io/date_algorithms.html#civil_from_days
+    let days = unix_secs.div_euclid(86_400);
+    let secs_of_day = unix_secs.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{micros:06}Z",
+        secs_of_day / 3600,
+        secs_of_day % 3600 / 60,
+        secs_of_day % 60
+    )
 }
 
 #[cfg(test)]
@@ -1594,7 +2782,7 @@ mod tests {
 
         let draw_id = "22222222-2222-2222-2222-222222222222";
         let (ehash, _) = entry_hash(draw_id, &entries);
-        let drand_randomness = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let drand_randomness = crate::_test_support::BEACON_RANDOMNESS;
         let weather_val = "1013";
         let (seed_bytes, _) = compute_seed(&ehash, drand_randomness, weather_val);
         let seed_hex = hex::encode(seed_bytes);
@@ -1607,13 +2795,13 @@ mod tests {
         let lock_jcs = serde_json::json!({
             "commitment_hash": "0000000000000000000000000000000000000000000000000000000000000000",
             "drand_chain": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
-            "drand_round": 12345,
+            "drand_round": crate::_test_support::BEACON_ROUND,
             "draw_id": "22222222-2222-2222-2222-222222222222",
             "entropy_composition": "drand-quicknet+openmeteo-v1",
             "entry_hash": &ehash,
             "fair_pick_version": "0.1.0",
             "jcs_version": "sha256-jcs-v1",
-            "locked_at": "2026-04-09T12:00:00.000000Z",
+            "locked_at": "2023-08-23T15:50:00.000000Z",
             "operator_id": "11111111-1111-1111-1111-111111111111",
             "operator_slug": "acme-prizes",
             "schema_version": "4",
@@ -1622,7 +2810,7 @@ mod tests {
             "signing_key_id": &kid,
             "wallop_core_version": "0.14.1",
             "weather_station": "middle-wallop",
-            "weather_time": "2026-04-09T12:10:00.000000Z",
+            "weather_time": "2023-08-23T16:00:00.000000Z",
             "winner_count": 2
         })
         .to_string();
@@ -1634,13 +2822,13 @@ mod tests {
         let exec_jcs = serde_json::json!({
             "drand_chain": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
             "drand_randomness": drand_randomness,
-            "drand_round": 12345,
-            "drand_signature": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "drand_round": crate::_test_support::BEACON_ROUND,
+            "drand_signature": crate::_test_support::BEACON_SIGNATURE,
             "drand_signature_algorithm": "bls12_381_g2",
             "draw_id": "22222222-2222-2222-2222-222222222222",
             "entropy_composition": "drand-quicknet+openmeteo-v1",
             "entry_hash": &ehash,
-            "executed_at": "2026-04-09T12:15:00.000000Z",
+            "executed_at": "2023-08-23T16:05:00.000000Z",
             "fair_pick_version": "0.1.0",
             "jcs_version": "sha256-jcs-v1",
             "lock_receipt_hash": &lrh,
@@ -1654,10 +2842,11 @@ mod tests {
             "signature_algorithm": "ed25519",
             "wallop_core_version": "0.14.1",
             "weather_fallback_reason": null,
-            "weather_observation_time": "2026-04-09T12:10:00.000000Z",
+            "weather_observation_time": "2023-08-23T16:00:00.000000Z",
             "weather_station": "middle-wallop",
             "weather_value": weather_val
-        }).to_string();
+        })
+        .to_string();
         let exec_sig = sk.sign(exec_jcs.as_bytes());
         let exec_sig_hex = hex::encode(exec_sig.to_bytes());
 
@@ -1671,9 +2860,9 @@ mod tests {
             ],
             "results": winners.iter().map(|w| serde_json::json!({"entry_id": &w.entry_id, "position": w.position})).collect::<Vec<_>>(),
             "entropy": {
-                "drand_round": 12345,
+                "drand_round": crate::_test_support::BEACON_ROUND,
                 "drand_randomness": drand_randomness,
-                "drand_signature": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+                "drand_signature": crate::_test_support::BEACON_SIGNATURE,
                 "drand_chain_hash": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
                 "weather_value": weather_val
             },
@@ -1706,12 +2895,11 @@ mod tests {
                 step.status
             );
         }
-        // Without cli feature, step 8 is a skip and the report passes overall.
-        // With cli feature, step 8 runs real BLS (the test bundle uses a fake signature so it fails).
-        #[cfg(not(feature = "cli"))]
+        // The fixture carries a real quicknet beacon, so the report passes
+        // overall whether or not this build runs the BLS step.
         assert!(
             report.passed(),
-            "expected all pass (no cli), got: {:?}",
+            "expected all pass, got: {:?}",
             report.steps
         );
     }
@@ -1903,12 +3091,17 @@ mod tests {
         assert!(!report.passed());
     }
 
-    #[cfg(feature = "cli")]
     #[test]
     fn verify_bundle_bad_drand_chain() {
+        // The unknown chain goes into BOTH the signed execution receipt
+        // (re-signed) and the entropy block, so the entropy binding holds
+        // and the drand step rejects the chain itself.
+        let bad_chain = "00".repeat(32);
         let (json, _) = valid_signed_bundle();
-        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
-        val["entropy"]["drand_chain_hash"] = serde_json::json!("00".repeat(32));
+        let mut val = resign_exec(&json, |exec| {
+            exec["drand_chain"] = serde_json::json!(bad_chain.clone());
+        });
+        val["entropy"]["drand_chain_hash"] = serde_json::json!(bad_chain);
         let bundle = ProofBundle::from_json(&val.to_string()).unwrap();
         let report = verify_bundle(&bundle);
         let bls_step = report
@@ -1917,7 +3110,7 @@ mod tests {
             .find(|s| matches!(s.name, StepName::DrandBlsSignature))
             .unwrap();
         assert!(
-            matches!(bls_step.status, StepStatus::Fail(_)),
+            matches!(&bls_step.status, StepStatus::Fail(r) if r.contains("unknown drand chain")),
             "BLS step should fail for unknown chain, got {:?}",
             bls_step.status
         );
@@ -2217,7 +3410,7 @@ mod tests {
         let tampered = rewrite_lock_payload(&json, |obj| {
             obj.insert(
                 "locked_at".into(),
-                serde_json::Value::String("2026-04-09T12:00:00.000000+00:00".into()),
+                serde_json::Value::String("2023-08-23T15:50:00.000000+00:00".into()),
             );
         });
         let bundle = ProofBundle::from_json(&tampered).unwrap();
@@ -2298,8 +3491,7 @@ mod tests {
                 step.status
             );
         }
-        // Without cli feature, BLS step is Skip; report passes overall.
-        #[cfg(not(feature = "cli"))]
+        // Real quicknet beacon: the report passes overall in every build.
         assert!(report.passed(), "expected pass; got {:?}", report.steps);
         // mode is plumbed through.
         assert_eq!(report.mode, VerifierMode::Attestable);
@@ -2434,12 +3626,12 @@ mod tests {
         let bundle = ProofBundle::from_json(&json).unwrap();
         let pk: [u8; 32] = hex::decode(&pk_hex).unwrap().try_into().unwrap();
 
-        // build_valid_v5_bundle's lock.locked_at = 2026-04-09T12:00:00.000000Z.
+        // build_valid_v5_bundle's lock.locked_at = 2023-08-23T15:50:00.000000Z.
         // Inserted_at well before that.
         let resolver = TimedResolver {
             signing_key_id,
             public_key: pk,
-            inserted_at: InsertedAt::At("2026-04-01T00:00:00.000000Z".into()),
+            inserted_at: InsertedAt::At("2023-08-01T00:00:00.000000Z".into()),
         };
         let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attestable);
         let step = temporal_binding_step(&report);
@@ -2462,7 +3654,7 @@ mod tests {
         let resolver = TimedResolver {
             signing_key_id,
             public_key: pk,
-            inserted_at: InsertedAt::At("2026-04-09T12:00:00.000000Z".into()),
+            inserted_at: InsertedAt::At("2023-08-23T15:50:00.000000Z".into()),
         };
         let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attestable);
         let step = temporal_binding_step(&report);
@@ -2484,7 +3676,7 @@ mod tests {
         let resolver = TimedResolver {
             signing_key_id,
             public_key: pk,
-            inserted_at: InsertedAt::At("2026-04-09T12:00:01.000000Z".into()),
+            inserted_at: InsertedAt::At("2023-08-23T15:50:01.000000Z".into()),
         };
         let report = verify_bundle_with(&bundle, &resolver, VerifierMode::Attestable);
         let step = temporal_binding_step(&report);
@@ -2497,7 +3689,7 @@ mod tests {
     }
 
     #[test]
-    fn temporal_binding_skips_under_self_consistency_with_sentinel() {
+    fn temporal_binding_not_applicable_under_self_consistency() {
         // BundleEmbeddedResolver always returns Sentinel; under
         // SelfConsistencyOnly the comparison is vacuous — the bundle
         // is self-attesting and there's no out-of-band timestamp.
@@ -2506,8 +3698,8 @@ mod tests {
         let report = verify_bundle(&bundle);
         let step = temporal_binding_step(&report);
         assert!(
-            matches!(&step.status, StepStatus::Skip(reason) if reason.contains("self-consistency")),
-            "expected Skip under self-consistency, got {:?}",
+            matches!(&step.status, StepStatus::NotApplicable(reason) if reason.contains("self-consistency")),
+            "expected NotApplicable under self-consistency, got {:?}",
             step.status
         );
     }
@@ -2598,7 +3790,7 @@ mod tests {
 
     #[test]
     fn resolver_callsite_drops_legacy_sentinel_string_in_at_variant() {
-        // Belt-and-braces (Colin Q5(b)): an upstream bug putting the
+        // Belt-and-braces: an upstream bug putting the
         // legacy "0001-01-01..." string into At(_) would silently
         // pass any <= comparison. The call-site filter refuses it.
         let (json, pk_hex, signing_key_id) =
@@ -2750,4 +3942,726 @@ mod tests {
             step.status
         );
     }
+
+    // ── A skip is never a pass; BLS runs in every build ──────────────────
+
+    fn report_of(statuses: Vec<StepStatus>) -> VerificationReport {
+        VerificationReport {
+            steps: statuses
+                .into_iter()
+                .map(|status| StepResult {
+                    name: StepName::EntryHash,
+                    status,
+                    detail: None,
+                })
+                .collect(),
+            operator_key_id: None,
+            infra_key_id: None,
+            mode: VerifierMode::SelfConsistencyOnly,
+        }
+    }
+
+    #[test]
+    fn a_skip_is_never_a_pass() {
+        let report = report_of(vec![StepStatus::Pass, StepStatus::Skip("not run".into())]);
+        assert!(!report.passed());
+    }
+
+    fn report_of_named(steps: Vec<(StepName, StepStatus)>) -> VerificationReport {
+        let mut report = report_of(vec![]);
+        report.steps = steps
+            .into_iter()
+            .map(|(name, status)| StepResult {
+                name,
+                status,
+                detail: None,
+            })
+            .collect();
+        report
+    }
+
+    #[test]
+    fn not_applicable_does_not_block_a_pass() {
+        let report = report_of_named(vec![
+            (StepName::EntryHash, StepStatus::Pass),
+            (
+                StepName::WeatherObservationWindow,
+                StepStatus::NotApplicable("no weather".into()),
+            ),
+            (
+                StepName::TemporalBinding,
+                StepStatus::NotApplicable("self-consistency".into()),
+            ),
+        ]);
+        assert!(report.passed());
+    }
+
+    #[test]
+    fn not_applicable_outside_the_allow_list_fails() {
+        // Only WeatherObservationWindow and TemporalBinding may be waived.
+        // Every other step must pass.
+        for name in StepName::all() {
+            if matches!(
+                name,
+                StepName::WeatherObservationWindow | StepName::TemporalBinding
+            ) {
+                continue;
+            }
+            let other = if *name == StepName::EntryHash {
+                StepName::LockSignature
+            } else {
+                StepName::EntryHash
+            };
+            let report = report_of_named(vec![
+                (other, StepStatus::Pass),
+                (*name, StepStatus::NotApplicable("waived".into())),
+            ]);
+            assert!(!report.passed(), "NotApplicable on {name:?} must fail");
+        }
+    }
+
+    #[test]
+    fn all_not_applicable_is_not_a_pass() {
+        let report = report_of(vec![StepStatus::NotApplicable("nothing".into())]);
+        assert!(!report.passed());
+    }
+
+    fn drand_step(report: &VerificationReport) -> &StepResult {
+        report
+            .steps
+            .iter()
+            .find(|s| s.name == StepName::DrandBlsSignature)
+            .unwrap()
+    }
+
+    #[test]
+    fn genuine_beacon_passes_drand_step() {
+        let (json, _) = valid_signed_bundle();
+        let report = verify_bundle(&ProofBundle::from_json(&json).unwrap());
+        assert_eq!(drand_step(&report).status, StepStatus::Pass);
+    }
+
+    use crate::_test_support::resign_exec;
+
+    fn step_named(report: &VerificationReport, name: StepName) -> &StepResult {
+        report.steps.iter().find(|s| s.name == name).unwrap()
+    }
+
+    fn failing_steps(report: &VerificationReport) -> Vec<StepName> {
+        report
+            .steps
+            .iter()
+            .filter(|s| matches!(s.status, StepStatus::Fail(_)))
+            .map(|s| s.name)
+            .collect()
+    }
+
+    #[test]
+    fn zero_signature_fails_drand_step_and_report() {
+        // The zero signature goes into BOTH the signed execution receipt
+        // (re-signed, so the exec signature still verifies) and the
+        // entropy block, so the entropy binding holds and the only thing
+        // that can reject it is the BLS check itself.
+        use crate::_test_support::BEACON_SIGNATURE;
+        let zero = "00".repeat(48);
+        let (json, _) = valid_signed_bundle();
+        let mut val = resign_exec(&json, |exec| {
+            assert_eq!(exec["drand_signature"], BEACON_SIGNATURE);
+            exec["drand_signature"] = serde_json::json!(zero.clone());
+        });
+        assert_eq!(val["entropy"]["drand_signature"], BEACON_SIGNATURE);
+        val["entropy"]["drand_signature"] = serde_json::json!(zero);
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert_eq!(
+            step_named(&report, StepName::ExecSignature).status,
+            StepStatus::Pass
+        );
+        assert!(
+            matches!(&drand_step(&report).status, StepStatus::Fail(r) if r.contains("BLS")),
+            "got {:?}",
+            drand_step(&report).status
+        );
+        assert_eq!(failing_steps(&report), vec![StepName::DrandBlsSignature]);
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn entropy_swapped_to_another_genuine_beacon_fails() {
+        // Only the unsigned entropy block changes; the signed exec receipt
+        // still carries round 1000. A genuine beacon in entropy must not
+        // vouch for the receipt's randomness.
+        use crate::_test_support::{BEACON_2_RANDOMNESS, BEACON_2_ROUND, BEACON_2_SIGNATURE};
+        let (json, _) = valid_signed_bundle();
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        val["entropy"]["drand_round"] = serde_json::json!(BEACON_2_ROUND);
+        val["entropy"]["drand_signature"] = serde_json::json!(BEACON_2_SIGNATURE);
+        val["entropy"]["drand_randomness"] = serde_json::json!(BEACON_2_RANDOMNESS);
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(&drand_step(&report).status,
+                StepStatus::Fail(r) if r.contains("entropy.drand_round")),
+            "got {:?}",
+            drand_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn receipt_swapped_to_another_genuine_beacon_fails() {
+        // The signed exec receipt carries BEACON_2 (re-signed); entropy
+        // keeps BEACON. The mismatch must fail the drand step.
+        use crate::_test_support::{BEACON_2_RANDOMNESS, BEACON_2_ROUND, BEACON_2_SIGNATURE};
+        let (json, _) = valid_signed_bundle();
+        let val = resign_exec(&json, |exec| {
+            exec["drand_round"] = serde_json::json!(BEACON_2_ROUND);
+            exec["drand_signature"] = serde_json::json!(BEACON_2_SIGNATURE);
+            exec["drand_randomness"] = serde_json::json!(BEACON_2_RANDOMNESS);
+        });
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert_eq!(
+            step_named(&report, StepName::ExecSignature).status,
+            StepStatus::Pass
+        );
+        assert!(
+            matches!(&drand_step(&report).status,
+                StepStatus::Fail(r) if r.contains("entropy.drand_round")),
+            "got {:?}",
+            drand_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn exec_receipt_missing_drand_signature_fails_drand_step() {
+        let (json, _) = valid_signed_bundle();
+        let val = resign_exec(&json, |exec| {
+            exec.as_object_mut().unwrap().remove("drand_signature");
+        });
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(&drand_step(&report).status,
+                StepStatus::Fail(r) if r.contains("drand_signature")),
+            "got {:?}",
+            drand_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn exec_receipt_drand_round_wrong_type_fails_drand_step() {
+        let (json, _) = valid_signed_bundle();
+        let val = resign_exec(&json, |exec| {
+            exec["drand_round"] = serde_json::json!("1000");
+        });
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(&drand_step(&report).status,
+                StepStatus::Fail(r) if r.contains("drand_round")),
+            "got {:?}",
+            drand_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn genuine_beacon_for_a_round_other_than_locked_fails() {
+        // A fully self-consistent execution (exec receipt, entropy, seed
+        // and winners all built from BEACON_2, round 1001) against a lock
+        // receipt that committed to round 1000. The BLS check passes; the
+        // lock/exec drand_round consistency check must still fail it.
+        use crate::_test_support::{BEACON_2_RANDOMNESS, BEACON_2_ROUND, BEACON_2_SIGNATURE};
+        let (json, _) = valid_signed_bundle();
+        let entries: Vec<Entry> = [
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        ]
+        .iter()
+        .map(|id| Entry {
+            id: (*id).into(),
+            weight: 1,
+        })
+        .collect();
+        let (ehash, _) = entry_hash("22222222-2222-2222-2222-222222222222", &entries);
+        let (seed, _) = compute_seed(&ehash, BEACON_2_RANDOMNESS, "1013");
+        let winners = draw(&entries, &seed, 2).unwrap();
+        let mut val = resign_exec(&json, |exec| {
+            exec["drand_round"] = serde_json::json!(BEACON_2_ROUND);
+            exec["drand_signature"] = serde_json::json!(BEACON_2_SIGNATURE);
+            exec["drand_randomness"] = serde_json::json!(BEACON_2_RANDOMNESS);
+            exec["seed"] = serde_json::json!(hex::encode(seed));
+            exec["results"] = serde_json::json!(
+                winners
+                    .iter()
+                    .map(|w| w.entry_id.clone())
+                    .collect::<Vec<_>>()
+            );
+        });
+        val["entropy"]["drand_round"] = serde_json::json!(BEACON_2_ROUND);
+        val["entropy"]["drand_signature"] = serde_json::json!(BEACON_2_SIGNATURE);
+        val["entropy"]["drand_randomness"] = serde_json::json!(BEACON_2_RANDOMNESS);
+        val["results"] = serde_json::json!(
+            winners
+                .iter()
+                .map(|w| serde_json::json!({"entry_id": &w.entry_id, "position": w.position}))
+                .collect::<Vec<_>>()
+        );
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert_eq!(drand_step(&report).status, StepStatus::Pass);
+        assert!(
+            matches!(&step_named(&report, StepName::ReceiptFieldConsistency).status,
+                StepStatus::Fail(r) if r.contains("drand_round")),
+            "got {:?}",
+            step_named(&report, StepName::ReceiptFieldConsistency).status
+        );
+        assert_eq!(
+            failing_steps(&report),
+            vec![StepName::ReceiptFieldConsistency]
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn drand_only_bundle_weather_window_is_not_applicable_and_passes() {
+        let (json, _) = crate::_test_support::build_valid_drand_only_bundle();
+        let report = verify_bundle(&ProofBundle::from_json(&json).unwrap());
+        let step = report
+            .steps
+            .iter()
+            .find(|s| s.name == StepName::WeatherObservationWindow)
+            .unwrap();
+        assert!(
+            matches!(step.status, StepStatus::NotApplicable(_)),
+            "got {:?}",
+            step.status
+        );
+        assert!(report.passed(), "steps: {:?}", report.steps);
+    }
+
+    // ── Weather window and weather binding ───────────────────────────────
+
+    fn window_step(report: &VerificationReport) -> &StepResult {
+        step_named(report, StepName::WeatherObservationWindow)
+    }
+
+    #[test]
+    fn weather_value_without_observation_time_fails_window() {
+        let (json, _) = valid_signed_bundle();
+        let val = resign_exec(&json, |exec| {
+            exec["weather_observation_time"] = serde_json::Value::Null;
+        });
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert_eq!(
+            step_named(&report, StepName::ExecSignature).status,
+            StepStatus::Pass
+        );
+        assert!(
+            matches!(&window_step(&report).status,
+                StepStatus::Fail(r) if r.contains("weather_value") && r.contains("weather_observation_time")),
+            "got {:?}",
+            window_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn observation_time_without_weather_value_fails_window() {
+        let (json, _) = crate::_test_support::build_valid_drand_only_bundle();
+        let val = resign_exec(&json, |exec| {
+            exec["weather_observation_time"] = serde_json::json!("2023-08-23T16:00:00.000000Z");
+        });
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert_eq!(
+            step_named(&report, StepName::ExecSignature).status,
+            StepStatus::Pass
+        );
+        assert!(
+            matches!(&window_step(&report).status,
+                StepStatus::Fail(r) if r.contains("weather_value") && r.contains("weather_observation_time")),
+            "got {:?}",
+            window_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn exec_weather_without_lock_weather_time_fails_window() {
+        // LockReceiptV4/V5 require weather_time, so a well-signed bundle
+        // cannot reach this; exercise the step function directly.
+        let (json, _) = valid_signed_bundle();
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let mut lock: serde_json::Value =
+            serde_json::from_str(val["lock_receipt"]["payload_jcs"].as_str().unwrap()).unwrap();
+        lock.as_object_mut().unwrap().remove("weather_time");
+        val["lock_receipt"]["payload_jcs"] = serde_json::json!(lock.to_string());
+        let bundle = ProofBundle::from_json(&val.to_string()).unwrap();
+        let step = check_weather_observation_window(&bundle);
+        assert!(
+            matches!(&step.status,
+                StepStatus::Fail(r) if r.contains("weather_value") && r.contains("weather_time")),
+            "got {:?}",
+            step.status
+        );
+    }
+
+    #[test]
+    fn entropy_weather_value_swap_fails() {
+        let (json, _) = valid_signed_bundle();
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(val["entropy"]["weather_value"], "1013");
+        val["entropy"]["weather_value"] = serde_json::json!("1014");
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(&drand_step(&report).status,
+                StepStatus::Fail(r) if r.contains("entropy.weather_value")),
+            "got {:?}",
+            drand_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn entropy_freq_value_on_a_bundle_without_one_fails() {
+        for bundle in [
+            valid_signed_bundle().0,
+            crate::_test_support::build_valid_drand_only_bundle().0,
+        ] {
+            let mut val: serde_json::Value = serde_json::from_str(&bundle).unwrap();
+            val["entropy"]["freq_value"] =
+                serde_json::json!("50018;50012;49983;49980;49953;49912;49883;49887");
+            let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+            assert!(
+                matches!(&drand_step(&report).status,
+                    StepStatus::Fail(r) if r.contains("entropy.freq_value")),
+                "got {:?}",
+                drand_step(&report).status
+            );
+            assert!(!report.passed());
+            // A null copy is the same as none.
+            val["entropy"]["freq_value"] = serde_json::Value::Null;
+            let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+            assert_eq!(drand_step(&report).status, StepStatus::Pass);
+        }
+    }
+
+    #[test]
+    fn entropy_weather_value_removed_fails() {
+        let (json, _) = valid_signed_bundle();
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        val["entropy"]
+            .as_object_mut()
+            .unwrap()
+            .remove("weather_value");
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(&drand_step(&report).status,
+                StepStatus::Fail(r) if r.contains("entropy.weather_value")),
+            "got {:?}",
+            drand_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn entropy_weather_value_added_when_receipt_has_none_fails() {
+        // Drand-only draw: the signed exec receipt's weather_value is null
+        // and entropy has none. Adding a weather_value to the unsigned
+        // entropy block alone must fail the drand step.
+        let entries = vec![
+            Entry {
+                id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+                weight: 1,
+            },
+            Entry {
+                id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
+                weight: 1,
+            },
+        ];
+        let json = crate::_test_support::build_valid_bundle(&entries, None, 1);
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let exec: serde_json::Value =
+            serde_json::from_str(val["execution_receipt"]["payload_jcs"].as_str().unwrap())
+                .unwrap();
+        assert!(exec["weather_value"].is_null());
+        assert!(val["entropy"].get("weather_value").is_none());
+        val["entropy"]["weather_value"] = serde_json::json!("1013");
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(&drand_step(&report).status,
+                StepStatus::Fail(r) if r.contains("entropy.weather_value")),
+            "got {:?}",
+            drand_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn lock_exec_drand_chain_mismatch_fails() {
+        let other_chain = "dbd506d6ef76e5f386f41c651dcb808c5bcbd75471cc4eafa3f4df7ad4e4c493";
+        let (json, _) = valid_signed_bundle();
+        let mut val = resign_exec(&json, |exec| {
+            exec["drand_chain"] = serde_json::json!(other_chain);
+        });
+        val["entropy"]["drand_chain_hash"] = serde_json::json!(other_chain);
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert_eq!(
+            step_named(&report, StepName::ExecSignature).status,
+            StepStatus::Pass
+        );
+        assert!(
+            matches!(&step_named(&report, StepName::ReceiptFieldConsistency).status,
+                StepStatus::Fail(r) if r.contains("drand_chain")),
+            "got {:?}",
+            step_named(&report, StepName::ReceiptFieldConsistency).status
+        );
+        assert!(
+            matches!(&drand_step(&report).status,
+                StepStatus::Fail(r) if r.contains("unknown drand chain")),
+            "got {:?}",
+            drand_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    // ── Bundle results bound to the signed receipt ───────────────────────
+
+    fn winner_step(report: &VerificationReport) -> &StepResult {
+        step_named(report, StepName::WinnerSelection)
+    }
+
+    #[test]
+    fn unsigned_results_swap_fails_winner_selection() {
+        let (json, _) = valid_signed_bundle();
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let first = val["results"][0]["entry_id"].clone();
+        let second = val["results"][1]["entry_id"].clone();
+        assert_ne!(first, second);
+        val["results"][0]["entry_id"] = second;
+        val["results"][1]["entry_id"] = first;
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(&winner_step(&report).status,
+                StepStatus::Fail(r) if r.contains("results[0]")),
+            "got {:?}",
+            winner_step(&report).status
+        );
+        assert_eq!(failing_steps(&report), vec![StepName::WinnerSelection]);
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn unsigned_results_position_change_fails_winner_selection() {
+        let (json, _) = valid_signed_bundle();
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(val["results"][1]["position"], 2);
+        val["results"][1]["position"] = serde_json::json!(3);
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(&winner_step(&report).status,
+                StepStatus::Fail(r) if r.contains("results[1]") && r.contains("position")),
+            "got {:?}",
+            winner_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn unsigned_results_length_change_fails_winner_selection() {
+        let (json, _) = valid_signed_bundle();
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        val["results"].as_array_mut().unwrap().pop();
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(&winner_step(&report).status,
+                StepStatus::Fail(r) if r.contains("results")),
+            "got {:?}",
+            winner_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn non_string_weather_value_fails_seed_recomputation() {
+        // A drand-only bundle whose signed receipt carries a numeric
+        // weather_value. Reading it as "no weather" would recompute the
+        // drand-only seed and pass; the seed step must fail instead.
+        let (json, _) = crate::_test_support::build_valid_drand_only_bundle();
+        let val = resign_exec(&json, |exec| {
+            exec["weather_value"] = serde_json::json!(1013);
+        });
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert_eq!(
+            step_named(&report, StepName::ExecSignature).status,
+            StepStatus::Pass
+        );
+        assert!(
+            matches!(&step_named(&report, StepName::SeedRecomputation).status,
+                StepStatus::Fail(r) if r.contains("weather_value")),
+            "got {:?}",
+            step_named(&report, StepName::SeedRecomputation).status
+        );
+        assert!(!report.passed());
+    }
+
+    // ── Weather fallback reason ──────────────────────────────────────────
+
+    #[test]
+    fn no_weather_without_fallback_reason_fails_window() {
+        let (json, _) = crate::_test_support::build_valid_drand_only_bundle();
+        let val = resign_exec(&json, |exec| {
+            exec["weather_fallback_reason"] = serde_json::Value::Null;
+        });
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(&window_step(&report).status,
+                StepStatus::Fail(r) if r.contains("weather_fallback_reason")),
+            "got {:?}",
+            window_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn no_weather_with_fallback_reason_key_absent_fails_window() {
+        let (json, _) = crate::_test_support::build_valid_drand_only_bundle();
+        let val = resign_exec(&json, |exec| {
+            exec.as_object_mut()
+                .unwrap()
+                .remove("weather_fallback_reason");
+        });
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert!(
+            matches!(&window_step(&report).status,
+                StepStatus::Fail(r) if r.contains("weather_fallback_reason")),
+            "got {:?}",
+            window_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn weather_with_fallback_reason_fails_window() {
+        let (json, _) = valid_signed_bundle();
+        let val = resign_exec(&json, |exec| {
+            exec["weather_fallback_reason"] = serde_json::json!("unreachable");
+        });
+        let report = verify_bundle(&ProofBundle::from_json(&val.to_string()).unwrap());
+        assert_eq!(
+            step_named(&report, StepName::ExecSignature).status,
+            StepStatus::Pass
+        );
+        assert!(
+            matches!(&window_step(&report).status,
+                StepStatus::Fail(r) if r.contains("weather_fallback_reason")),
+            "got {:?}",
+            window_step(&report).status
+        );
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn fallback_rule_holds_for_every_exec_schema_version() {
+        // v2 (valid_signed_bundle / build_valid_bundle) is covered above;
+        // v4 via the resolver-driven fixture.
+        let entries: Vec<Entry> = ["a", "b", "c"]
+            .iter()
+            .map(|id| Entry {
+                id: (*id).into(),
+                weight: 1,
+            })
+            .collect();
+        let (json, pk_hex, kid) = build_valid_v5_bundle(&entries, None, 2);
+        let pk: [u8; 32] = hex::decode(pk_hex).unwrap().try_into().unwrap();
+        let resolver = MockResolver::new(kid, pk);
+        let ok = verify_bundle_with(
+            &ProofBundle::from_json(&json).unwrap(),
+            &resolver,
+            VerifierMode::Attestable,
+        );
+        assert!(ok.passed(), "steps: {:?}", ok.steps);
+        let val = resign_exec(&json, |exec| {
+            exec["weather_fallback_reason"] = serde_json::Value::Null;
+        });
+        let report = verify_bundle_with(
+            &ProofBundle::from_json(&val.to_string()).unwrap(),
+            &resolver,
+            VerifierMode::Attestable,
+        );
+        assert!(
+            matches!(&window_step(&report).status,
+                StepStatus::Fail(r) if r.contains("weather_fallback_reason")),
+            "got {:?}",
+            window_step(&report).status
+        );
+    }
+
+    // ── The drand round publishes after the lock ─────────────────────────
+
+    /// Rewrite `locked_at` in the lock receipt, re-sign it, and re-link and
+    /// re-sign the execution receipt, so every signature and the linkage
+    /// still verify.
+    fn with_locked_at(json: &str, locked_at: &str) -> String {
+        let sk = test_signing_key();
+        let mut val: serde_json::Value = serde_json::from_str(json).unwrap();
+        let mut lock: serde_json::Value =
+            serde_json::from_str(val["lock_receipt"]["payload_jcs"].as_str().unwrap()).unwrap();
+        lock["locked_at"] = serde_json::json!(locked_at);
+        let lock_jcs = lock.to_string();
+        val["lock_receipt"]["signature_hex"] =
+            serde_json::json!(hex::encode(sk.sign(lock_jcs.as_bytes()).to_bytes()));
+        val["lock_receipt"]["payload_jcs"] = serde_json::json!(lock_jcs);
+        let lrh = compute_lock_hash(&lock_jcs);
+        resign_exec(&val.to_string(), |exec| {
+            exec["lock_receipt_hash"] = serde_json::json!(lrh);
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn drand_round_published_before_lock_fails() {
+        // Round 1000 published at 2023-08-23T15:59:24Z.
+        let (json, _) = valid_signed_bundle();
+        let json = with_locked_at(&json, "2023-08-23T15:59:30.000000Z");
+        let report = verify_bundle(&ProofBundle::from_json(&json).unwrap());
+        assert!(
+            matches!(&drand_step(&report).status,
+                StepStatus::Fail(r) if r.contains("locked_at")),
+            "got {:?}",
+            drand_step(&report).status
+        );
+        assert_eq!(failing_steps(&report), vec![StepName::DrandBlsSignature]);
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn drand_round_published_at_lock_time_fails() {
+        // Strictly after: a round published in the same second as the
+        // lock does not count.
+        let (json, _) = valid_signed_bundle();
+        let json = with_locked_at(&json, "2023-08-23T15:59:24.000000Z");
+        let report = verify_bundle(&ProofBundle::from_json(&json).unwrap());
+        assert!(
+            matches!(&drand_step(&report).status,
+                StepStatus::Fail(r) if r.contains("locked_at")),
+            "got {:?}",
+            drand_step(&report).status
+        );
+    }
+
+    #[test]
+    fn drand_round_published_after_lock_passes() {
+        let (json, _) = valid_signed_bundle();
+        let json = with_locked_at(&json, "2023-08-23T15:59:23.999999Z");
+        let report = verify_bundle(&ProofBundle::from_json(&json).unwrap());
+        assert_eq!(drand_step(&report).status, StepStatus::Pass);
+        assert!(report.passed(), "steps: {:?}", report.steps);
+    }
 }
+
+#[cfg(test)]
+#[path = "verify_steps_landobs_tests.rs"]
+mod landobs_tests;
+
+#[cfg(test)]
+#[path = "verify_steps_freq_tests.rs"]
+mod freq_tests;
