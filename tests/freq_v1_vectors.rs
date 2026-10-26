@@ -15,15 +15,13 @@ use wallop_verifier::protocol::receipts::{
 };
 use wallop_verifier::verify_steps::{StepStatus, VerifierMode, verify_bundle_with};
 
-fn vector(name: &str) -> Option<serde_json::Value> {
+fn vector(name: &str) -> serde_json::Value {
     common::core_vector(name, None)
 }
 
 #[test]
 fn schedule_vector_matches_the_constants_and_the_maths() {
-    let Some(v) = vector("frequency-schedule-elexon-v1.json") else {
-        return;
-    };
+    let v = vector("frequency-schedule-elexon-v1.json");
     assert_eq!(v["entropy_composition"], freq_v1::ENTROPY_COMPOSITION);
     assert_eq!(v["readings"], freq_v1::READINGS as u64);
     assert_eq!(v["spacing_secs"], freq_v1::SPACING_SECS);
@@ -67,9 +65,7 @@ fn schedule_vector_matches_the_constants_and_the_maths() {
 
 #[test]
 fn value_vector_matches_the_grammar() {
-    let Some(v) = vector("frequency-value-elexon-v1.json") else {
-        return;
-    };
+    let v = vector("frequency-value-elexon-v1.json");
     assert_eq!(
         v["bounds_mhz"],
         serde_json::json!([freq_v1::MIN_MHZ, freq_v1::MAX_MHZ])
@@ -125,7 +121,7 @@ fn value_vector_matches_the_grammar() {
 /// A receipt vector: its field count, schema and payload hash, and that it
 /// parses as the frequency variant and passes its tag validator.
 fn check_receipt_vector(name: &str, lock: bool) {
-    let Some(v) = vector(name) else { return };
+    let v = vector(name);
     let jcs = v["payload_jcs"].as_str().expect("payload_jcs");
     let payload: serde_json::Value = serde_json::from_str(jcs).unwrap();
     assert_eq!(
@@ -178,7 +174,7 @@ fn proof_bundle_vectors_pass_every_step() {
         "proof-bundle-v6-freq.json",
         "proof-bundle-v6-freq-fallback.json",
     ] {
-        let Some(v) = vector(name) else { continue };
+        let v = vector(name);
         assert_eq!(v["expected_passed"], true, "{name}");
         let json = v["bundle"]
             .as_str()

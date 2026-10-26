@@ -29,12 +29,12 @@ const FILES: [(&str, &str); 2] = [
     ),
 ];
 
-/// Every vector file, read under `common`'s rules: missing once the v6
-/// vectors are vendored is a failure, never a skip.
+/// Every vector file, read under `common`'s rules: a missing file is a
+/// failure, never a skip.
 fn vectors() -> Vec<serde_json::Value> {
     FILES
         .iter()
-        .filter_map(|(name, env)| common::core_vector(name, Some(env)))
+        .map(|(name, env)| common::core_vector(name, Some(env)))
         .collect()
 }
 
@@ -149,7 +149,7 @@ fn every_tampered_bundle_fails_exactly_its_named_steps() {
     // file can't hide one in the next.
     let failures: Vec<String> = FILES
         .iter()
-        .filter_map(|(name, env)| Some((name, common::core_vector(name, Some(env))?)))
+        .map(|(name, env)| (name, common::core_vector(name, Some(env))))
         .filter_map(|(name, v)| {
             tampered_bundles_fail_exactly_their_named_steps(&v).map(|e| format!("{name}: {e}"))
         })
@@ -231,9 +231,7 @@ fn each_tamper_file_has_its_tag_bases_and_cases() {
     let land_obs: &[&str] = &["observed", "freq_window", "fallback"];
     let freq: &[&str] = &["freq_observed", "freq_fallback"];
     for ((name, env), bases) in FILES.iter().zip([land_obs, freq]) {
-        let Some(v) = common::core_vector(name, Some(env)) else {
-            continue;
-        };
+        let v = common::core_vector(name, Some(env));
         let got: Vec<&str> = v["bases"]
             .as_array()
             .expect("bases is a list")

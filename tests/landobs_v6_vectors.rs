@@ -21,7 +21,7 @@ use wallop_verifier::verify_steps::{
     StepStatus, VerificationReport, VerifierMode, verify_bundle_with,
 };
 
-fn vector(name: &str) -> Option<serde_json::Value> {
+fn vector(name: &str) -> serde_json::Value {
     common::core_vector(name, None)
 }
 
@@ -84,9 +84,7 @@ fn state_prefix(state: State) -> String {
 
 #[test]
 fn schedule_vector_matches_the_constants_and_the_maths() {
-    let Some(v) = vector("weather-schedule-landobs-v1.json") else {
-        return;
-    };
+    let v = vector("weather-schedule-landobs-v1.json");
     assert_eq!(v["entropy_composition"], landobs_v1::ENTROPY_COMPOSITION);
     assert_eq!(
         v["stations"],
@@ -182,9 +180,7 @@ struct FromRowCase {
 
 #[test]
 fn value_vector_matches_the_bounds_grammar_and_row_rules() {
-    let Some(text) = common::core_vector_text("weather-value-landobs-v1.json", None) else {
-        return;
-    };
+    let text = common::core_vector_text("weather-value-landobs-v1.json", None);
     let v: ValueVector = serde_json::from_str(&text).unwrap();
     use landobs_v1::{MSLP_MAX, MSLP_MIN, RH_MAX, RH_MIN, T_MAX, T_MIN, VIS_MAX, VIS_MIN};
     assert_eq!(v.bounds.t, [T_MIN, T_MAX]);
@@ -239,7 +235,7 @@ fn receipt_vectors_match_their_hashes_counts_schemas_and_states() {
         ("execution-receipt-fallback-v5.json", Some(State::DrandOnly)),
     ];
     for (name, state) in receipts {
-        let Some(v) = vector(name) else { continue };
+        let v = vector(name);
         let jcs = v["payload_jcs"].as_str().expect("payload_jcs");
         assert_eq!(
             hex::encode(Sha256::digest(jcs.as_bytes())),
@@ -313,7 +309,7 @@ fn positive_bundle_vectors_pass_every_step_in_their_state() {
         ("proof-bundle-v6-fallback.json", State::DrandOnly),
     ];
     for (name, state) in bundles {
-        let Some(v) = vector(name) else { continue };
+        let v = vector(name);
         assert_eq!(v["expected_passed"], true, "{name}");
         let description = v["description"].as_str().unwrap();
         assert!(
@@ -357,9 +353,7 @@ fn positive_bundle_vectors_pass_every_step_in_their_state() {
 
 #[test]
 fn negative_bundle_vectors_fail_at_exactly_the_named_steps() {
-    let Some(v) = vector("proof-bundle-v6-negative.json") else {
-        return;
-    };
+    let v = vector("proof-bundle-v6-negative.json");
     let keys = &v["keys"];
     let cases = v["cases"].as_array().expect("cases is a list");
     assert!(!cases.is_empty());
@@ -527,9 +521,7 @@ const NEGATIVE_CASE_COUNT: usize = 59;
 
 #[test]
 fn negative_vector_carries_exactly_the_pinned_cases_with_their_steps() {
-    let Some(v) = vector("proof-bundle-v6-negative.json") else {
-        return;
-    };
+    let v = vector("proof-bundle-v6-negative.json");
     let cases = v["cases"].as_array().expect("cases is a list");
     assert_eq!(cases.len(), NEGATIVE_CASE_COUNT);
     let got: BTreeMap<&str, Vec<String>> = cases

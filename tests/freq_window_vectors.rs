@@ -17,7 +17,7 @@ mod common;
 
 const ENV: &str = "WALLOP_FREQ_WINDOW_VECTORS";
 
-fn vector() -> Option<serde_json::Value> {
+fn vector() -> serde_json::Value {
     common::core_vector("freq-window-v1.json", Some(ENV))
 }
 
@@ -37,7 +37,7 @@ fn expected_fragment(reason: &str) -> &'static str {
 
 #[test]
 fn freq_window_vectors_match_core() {
-    let Some(v) = vector() else { return };
+    let v = vector();
     let start_text = v["freq_start"].as_str().expect("freq_start");
     let start = parse_freq_start(&start_text.replace('Z', ".000000Z")).expect("freq_start");
     assert_eq!(

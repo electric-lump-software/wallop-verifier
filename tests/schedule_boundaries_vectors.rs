@@ -31,7 +31,7 @@ const WINDOWS: [&str; 7] = [
     "leap_day",
 ];
 
-fn vector() -> Option<serde_json::Value> {
+fn vector() -> serde_json::Value {
     common::core_vector("schedule-boundaries-v1.json", Some(ENV))
 }
 
@@ -80,7 +80,7 @@ fn cases<'a>(v: &'a serde_json::Value, keys: &[&str]) -> Vec<&'a serde_json::Val
 
 #[test]
 fn every_window_is_every_whole_minute_from_22_00_to_02_59() {
-    let Some(v) = vector() else { return };
+    let v = vector();
     for key in ["landobs", "freq"] {
         for window in WINDOWS {
             let pubs: Vec<i64> = v[key]
@@ -99,7 +99,7 @@ fn every_window_is_every_whole_minute_from_22_00_to_02_59() {
 
 #[test]
 fn landobs_schedule_matches_every_case() {
-    let Some(v) = vector() else { return };
+    let v = vector();
     let all = cases(&v, &["landobs", "landobs_grid_seconds"]);
     let w30 = &v["landobs_w30_not_w40"];
     let mut n = 0;
@@ -137,7 +137,7 @@ fn landobs_schedule_matches_every_case() {
 
 #[test]
 fn landobs_w30_case_tells_w30_from_w40() {
-    let Some(v) = vector() else { return };
+    let v = vector();
     let c = &v["landobs_w30_not_w40"];
     let (round, pub_secs) = published(c);
     let w40 = (pub_secs - 40 * 60 - landobs_v1::PUBLISH_MARGIN_SECS).div_euclid(3600) * 3600;
@@ -146,7 +146,7 @@ fn landobs_w30_case_tells_w30_from_w40() {
 
 #[test]
 fn freq_schedule_matches_every_case() {
-    let Some(v) = vector() else { return };
+    let v = vector();
     let mut n = 0;
     for c in cases(&v, &["freq", "freq_grid_seconds"]) {
         let (round, pub_secs) = published(c);
