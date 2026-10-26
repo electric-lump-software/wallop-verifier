@@ -8,9 +8,6 @@ mod common;
 
 use sha2::{Digest, Sha256};
 use wallop_verifier::bundle::ProofBundle;
-use wallop_verifier::key_resolver::{
-    InsertedAt, KeyClass, KeyResolver, ResolutionError, ResolvedKey,
-};
 use wallop_verifier::protocol::freq_v1;
 use wallop_verifier::protocol::receipts::{
     ParsedExecutionReceipt, ParsedLockReceipt, parse_execution_receipt, parse_lock_receipt,
@@ -175,48 +172,6 @@ fn receipt_vectors_parse_as_the_frequency_tag() {
     check_receipt_vector("execution-receipt-fallback-v5-freq.json", false);
 }
 
-/// Resolves from the vector's inline `keys: [{key_id, public_key_hex, key_class, inserted_at}]`.
-struct ListResolver(Vec<(String, [u8; 32], KeyClass, String)>);
-
-impl KeyResolver for ListResolver {
-    fn resolve(&self, key_id: &str, key_class: KeyClass) -> Result<ResolvedKey, ResolutionError> {
-        self.0
-            .iter()
-            .find(|(id, _, class, _)| id == key_id && *class == key_class)
-            .map(|(_, pk, class, at)| ResolvedKey {
-                public_key: *pk,
-                inserted_at: InsertedAt::At(at.clone()),
-                key_class: *class,
-            })
-            .ok_or(ResolutionError::KeyNotFound)
-    }
-}
-
-fn resolver(keys: &serde_json::Value) -> ListResolver {
-    ListResolver(
-        keys.as_array()
-            .expect("keys is a list")
-            .iter()
-            .map(|k| {
-                let class = match k["key_class"].as_str().unwrap() {
-                    "operator" => KeyClass::Operator,
-                    "infrastructure" => KeyClass::Infrastructure,
-                    other => panic!("unknown key_class {other}"),
-                };
-                (
-                    k["key_id"].as_str().unwrap().to_string(),
-                    hex::decode(k["public_key_hex"].as_str().unwrap())
-                        .unwrap()
-                        .try_into()
-                        .unwrap(),
-                    class,
-                    k["inserted_at"].as_str().unwrap().to_string(),
-                )
-            })
-            .collect(),
-    )
-}
-
 #[test]
 fn proof_bundle_vectors_pass_every_step() {
     for name in [
@@ -231,7 +186,7 @@ fn proof_bundle_vectors_pass_every_step() {
             .unwrap_or_else(|| v["bundle"].to_string());
         let report = verify_bundle_with(
             &ProofBundle::from_json(&json).unwrap(),
-            &resolver(&v["keys"]),
+            &common::resolver(&v["keys"]),
             VerifierMode::Attestable,
         );
         assert!(report.passed(), "{name}: {:?}", report.steps);

@@ -229,4 +229,41 @@ mod tests {
         let at_hour = rows(r#"[{"datetime":"2026-10-01T19:00:00Z"}]"#);
         assert!(matches!(presence(&at_hour, WT), Outcome::Absent(_)));
     }
+
+    #[derive(serde::Deserialize)]
+    struct FromRowCase {
+        row: Row,
+        #[serde(default)]
+        expected_value: Option<String>,
+        #[serde(default)]
+        expected_error: bool,
+    }
+
+    /// Only `from_row`; the file is parsed typed, so each row field stays a
+    /// `RawValue` and keeps its number text.
+    #[derive(serde::Deserialize)]
+    struct ValueVector {
+        from_row: Vec<FromRowCase>,
+    }
+
+    #[test]
+    fn row_canonicalisation_matches_the_value_vector() {
+        let v: ValueVector = serde_json::from_str(include_str!(
+            "../../../vendor/wallop/spec/vectors/weather-value-landobs-v1.json"
+        ))
+        .unwrap();
+        assert!(!v.from_row.is_empty());
+        for (i, case) in v.from_row.iter().enumerate() {
+            let result = row_to_value(&case.row);
+            match (&case.expected_value, case.expected_error) {
+                (Some(expected), false) => {
+                    assert_eq!(result.as_deref(), Ok(expected.as_str()), "from_row[{i}]")
+                }
+                (None, true) => assert!(result.is_err(), "from_row[{i}]: got {result:?}"),
+                _ => panic!(
+                    "from_row[{i}] must carry exactly one of expected_value or expected_error: true"
+                ),
+            }
+        }
+    }
 }

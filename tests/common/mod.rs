@@ -27,6 +27,9 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
+use wallop_verifier::key_resolver::{
+    InsertedAt, KeyClass, KeyResolver, ResolutionError, ResolvedKey,
+};
 
 /// The vendored vector directory.
 pub const VENDORED_DIR: &str = "vendor/wallop/spec/vectors";
@@ -37,7 +40,18 @@ pub const DIR_ENV: &str = "WALLOP_CORE_VECTORS_DIR";
 /// Every lock 6 / execution 5 vector the tests read. They are frozen in
 /// one core release, so they are vendored together.
 pub const V6_VECTORS: &[&str] = &[
+    // drand-quicknet+metoffice-landobs-v1 (Land Observations, Middle Wallop).
+    "weather-schedule-landobs-v1.json",
+    "weather-value-landobs-v1.json",
+    "lock-receipt-v6.json",
+    "execution-receipt-v5.json",
+    "execution-receipt-freq-window-v5.json",
+    "execution-receipt-fallback-v5.json",
+    "proof-bundle-v6.json",
+    "proof-bundle-v6-freq-window.json",
+    "proof-bundle-v6-fallback.json",
     "proof-bundle-v6-tamper.json",
+    // drand-quicknet+elexon-freq-v1 (grid frequency).
     "proof-bundle-v6-tamper-freq.json",
     "freq-window-v1.json",
     "frequency-schedule-elexon-v1.json",
@@ -47,7 +61,9 @@ pub const V6_VECTORS: &[&str] = &[
     "execution-receipt-fallback-v5-freq.json",
     "proof-bundle-v6-freq.json",
     "proof-bundle-v6-freq-fallback.json",
+    // Both tags.
     "schedule-boundaries-v1.json",
+    "proof-bundle-v6-negative.json",
 ];
 
 fn vendored_dir() -> PathBuf {
@@ -129,8 +145,17 @@ pub fn override_note(vendored: &Path, chosen: &Path) -> Option<String> {
 
 /// The parsed vector `name`, or `None` (with a message) only before the v6
 /// vectors are vendored and when no path is set. Panics otherwise if the
-/// file is missing or unreadable.
+/// file is missing, unreadable or not JSON.
 pub fn core_vector(name: &str, file_env: Option<&str>) -> Option<serde_json::Value> {
+    let text = core_vector_text(name, file_env)?;
+    Some(serde_json::from_str(&text).unwrap_or_else(|e| panic!("{name}: {e}")))
+}
+
+/// The text of vector `name`, found by the same rules as `core_vector`,
+/// for a file that must be parsed typed rather than as a
+/// `serde_json::Value` (for example one whose rows keep each number's JSON
+/// text, which a `Value` would read through a float or refuse).
+pub fn core_vector_text(name: &str, file_env: Option<&str>) -> Option<String> {
     let path = match locate(&vendored_dir(), name, file_env, |v| std::env::var(v).ok()) {
         Ok(Some(path)) => path,
         Ok(None) => {
@@ -152,6 +177,49 @@ pub fn core_vector(name: &str, file_env: Option<&str>) -> Option<serde_json::Val
     }
     let shown = path.display();
     eprintln!("core vectors: reading {shown}");
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{shown}: {e}"));
-    Some(serde_json::from_str(&text).unwrap_or_else(|e| panic!("{shown}: {e}")))
+    Some(std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{shown}: {e}")))
+}
+
+/// Resolves from a vector's inline
+/// `keys: [{key_id, public_key_hex, key_class, inserted_at}]`.
+pub struct ListResolver(Vec<(String, [u8; 32], KeyClass, String)>);
+
+impl KeyResolver for ListResolver {
+    fn resolve(&self, key_id: &str, key_class: KeyClass) -> Result<ResolvedKey, ResolutionError> {
+        self.0
+            .iter()
+            .find(|(id, _, class, _)| id == key_id && *class == key_class)
+            .map(|(_, pk, class, at)| ResolvedKey {
+                public_key: *pk,
+                inserted_at: InsertedAt::At(at.clone()),
+                key_class: *class,
+            })
+            .ok_or(ResolutionError::KeyNotFound)
+    }
+}
+
+/// The resolver for a vector's inline `keys` list.
+pub fn resolver(keys: &serde_json::Value) -> ListResolver {
+    ListResolver(
+        keys.as_array()
+            .expect("keys is a list")
+            .iter()
+            .map(|k| {
+                let class = match k["key_class"].as_str().unwrap() {
+                    "operator" => KeyClass::Operator,
+                    "infrastructure" => KeyClass::Infrastructure,
+                    other => panic!("unknown key_class {other}"),
+                };
+                (
+                    k["key_id"].as_str().unwrap().to_string(),
+                    hex::decode(k["public_key_hex"].as_str().unwrap())
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                    class,
+                    k["inserted_at"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect(),
+    )
 }

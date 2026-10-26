@@ -13,6 +13,19 @@ const EXECUTION_RECEIPT_V3_VECTOR: &str =
     include_str!("../../vendor/wallop/spec/vectors/execution-receipt-v3.json");
 const DRAND_ONLY_V3_VECTOR: &str =
     include_str!("../../vendor/wallop/spec/vectors/execution-receipt-drand-only-v3.json");
+const LOCK_V6_VECTOR: &str = include_str!("../../vendor/wallop/spec/vectors/lock-receipt-v6.json");
+const EXEC_V5_VECTOR: &str =
+    include_str!("../../vendor/wallop/spec/vectors/execution-receipt-v5.json");
+const EXEC_V5_FREQ_WINDOW_VECTOR: &str =
+    include_str!("../../vendor/wallop/spec/vectors/execution-receipt-freq-window-v5.json");
+const EXEC_V5_FALLBACK_VECTOR: &str =
+    include_str!("../../vendor/wallop/spec/vectors/execution-receipt-fallback-v5.json");
+const LOCK_V6_FREQ_VECTOR: &str =
+    include_str!("../../vendor/wallop/spec/vectors/lock-receipt-v6-freq.json");
+const EXEC_V5_FREQ_VECTOR: &str =
+    include_str!("../../vendor/wallop/spec/vectors/execution-receipt-v5-freq.json");
+const EXEC_V5_FREQ_FALLBACK_VECTOR: &str =
+    include_str!("../../vendor/wallop/spec/vectors/execution-receipt-fallback-v5-freq.json");
 
 fn sha256_hex(data: &str) -> String {
     hex::encode(Sha256::digest(data.as_bytes()))
@@ -190,19 +203,56 @@ fn v11_lock_receipt_hash_pinned() {
 
 #[test]
 fn v11_execution_receipt_uses_lock_receipt_hash() {
-    let vector: serde_json::Value = serde_json::from_str(CROSS_RECEIPT_VECTOR).unwrap();
-    let lock_input = lock_receipt_from_json(&vector["lock_receipt_input"]);
+    // Each lock 6 vector's payload hash is the lock_receipt_hash its
+    // execution 5 vectors sign.
+    let pairs: [(&str, &[(&str, &str)]); 2] = [
+        (
+            LOCK_V6_VECTOR,
+            &[
+                ("execution-receipt-v5.json", EXEC_V5_VECTOR),
+                (
+                    "execution-receipt-freq-window-v5.json",
+                    EXEC_V5_FREQ_WINDOW_VECTOR,
+                ),
+                (
+                    "execution-receipt-fallback-v5.json",
+                    EXEC_V5_FALLBACK_VECTOR,
+                ),
+            ],
+        ),
+        (
+            LOCK_V6_FREQ_VECTOR,
+            &[
+                ("execution-receipt-v5-freq.json", EXEC_V5_FREQ_VECTOR),
+                (
+                    "execution-receipt-fallback-v5-freq.json",
+                    EXEC_V5_FREQ_FALLBACK_VECTOR,
+                ),
+            ],
+        ),
+    ];
+    for (lock_text, execs) in pairs {
+        let lock: serde_json::Value = serde_json::from_str(lock_text).unwrap();
+        let lock_hash = lock_receipt_hash(lock["payload_jcs"].as_str().unwrap());
+        assert_eq!(lock_hash, lock["expected_payload_sha256"].as_str().unwrap());
+        for (name, exec_text) in execs {
+            let exec: serde_json::Value = serde_json::from_str(exec_text).unwrap();
+            assert_eq!(
+                exec["input"]["lock_receipt_hash"].as_str().unwrap(),
+                lock_hash,
+                "{name}"
+            );
+        }
+    }
 
-    let lock_payload = build_receipt_payload(&lock_input);
-    let lock_hash = lock_receipt_hash(&lock_payload);
-
-    // The drand-only vector's execution receipt uses this lock_receipt_hash
+    // The drand-only execution receipt is a fossil on round 12345. Its
+    // lock_receipt_hash is the linkage lock as it stood on that round (kept
+    // in wallop_core's test/fixtures/v5_builder_regression/
+    // cross-receipt-linkage.json), not the current cross-receipt-linkage.json.
     let drand_vector: serde_json::Value = serde_json::from_str(DRAND_ONLY_VECTOR).unwrap();
-    let drand_input = &drand_vector["input"];
-
     assert_eq!(
-        drand_input["lock_receipt_hash"].as_str().unwrap(),
-        lock_hash
+        drand_vector["input"]["lock_receipt_hash"].as_str().unwrap(),
+        "3fbacc9e2aa7e80593edcec4b64c89c791b776a9e3371af5e34bc8cdd4138fa3"
     );
 }
 
