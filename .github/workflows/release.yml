@@ -4,20 +4,26 @@ on:
   push:
     tags: ['v*']
 
+permissions: {}
+
 env:
   CARGO_TERM_COLOR: always
+  WASM_PACK_VERSION: 0.15.0
 
 jobs:
-  release:
-    name: Build and Release WASM
+  # Everything that runs the repository's code happens here, with a
+  # read-only token and no secrets.
+  verify:
+    name: Verify the tagged commit
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: true
           fetch-depth: 0
+          persist-credentials: false
       - name: Check the tagged commit is on wallop_rs main
         run: |
           set -euo pipefail
@@ -79,18 +85,38 @@ jobs:
           fi
 
           echo "OK: vendor/wallop $PIN is on wallop main; spec/vectors $PINNED_VECTORS matches main's tip."
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: 1.99.1
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test
-      - run: cargo test --features cli
-      - run: cargo install wasm-pack
-      - run: wasm-pack build --target web --release
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo test --locked
+      - run: cargo test --locked --features cli
+      - run: cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked
+      - run: wasm-pack test --node
+
+  # Builds and publishes only. The only job with a write token or a secret.
+  release:
+    name: Build and Release WASM
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: 1.99.1
+          targets: wasm32-unknown-unknown
+      - run: cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked
+      - run: wasm-pack build --target web --release -- --locked
       - run: tar czf "wallop-verifier-wasm-$REF_NAME.tar.gz" -C pkg .
         env:
           REF_NAME: ${{ github.ref_name }}
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: wallop-verifier-wasm-${{ github.ref_name }}.tar.gz
       - name: Notify wallop repo

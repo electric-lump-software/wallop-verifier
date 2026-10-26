@@ -288,10 +288,15 @@ pub fn verify(
     }
 }
 
-/// Like `verify`, for a grid-frequency draw: the seed is
-/// `compute_seed_freq` with `freq_value`, or drand alone when it is `None`.
-/// The caller chooses this function from the receipts' tag, never from
-/// which value is present.
+/// Like `verify`, with the grid-frequency seed: `compute_seed_freq` with
+/// `freq_value`, or drand alone when it is `None`.
+///
+/// Choose between `verify` and `verify_freq` from the signed execution
+/// receipt, never from which value happens to be present. Under the
+/// grid-frequency tag, use `verify_freq`. Under the weather tag, the
+/// receipt's state decides (`landobs_v1::exec_state`): `verify` with the
+/// value in state (a), `verify_freq` with the value in state (b), and
+/// either with no value in state (c).
 pub fn verify_freq(
     draw_id: &str,
     entries: &[Entry],
