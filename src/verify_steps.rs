@@ -1780,7 +1780,7 @@ fn check_fair_pick_version(lock: &serde_json::Value) -> Result<(), String> {
 
 /// Lock receipt schema 6 and execution receipt schema 5 (either tag) may be
 /// paired only with each other.
-const SCHEMA_PAIRING_ERROR: &str = "lock receipt schema_version \"6\" and execution receipt schema_version \"5\" must be used together";
+const SCHEMA_PAIRING_ERROR: &str = "lock schema_version 6 must pair with execution schema_version 5, and execution schema_version 5 with lock schema_version 6";
 
 // Fields that MUST be byte-identical between lock and exec receipts per
 // spec §4.2.5. draw_id is also cross-checked against the bundle envelope.

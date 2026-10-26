@@ -90,8 +90,14 @@ const NEGATIVE_CASE_REASONS: &[(&str, &str)] = &[
         "wrong_entropy_composition_exec",
         "exec receipt validation: unknown entropy_composition",
     ),
-    ("lock_v6_with_exec_v4", "must be used together"),
-    ("lock_v5_with_exec_v5", "must be used together"),
+    (
+        "lock_v6_with_exec_v4",
+        "must pair with execution schema_version 5",
+    ),
+    (
+        "lock_v5_with_exec_v5",
+        "execution schema_version 5 with lock schema_version 6",
+    ),
     (
         "inline_key_on_lock_v6",
         "lock receipt schema_version=\"6\" must not carry inline public_key_hex",
