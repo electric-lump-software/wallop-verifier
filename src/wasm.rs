@@ -85,9 +85,15 @@ pub fn compute_seed_freq_wasm(
     serde_wasm_bindgen::to_value(&result).map_err(|e| JsError::new(&e.to_string()))
 }
 
-/// WASM entry point for verifying a grid-frequency draw's winners. Choose
-/// it from the receipts' `entropy_composition`, never from which value is
-/// present.
+/// WASM entry point for `verify_freq`: winners recomputed with the
+/// grid-frequency seed.
+///
+/// Choose between `verify_wasm` and `verify_freq_wasm` from the signed
+/// execution receipt, never from which value happens to be present. Under
+/// the grid-frequency tag, use `verify_freq_wasm`. Under the weather tag,
+/// `landobs_exec_state_wasm` decides: `verify_wasm` with the value in state
+/// (a) `"weather"`, `verify_freq_wasm` with the value in state (b)
+/// `"frequency"`, and either with no value in state (c) `"drand_only"`.
 #[wasm_bindgen]
 pub fn verify_freq_wasm(
     draw_id: &str,
