@@ -87,7 +87,9 @@ jobs:
       - run: cargo test --features cli
       - run: cargo install wasm-pack
       - run: wasm-pack build --target web --release
-      - run: tar czf wallop-verifier-wasm-${{ github.ref_name }}.tar.gz -C pkg .
+      - run: tar czf "wallop-verifier-wasm-$REF_NAME.tar.gz" -C pkg .
+        env:
+          REF_NAME: ${{ github.ref_name }}
       - uses: softprops/action-gh-release@v2
         with:
           files: wallop-verifier-wasm-${{ github.ref_name }}.tar.gz
@@ -95,6 +97,7 @@ jobs:
         run: |
           gh api repos/electric-lump-software/wallop/dispatches \
             -f event_type=wasm-updated \
-            -f "client_payload[version]=${{ github.ref_name }}"
+            -f "client_payload[version]=$REF_NAME"
         env:
+          REF_NAME: ${{ github.ref_name }}
           GH_TOKEN: ${{ secrets.WALLOP_DISPATCH_TOKEN }}
