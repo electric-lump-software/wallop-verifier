@@ -87,10 +87,11 @@ jobs:
           echo "OK: vendor/wallop $PIN is on wallop main; spec/vectors $PINNED_VECTORS matches main's tip."
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: 1.99.1
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo test
-      - run: cargo test --features cli
+      - run: cargo test --locked
+      - run: cargo test --locked --features cli
       - run: cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked
       - run: wasm-pack test --node
 
@@ -108,9 +109,10 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: 1.99.1
           targets: wasm32-unknown-unknown
       - run: cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked
-      - run: wasm-pack build --target web --release
+      - run: wasm-pack build --target web --release -- --locked
       - run: tar czf "wallop-verifier-wasm-$REF_NAME.tar.gz" -C pkg .
         env:
           REF_NAME: ${{ github.ref_name }}
