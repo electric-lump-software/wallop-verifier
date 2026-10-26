@@ -140,6 +140,7 @@ fn value_with_a_reason_or_neither_fails_the_window() {
         ..FreqParams::value()
     };
     let report = run(&both);
+    assert!(!report.passed());
     assert_only(&report, &[StepName::WeatherObservationWindow]);
     assert!(
         fail_reason(&report, StepName::WeatherObservationWindow)
@@ -150,6 +151,7 @@ fn value_with_a_reason_or_neither_fails_the_window() {
         ..FreqParams::fallback()
     };
     let report = run(&neither);
+    assert!(!report.passed());
     assert_only(&report, &[StepName::WeatherObservationWindow]);
     assert!(
         fail_reason(&report, StepName::WeatherObservationWindow)

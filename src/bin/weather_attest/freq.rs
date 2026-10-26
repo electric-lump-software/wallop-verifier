@@ -58,6 +58,17 @@ impl FreqAttestInput {
         if exec.draw_id != lock.draw_id {
             return Err("the lock and execution receipts name different draws".into());
         }
+        // Exactly one of the value and the reason, as the verifier requires.
+        if exec.freq_value.is_some() == exec.freq_fallback_reason.is_some() {
+            let shown = |set: bool| if set { "set" } else { "null" };
+            return Err(format!(
+                "the execution receipt is unusable: it must carry freq_value or \
+                 freq_fallback_reason, not both or neither; it has freq_value {}, \
+                 freq_fallback_reason {}",
+                shown(exec.freq_value.is_some()),
+                shown(exec.freq_fallback_reason.is_some())
+            ));
+        }
         Ok(Self {
             draw_id: lock.draw_id,
             freq_start: lock.freq_start,
@@ -338,6 +349,28 @@ pub(crate) mod tests {
         };
         let (json, _, _) = build_freq_bundle(&p);
         assert!(FreqAttestInput::from_bundle(&ProofBundle::from_json(&json).unwrap()).is_err());
+    }
+
+    #[test]
+    fn from_bundle_refuses_a_value_with_a_reason_or_neither() {
+        let both = FreqParams {
+            freq_fallback_reason: Some(freq_v1::FALLBACK_NO_FREQUENCY.into()),
+            ..FreqParams::value()
+        };
+        let neither = FreqParams {
+            freq_fallback_reason: None,
+            ..FreqParams::fallback()
+        };
+        for (p, shown) in [
+            (both, "freq_value set, freq_fallback_reason set"),
+            (neither, "freq_value null, freq_fallback_reason null"),
+        ] {
+            let (json, _, _) = build_freq_bundle(&p);
+            let b = ProofBundle::from_json(&json).unwrap();
+            let err = FreqAttestInput::from_bundle(&b).unwrap_err();
+            assert!(err.contains(shown), "{err}");
+            assert_eq!(run(&b), ExitCode::from(2));
+        }
     }
 
     #[test]
