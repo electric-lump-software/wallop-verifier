@@ -17,6 +17,44 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+      - name: Check the vendored wallop vectors are on wallop main
+        working-directory: vendor/wallop
+        run: |
+          # A release must test against vectors wallop has published. Fail
+          # the tag unless vendor/wallop pins a commit on wallop main whose
+          # spec/vectors tree is the one main carried once that commit landed
+          # (for a branch commit merged into main, the merge commit's tree).
+          set -euo pipefail
+          PIN=$(git rev-parse HEAD)
+          if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+            git fetch --quiet --no-tags --unshallow origin +refs/heads/main:refs/remotes/origin/main
+          else
+            git fetch --quiet --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          fi
+
+          if ! git merge-base --is-ancestor "$PIN" origin/main; then
+            echo "ERROR: vendor/wallop pins $PIN, which is not on wallop main."
+            echo "       Repoint it to the wallop main commit that published these vectors."
+            exit 1
+          fi
+
+          # The first commit on main's first-parent line that contains the pin.
+          if git rev-list --first-parent origin/main | grep -x "$PIN" >/dev/null; then
+            MAIN_AT_PIN=$PIN
+          else
+            MAIN_AT_PIN=$(git rev-list --first-parent --ancestry-path "$PIN..origin/main" | tail -n 1)
+          fi
+
+          PINNED_VECTORS=$(git rev-parse "$PIN:spec/vectors")
+          MAIN_VECTORS=$(git rev-parse "$MAIN_AT_PIN:spec/vectors")
+          if [ "$PINNED_VECTORS" != "$MAIN_VECTORS" ]; then
+            echo "ERROR: vendor/wallop's spec/vectors differ from wallop main's at that point."
+            echo "  pinned commit $PIN: spec/vectors $PINNED_VECTORS"
+            echo "  main commit   $MAIN_AT_PIN: spec/vectors $MAIN_VECTORS"
+            exit 1
+          fi
+
+          echo "OK: vendor/wallop $PIN is on wallop main; spec/vectors $PINNED_VECTORS."
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
