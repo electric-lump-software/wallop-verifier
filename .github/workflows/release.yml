@@ -17,48 +17,74 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - name: Check the vendored wallop vectors are on wallop main
-        working-directory: vendor/wallop
+          fetch-depth: 0
+      - name: Check the tagged commit is on wallop_rs main
         run: |
-          # A release must test against vectors wallop has published. Fail
-          # the tag unless vendor/wallop pins a commit on wallop main whose
-          # spec/vectors tree is the one main carried once that commit landed
-          # (for a branch commit merged into main, the merge commit's tree).
           set -euo pipefail
-          PIN=$(git rev-parse HEAD)
-          if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
-            git fetch --quiet --no-tags --unshallow origin +refs/heads/main:refs/remotes/origin/main
-          else
-            git fetch --quiet --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          TAGGED=$(git rev-parse --verify -q 'HEAD^{commit}' || true)
+          git fetch --quiet --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if [ -z "$TAGGED" ]; then
+            echo "ERROR: could not read the tagged commit."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$TAGGED" refs/remotes/origin/main; then
+            echo "ERROR: the tag points at $TAGGED, which is not on wallop_rs main."
+            exit 1
+          fi
+          echo "OK: tagged commit $TAGGED is on wallop_rs main."
+      - name: Check the vendored wallop vectors are wallop main's
+        env:
+          WALLOP_URL: https://github.com/electric-lump-software/wallop.git
+        run: |
+          # Fails unless the commit the tagged tree pins at vendor/wallop
+          # is an ancestor of wallop main and its spec/vectors tree equals
+          # the spec/vectors tree at the tip of wallop main.
+          set -euo pipefail
+          SUB="$GITHUB_WORKSPACE/vendor/wallop"
+          PIN=$(git -C "$GITHUB_WORKSPACE" rev-parse --verify -q HEAD:vendor/wallop || true)
+          if [ -z "$PIN" ]; then
+            echo "ERROR: could not read the vendor/wallop gitlink from the tagged commit."
+            exit 1
           fi
 
-          if ! git merge-base --is-ancestor "$PIN" origin/main; then
+          if [ "$(git -C "$SUB" rev-parse --is-shallow-repository)" = true ]; then
+            git -C "$SUB" fetch --quiet --no-tags --unshallow "$WALLOP_URL" +refs/heads/main:refs/remotes/wallop-main
+          else
+            git -C "$SUB" fetch --quiet --no-tags "$WALLOP_URL" +refs/heads/main:refs/remotes/wallop-main
+          fi
+          if ! git -C "$SUB" cat-file -e "$PIN^{commit}" 2>/dev/null; then
+            git -C "$SUB" fetch --quiet --no-tags "$WALLOP_URL" "$PIN" || true
+          fi
+          if ! git -C "$SUB" cat-file -e "$PIN^{commit}" 2>/dev/null; then
+            echo "ERROR: vendor/wallop pins $PIN, which $WALLOP_URL does not have."
+            exit 1
+          fi
+
+          if ! git -C "$SUB" merge-base --is-ancestor "$PIN" refs/remotes/wallop-main; then
             echo "ERROR: vendor/wallop pins $PIN, which is not on wallop main."
-            echo "       Repoint it to the wallop main commit that published these vectors."
             exit 1
           fi
 
-          # The first commit on main's first-parent line that contains the pin.
-          if git rev-list --first-parent origin/main | grep -x "$PIN" >/dev/null; then
-            MAIN_AT_PIN=$PIN
-          else
-            MAIN_AT_PIN=$(git rev-list --first-parent --ancestry-path "$PIN..origin/main" | tail -n 1)
+          PINNED_VECTORS=$(git -C "$SUB" rev-parse --verify -q "$PIN:spec/vectors" || true)
+          MAIN_VECTORS=$(git -C "$SUB" rev-parse --verify -q refs/remotes/wallop-main:spec/vectors || true)
+          if [ -z "$PINNED_VECTORS" ] || [ -z "$MAIN_VECTORS" ]; then
+            echo "ERROR: could not read spec/vectors (pinned: '$PINNED_VECTORS', wallop main: '$MAIN_VECTORS')."
+            exit 1
           fi
-
-          PINNED_VECTORS=$(git rev-parse "$PIN:spec/vectors")
-          MAIN_VECTORS=$(git rev-parse "$MAIN_AT_PIN:spec/vectors")
           if [ "$PINNED_VECTORS" != "$MAIN_VECTORS" ]; then
-            echo "ERROR: vendor/wallop's spec/vectors differ from wallop main's at that point."
+            echo "ERROR: vendor/wallop's spec/vectors differ from the tip of wallop main."
             echo "  pinned commit $PIN: spec/vectors $PINNED_VECTORS"
-            echo "  main commit   $MAIN_AT_PIN: spec/vectors $MAIN_VECTORS"
+            echo "  wallop main tip: spec/vectors $MAIN_VECTORS"
             exit 1
           fi
 
-          echo "OK: vendor/wallop $PIN is on wallop main; spec/vectors $PINNED_VECTORS."
+          echo "OK: vendor/wallop $PIN is on wallop main; spec/vectors $PINNED_VECTORS matches main's tip."
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+      - run: cargo test --features cli
       - run: cargo install wasm-pack
       - run: wasm-pack build --target web --release
       - run: tar czf wallop-verifier-wasm-${{ github.ref_name }}.tar.gz -C pkg .
