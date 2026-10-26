@@ -242,6 +242,14 @@ fn v11_execution_receipt_uses_lock_receipt_hash() {
                 lock_hash,
                 "{name}"
             );
+            // The signed payload carries it too, not only the input.
+            let signed: serde_json::Value =
+                serde_json::from_str(exec["payload_jcs"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                signed["lock_receipt_hash"].as_str().unwrap(),
+                lock_hash,
+                "{name} payload_jcs"
+            );
         }
     }
 

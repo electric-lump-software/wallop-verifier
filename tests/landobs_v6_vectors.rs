@@ -97,10 +97,14 @@ fn schedule_vector_matches_the_constants_and_the_maths() {
     assert_eq!(v["lock_offset_secs"], landobs_v1::LOCK_OFFSET_SECS);
 
     let cases = v["cases"].as_array().expect("cases is a list");
+    // Every schedule time, freq_start included, is canonical RFC 3339 with
+    // six fractional digits; freq_v1 exposes the crate's one public renderer.
     let at = freq_v1::format_freq_start;
     let mut at_bound = None;
+    let mut rounds = Vec::new();
     for c in cases {
         let round = c["drand_round"].as_u64().unwrap();
+        rounds.push(round);
         let published = wallop_verifier::drand::quicknet_round_time(round).unwrap();
         let wt = landobs_v1::weather_time_for_round(round).unwrap();
         assert_eq!(at(published), c["published_at"].as_str().unwrap(), "{c}");
@@ -126,6 +130,11 @@ fn schedule_vector_matches_the_constants_and_the_maths() {
         .find(|c| c["drand_round"].as_u64() == Some(round - 1))
         .expect("no case for the round before the bound");
     assert_eq!(before["weather_time"].as_str().unwrap(), at(wt - 3600));
+    // And at least one other round, away from the bound.
+    assert!(
+        rounds.iter().any(|r| *r != round && *r != round - 1),
+        "no case other than the bound and the round before it: {rounds:?}"
+    );
 }
 
 /// `weather-value-landobs-v1.json`, read typed: each `row` field stays its
@@ -183,7 +192,12 @@ fn value_vector_matches_the_bounds_grammar_and_row_rules() {
     assert_eq!(v.bounds.rh, [RH_MIN, RH_MAX]);
     assert_eq!(v.bounds.vis, [VIS_MIN, VIS_MAX]);
 
-    assert!(!v.valid.is_empty() && !v.invalid.is_empty() && !v.from_row.is_empty());
+    // The counts are pinned, so a dropped case fails rather than shrinking
+    // the check.
+    assert_eq!(
+        (v.valid.len(), v.invalid.len(), v.from_row.len()),
+        (7, 30, 55)
+    );
     for c in &v.valid {
         let p = landobs_v1::parse_weather_value(&c.value)
             .unwrap_or_else(|e| panic!("{}: {e}", c.value));
@@ -375,21 +389,177 @@ fn negative_bundle_vectors_fail_at_exactly_the_named_steps() {
     }
 }
 
+/// The negative cases the vector carries beyond `V6_NEGATIVE_CASES` (which
+/// the crate builds itself), with their exact failing step sets. Together
+/// they are every case in `proof-bundle-v6-negative.json`.
+const VECTOR_ONLY_NEGATIVE_CASES: &[(&str, &[&str])] = &[
+    (
+        "unknown_v6_tag",
+        &[
+            "bundle_shape",
+            "receipt_field_consistency",
+            "weather_observation_window",
+        ],
+    ),
+    (
+        "entropy_composition_mismatch",
+        &[
+            "bundle_shape",
+            "receipt_field_consistency",
+            "weather_observation_window",
+        ],
+    ),
+    (
+        "observation_time_without_weather_value",
+        &[
+            "receipt_field_consistency",
+            "seed_recomputation",
+            "weather_observation_window",
+        ],
+    ),
+    (
+        "freq_window_with_weather_value",
+        &[
+            "receipt_field_consistency",
+            "seed_recomputation",
+            "weather_observation_window",
+        ],
+    ),
+    (
+        "freq_window_with_observation_time",
+        &[
+            "receipt_field_consistency",
+            "seed_recomputation",
+            "weather_observation_window",
+        ],
+    ),
+    (
+        "fallback_with_weather_value",
+        &[
+            "receipt_field_consistency",
+            "seed_recomputation",
+            "weather_observation_window",
+        ],
+    ),
+    (
+        "fallback_with_observation_time",
+        &[
+            "receipt_field_consistency",
+            "seed_recomputation",
+            "weather_observation_window",
+        ],
+    ),
+    (
+        "fallback_executed_before_round_published",
+        &["drand_bls_signature"],
+    ),
+    (
+        "freq_start_not_derived_from_round",
+        &["weather_observation_window"],
+    ),
+    (
+        "freq_start_not_on_grid",
+        &["bundle_shape", "weather_observation_window"],
+    ),
+    (
+        "freq_locked_at_after_latest_lock_at",
+        &["weather_observation_window"],
+    ),
+    (
+        "freq_round_published_before_lock",
+        &["drand_bls_signature", "weather_observation_window"],
+    ),
+    ("freq_value_and_reason", &["weather_observation_window"]),
+    (
+        "freq_value_null_reason_null",
+        &["weather_observation_window"],
+    ),
+    (
+        "freq_weather_reason",
+        &["bundle_shape", "weather_observation_window"],
+    ),
+    ("freq_value_stuck_run", &["bundle_shape"]),
+    ("freq_value_zero_reading", &["bundle_shape"]),
+    ("freq_value_out_of_bounds", &["bundle_shape"]),
+    ("freq_value_four_digits", &["bundle_shape"]),
+    (
+        "weather_value_under_freq_tag",
+        &["bundle_shape", "seed_recomputation"],
+    ),
+    (
+        "weather_station_under_freq_tag",
+        &["bundle_shape", "receipt_field_consistency"],
+    ),
+    (
+        "freq_lock_with_landobs_exec",
+        &[
+            "bundle_shape",
+            "receipt_field_consistency",
+            "weather_observation_window",
+        ],
+    ),
+    (
+        "landobs_lock_with_freq_exec",
+        &[
+            "bundle_shape",
+            "receipt_field_consistency",
+            "weather_observation_window",
+        ],
+    ),
+    (
+        "unknown_freq_tag",
+        &[
+            "bundle_shape",
+            "lock_signature",
+            "receipt_field_consistency",
+            "weather_observation_window",
+        ],
+    ),
+    (
+        "freq_executed_before_round_published",
+        &["drand_bls_signature"],
+    ),
+    ("freq_entropy_value_mismatch", &["drand_bls_signature"]),
+];
+
+/// How many cases `proof-bundle-v6-negative.json` carries.
+const NEGATIVE_CASE_COUNT: usize = 59;
+
 #[test]
-fn negative_vector_carries_every_required_case_with_the_same_steps() {
+fn negative_vector_carries_exactly_the_pinned_cases_with_their_steps() {
     let Some(v) = vector("proof-bundle-v6-negative.json") else {
         return;
     };
     let cases = v["cases"].as_array().expect("cases is a list");
-    for (name, steps) in V6_NEGATIVE_CASES {
-        let case = cases
-            .iter()
-            .find(|c| c["name"] == *name)
-            .unwrap_or_else(|| panic!("proof-bundle-v6-negative.json has no case {name}"));
-        assert_eq!(
-            step_names(&case["expected_failing_steps"]),
-            sorted(steps.iter().map(|s| s.to_string())),
-            "{name}"
-        );
+    assert_eq!(cases.len(), NEGATIVE_CASE_COUNT);
+    let got: BTreeMap<&str, Vec<String>> = cases
+        .iter()
+        .map(|c| {
+            (
+                c["name"].as_str().unwrap(),
+                step_names(&c["expected_failing_steps"]),
+            )
+        })
+        .collect();
+    assert_eq!(got.len(), cases.len(), "case names are not unique");
+
+    let pinned: BTreeMap<&str, Vec<String>> = V6_NEGATIVE_CASES
+        .iter()
+        .chain(VECTOR_ONLY_NEGATIVE_CASES)
+        .map(|(name, steps)| (*name, sorted(steps.iter().map(|s| s.to_string()))))
+        .collect();
+    assert_eq!(
+        pinned.len(),
+        V6_NEGATIVE_CASES.len() + VECTOR_ONLY_NEGATIVE_CASES.len(),
+        "a pinned name is listed twice"
+    );
+    assert_eq!(pinned.len(), NEGATIVE_CASE_COUNT);
+    assert_eq!(
+        got.keys().collect::<Vec<_>>(),
+        pinned.keys().collect::<Vec<_>>(),
+        "case names"
+    );
+    for (name, steps) in &pinned {
+        assert_eq!(&got[name], steps, "{name}");
     }
 }
