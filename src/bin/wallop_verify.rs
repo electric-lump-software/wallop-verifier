@@ -490,7 +490,7 @@ fn run_verify(path: &str, pins: &PinConfig, mode: VerifierMode) -> ExitCode {
     println!("wallop-verify {version}");
     println!();
     println!("  Mode ................ {}", report.mode);
-    println!("  Draw ................ {}", &bundle.draw_id);
+    println!("  Draw ................ {}", bundle.draw_id);
     if let Some(ref kid) = report.operator_key_id {
         println!("  Operator key ........ {kid}");
     }
@@ -940,7 +940,7 @@ fn print_report(
     for line in trust_root.unwrap_or_default() {
         println!("  Trust root .......... {line}");
     }
-    println!("  Draw ................ {}", &bundle.draw_id);
+    println!("  Draw ................ {}", bundle.draw_id);
     if let Some(ref kid) = report.operator_key_id {
         println!("  Operator key ........ {kid}");
     }
