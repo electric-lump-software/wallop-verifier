@@ -3790,7 +3790,7 @@ mod tests {
 
     #[test]
     fn resolver_callsite_drops_legacy_sentinel_string_in_at_variant() {
-        // Belt-and-braces (Colin Q5(b)): an upstream bug putting the
+        // Belt-and-braces: an upstream bug putting the
         // legacy "0001-01-01..." string into At(_) would silently
         // pass any <= comparison. The call-site filter refuses it.
         let (json, pk_hex, signing_key_id) =
